@@ -58,6 +58,7 @@ import type {
   PwdSafeAgentApi,
   StreamItem
 } from "../../../shared/types";
+import { orderStreamItemsForDisplay } from "../streamOrdering";
 
 export function App(): JSX.Element {
   const dispatch = useDispatch<AppDispatch>();
@@ -352,7 +353,9 @@ function MessagePane({
             <span>输入系统名称、建设单位、等保级别或直接粘贴现有资料。</span>
           </div>
         ) : (
-          session.items.map((item) => <StreamRow key={item.id} item={item} onPreviewArtifact={onPreviewArtifact} />)
+          orderStreamItemsForDisplay(session.items).map((item) => (
+            <StreamRow key={item.id} item={item} onPreviewArtifact={onPreviewArtifact} />
+          ))
         )}
       </ScrollArea.Viewport>
       <ScrollArea.Scrollbar className="scrollbar" orientation="vertical">
@@ -370,9 +373,10 @@ function StreamRow({
   onPreviewArtifact: (artifactId: string) => void;
 }): JSX.Element {
   if (item.kind === "message") {
+    const isUser = item.role === "user";
     return (
       <article className={`message-row ${item.role}`}>
-        <div className="avatar">{item.role === "user" ? <User size={15} /> : <Bot size={15} />}</div>
+        {!isUser ? <div className="avatar"><Bot size={15} /></div> : null}
         <div className="message-body">
           {item.role === "assistant" ? (
             <IncremarkContent content={item.content} isFinished={item.isFinished} />
@@ -380,6 +384,7 @@ function StreamRow({
             <p>{item.content}</p>
           )}
         </div>
+        {isUser ? <div className="avatar"><User size={15} /></div> : null}
       </article>
     );
   }
@@ -838,6 +843,7 @@ function SettingsPanel({
   onSaved: (settings: AppSettings) => void;
 }): JSX.Element {
   const [baseUrl, setBaseUrl] = useState(settings?.openai.baseUrl || "https://api.openai.com/v1");
+  const [imageBaseUrl, setImageBaseUrl] = useState(settings?.openai.imageBaseUrl || "");
   const [chatModel, setChatModel] = useState(settings?.openai.chatModel || "gpt-5.5");
   const [imageModel, setImageModel] = useState(settings?.openai.imageModel || "gpt-image-2");
   const [imageSize, setImageSize] = useState(settings?.openai.imageSize || "1536x1024");
@@ -849,11 +855,13 @@ function SettingsPanel({
   const [maxTokens, setMaxTokens] = useState(settings?.openai.maxOutputTokens || 16000);
   const [execBashEnabled, setExecBashEnabled] = useState(settings?.agent.execBashEnabled ?? false);
   const [apiKey, setApiKey] = useState("");
+  const [imageApiKey, setImageApiKey] = useState("");
 
   async function save(): Promise<void> {
     const next = await api.settings.save({
       openai: {
         baseUrl,
+        imageBaseUrl,
         chatModel,
         imageModel,
         imageSize,
@@ -861,7 +869,8 @@ function SettingsPanel({
         autoImageGeneration,
         requestTimeoutMs: timeout,
         maxOutputTokens: maxTokens,
-        apiKey: apiKey.trim() || undefined
+        apiKey: apiKey.trim() || undefined,
+        imageApiKey: imageApiKey.trim() || undefined
       },
       document: {
         autoPdfExport,
@@ -920,8 +929,24 @@ function SettingsPanel({
                   />
                 </label>
                 <label>
+                  生图 API Key
+                  <input
+                    value={imageApiKey}
+                    onChange={(event) => setImageApiKey(event.target.value)}
+                    placeholder={settings?.openai.imageApiKeyConfigured ? "已配置，留空保持不变" : "留空沿用 API Key"}
+                  />
+                </label>
+                <label>
                   Base URL
                   <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} />
+                </label>
+                <label>
+                  生图 Base URL
+                  <input
+                    value={imageBaseUrl}
+                    onChange={(event) => setImageBaseUrl(event.target.value)}
+                    placeholder="留空沿用 Base URL"
+                  />
                 </label>
                 <label>
                   Chat 模型

@@ -225,22 +225,26 @@ export interface AppSettings {
   };
   openai: {
     baseUrl: string;
+    imageBaseUrl: string;
     chatModel: string;
     imageModel: string;
     imageSize: string;
     requestTimeoutMs: number;
     apiKeyConfigured: boolean;
+    imageApiKeyConfigured: boolean;
   };
 }
 
 export interface UpdateAppSettingsInput {
   openai: {
     baseUrl: string;
+    imageBaseUrl: string;
     chatModel: string;
     imageModel: string;
     imageSize: string;
     requestTimeoutMs: number;
     apiKey?: string;
+    imageApiKey?: string;
   };
 }
 ```
@@ -892,7 +896,13 @@ await client.chat.completions.create({
 ### 12.3 OpenAI 生图接入建议
 
 ```ts
-await client.images.generate({
+const imageBaseURL = process.env.OPENAI_IMAGE_BASE_URL || process.env.OPENAI_BASE_URL;
+const imageClient = new OpenAI({
+  apiKey: process.env.OPENAI_IMAGE_API_KEY || process.env.OPENAI_API_KEY,
+  baseURL: imageBaseURL,
+});
+
+await imageClient.images.generate({
   model: process.env.OPENAI_IMAGE_MODEL!,
   prompt,
   size: process.env.OPENAI_IMAGE_SIZE,
@@ -950,3 +960,5 @@ await client.images.generate({
 - `stream.item.added` 与 `stream.item.updated` 用于前端增量展示消息、工具调用、阶段提示和文件卡片。
 - `session.deleted` 用于前端同步移除会话，并保持侧边栏当前选择始终有效。
 - `AGENT_EXEC_BASH_ENABLED` 已作为设置项暴露，仍默认关闭；开启后 Agent 才会注册和执行 `exec_bash` 工具。
+- `OPENAI_IMAGE_BASE_URL` 已作为设置项暴露；填写后仅生图请求使用该地址，留空时沿用 `OPENAI_BASE_URL`。
+- `OPENAI_IMAGE_API_KEY` 已作为设置项暴露；填写后仅生图请求使用该密钥，留空时沿用 `OPENAI_API_KEY`。

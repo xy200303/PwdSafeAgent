@@ -18,6 +18,7 @@ import {
   writeUtf8File
 } from "./agentTools";
 import { buildAgentChatTools, executeAgentToolCall } from "./agentToolRegistry";
+import { shouldCreateDraftArtifact } from "./artifactIntent";
 import { buildArtifactPreview } from "./artifactPreview";
 import { exportDocxToPdf } from "./documentExport";
 import { generateDiagramImage, shouldGenerateDiagramArtifacts, type DiagramKind } from "./imageGeneration";
@@ -157,6 +158,7 @@ function loadEnv(): AppSettings {
     },
     openai: {
       baseUrl: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
+      imageBaseUrl: process.env.OPENAI_IMAGE_BASE_URL || "",
       chatModel: process.env.OPENAI_CHAT_MODEL || "gpt-5.5",
       imageModel: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
       imageSize: process.env.OPENAI_IMAGE_SIZE || "1536x1024",
@@ -164,7 +166,8 @@ function loadEnv(): AppSettings {
       autoImageGeneration: parseBooleanEnv(process.env.OPENAI_AUTO_IMAGE_GENERATION, true),
       requestTimeoutMs: Number(process.env.OPENAI_REQUEST_TIMEOUT_MS || 120000),
       maxOutputTokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS || 16000),
-      apiKeyConfigured: Boolean(process.env.OPENAI_API_KEY)
+      apiKeyConfigured: Boolean(process.env.OPENAI_API_KEY),
+      imageApiKeyConfigured: Boolean(process.env.OPENAI_IMAGE_API_KEY)
     },
     document: {
       autoPdfExport: parseBooleanEnv(process.env.AGENT_AUTO_PDF_EXPORT, false),
@@ -178,9 +181,12 @@ function loadEnv(): AppSettings {
 
 function saveEnv(input: UpdateAppSettingsInput): AppSettings {
   const currentKey = process.env.OPENAI_API_KEY || "";
+  const currentImageKey = process.env.OPENAI_IMAGE_API_KEY || "";
   const lines = [
     `OPENAI_API_KEY=${input.openai.apiKey ?? currentKey}`,
     `OPENAI_BASE_URL=${input.openai.baseUrl}`,
+    `OPENAI_IMAGE_BASE_URL=${input.openai.imageBaseUrl}`,
+    `OPENAI_IMAGE_API_KEY=${input.openai.imageApiKey ?? currentImageKey}`,
     `OPENAI_CHAT_MODEL=${input.openai.chatModel}`,
     `OPENAI_IMAGE_MODEL=${input.openai.imageModel}`,
     `OPENAI_IMAGE_SIZE=${input.openai.imageSize}`,
@@ -405,10 +411,19 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
     "方案需要覆盖系统概况、密码应用需求、密码应用设计、密钥管理、实施计划、风险与符合性说明等章节。",
     "回复使用中文 Markdown，必要时给出缺失资料清单。",
     "不要编造用户未提供的关键事实；若资料不足，用“待补充/需确认”标识。",
+    "工具调用由你按任务需要自主决策：寒暄、普通问答和资料澄清阶段不要默认读取模板或附件；只有生成/完善方案、分析附件、导出文件、查询最新资料等确有需要时，才调用对应工具。",
     `当前时间：${getCurrentTimeText()}`
   ].join("\n");
 
   const messages: ChatCompletionMessageParam[] = [{ role: "system", content: systemPrompt }];
+  const resources = buildAvailableResourceContext(session);
+  if (resources) {
+    messages.push({
+      role: "system",
+      content: resources
+    });
+  }
+
   const memory = formatSessionMemory(session.id);
   if (memory) {
     messages.push({
@@ -426,6 +441,42 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
     });
   }
   return messages;
+}
+
+function buildAvailableResourceContext(session: ChatSession): string {
+  const lines = [
+    "以下是本会话可按需读取的文件资源。注意：这些文件尚未读取；只有在用户任务需要时才调用 read_word/read_pdf/read_file。",
+    "Word 方案模板：docs/密码应用方案.docx"
+  ];
+  const sessionAttachments = getSessionAttachments(session.id);
+  if (sessionAttachments.length) {
+    lines.push(
+      "用户附件：",
+      ...sessionAttachments.map((attachment, index) => `${index + 1}. ${attachment.name} (${attachment.path})`)
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function getSessionAttachments(sessionId: string): AttachmentRef[] {
+  const session = sessions.get(sessionId);
+  const ids = new Set<string>();
+  for (const item of session?.items ?? []) {
+    if (item.kind === "message") {
+      for (const attachmentId of item.attachmentIds ?? []) {
+        ids.add(attachmentId);
+      }
+    }
+  }
+
+  return Array.from(attachments.values()).filter(
+    (attachment) => attachment.sessionId === sessionId || ids.has(attachment.id)
+  );
+}
+
+function getSessionReadableFiles(sessionId: string): string[] {
+  return getSessionAttachments(sessionId).map((attachment) => attachment.path);
 }
 
 async function streamMockResponse(sessionId: string, assistantItem: StreamItem): Promise<void> {
@@ -450,15 +501,32 @@ async function streamMockResponse(sessionId: string, assistantItem: StreamItem):
   }
 }
 
-async function runOpenAIResponse(sessionId: string, assistantItem: StreamItem, controller: AbortController): Promise<void> {
-  if (assistantItem.kind !== "message") return;
+function createAssistantMessage(sessionId: string): MessageStreamItem {
+  return addItem(sessionId, {
+    id: createId("msg"),
+    kind: "message",
+    role: "assistant",
+    content: "",
+    isFinished: false,
+    createdAt: now()
+  }) as MessageStreamItem;
+}
+
+async function runOpenAIResponse(
+  sessionId: string,
+  controller: AbortController,
+  userPrompt: string,
+  onAssistantCreated: (assistantItem: MessageStreamItem) => void
+): Promise<MessageStreamItem> {
   const settings = loadEnv();
   const session = sessions.get(sessionId);
   if (!session) throw new Error("Session not found");
 
   if (!process.env.OPENAI_API_KEY) {
+    const assistantItem = createAssistantMessage(sessionId);
+    onAssistantCreated(assistantItem);
     await streamMockResponse(sessionId, assistantItem);
-    return;
+    return assistantItem;
   }
 
   const client = new OpenAI({
@@ -467,12 +535,14 @@ async function runOpenAIResponse(sessionId: string, assistantItem: StreamItem, c
     timeout: settings.openai.requestTimeoutMs
   });
 
-  const messages = await runOpenAIToolPlanning(sessionId, client, settings, buildMessages(session), controller);
+  const messages = await runOpenAIToolPlanning(sessionId, client, settings, buildMessages(session), controller, userPrompt);
   messages.push({
     role: "system",
     content: "工具调用阶段已结束。请基于用户需求、模板上下文、附件内容和工具结果，输出最终中文 Markdown 回复。"
   });
 
+  const assistantItem = createAssistantMessage(sessionId);
+  onAssistantCreated(assistantItem);
   const stream = await client.chat.completions.create(
     {
       model: settings.openai.chatModel,
@@ -489,6 +559,8 @@ async function runOpenAIResponse(sessionId: string, assistantItem: StreamItem, c
     assistantItem.content += delta;
     updateItem(sessionId, assistantItem);
   }
+
+  return assistantItem;
 }
 
 async function runOpenAIToolPlanning(
@@ -496,7 +568,8 @@ async function runOpenAIToolPlanning(
   client: OpenAI,
   settings: AppSettings,
   messages: ChatCompletionMessageParam[],
-  controller: AbortController
+  controller: AbortController,
+  userPrompt: string
 ): Promise<ChatCompletionMessageParam[]> {
   const tools = buildAgentChatTools({ includeExecBash: settings.agent.execBashEnabled });
   const toolMessages = [...messages];
@@ -545,8 +618,10 @@ async function runOpenAIToolPlanning(
           sessionTitle: sanitizeFileName(sessions.get(sessionId)?.title || "密码应用方案"),
           memory: formatSessionMemory(sessionId),
           settings,
+          userPrompt,
           signal: controller.signal,
           allowedReadDirs: [join(rootDir, "docs"), inputDir, outputDir],
+          allowedReadFiles: getSessionReadableFiles(sessionId),
           execBashEnabled: settings.agent.execBashEnabled
         });
         finishToolCall(sessionId, toolItem, "success", result.summary);
@@ -688,11 +763,6 @@ async function emitDraftArtifact(
   await emitPdfArtifact(sessionId, docxPath, controller);
 }
 
-function shouldCreateDraftArtifact(prompt: string, content: string): boolean {
-  if (content.trim().length < 120) return false;
-  return /方案|报告|文档|导出|生成|初稿|草稿/.test(`${prompt}\n${content}`);
-}
-
 async function emitPdfArtifact(sessionId: string, docxPath: string, controller: AbortController): Promise<void> {
   const settings = loadEnv();
   if (!settings.document.autoPdfExport) return;
@@ -747,8 +817,8 @@ async function emitDiagramArtifacts(
     try {
       const result = await generateDiagramImage(
         {
-          apiKey: process.env.OPENAI_API_KEY,
-          baseUrl: settings.openai.baseUrl,
+          apiKey: process.env.OPENAI_IMAGE_API_KEY || process.env.OPENAI_API_KEY,
+          baseUrl: settings.openai.imageBaseUrl || settings.openai.baseUrl,
           imageModel: settings.openai.imageModel,
           imageSize: settings.openai.imageSize,
           imageQuality: settings.openai.imageQuality,
@@ -816,7 +886,7 @@ async function handlePrompt(input: ChatPromptInput): Promise<{ accepted: true }>
   let toolItem: StreamItem | undefined;
   let assistantItem: MessageStreamItem | undefined;
 
-  void prepareAgentContext(input.sessionId, input, controller)
+  void Promise.resolve()
     .then(async () => {
       toolItem = startToolCall(
         input.sessionId,
@@ -824,17 +894,9 @@ async function handlePrompt(input: ChatPromptInput): Promise<{ accepted: true }>
         "正在使用 OpenAI Chat Completions 生成流式回复"
       );
 
-      const nextAssistant: MessageStreamItem = {
-        id: createId("msg"),
-        kind: "message",
-        role: "assistant",
-        content: "",
-        isFinished: false,
-        createdAt: now()
-      };
-      assistantItem = addItem(input.sessionId, nextAssistant) as MessageStreamItem;
-
-      await runOpenAIResponse(input.sessionId, assistantItem, controller);
+      assistantItem = await runOpenAIResponse(input.sessionId, controller, input.message, (createdItem) => {
+        assistantItem = createdItem;
+      });
       assistantItem.isFinished = true;
       updateItem(input.sessionId, assistantItem);
       finishToolCall(input.sessionId, toolItem, "success", "流式回复完成");

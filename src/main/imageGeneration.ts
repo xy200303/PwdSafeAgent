@@ -3,6 +3,7 @@ import { basename, dirname, join } from "node:path";
 import OpenAI from "openai";
 import type { ImageGenerateParamsNonStreaming, ImagesResponse } from "openai/resources/images";
 import { compactText, sanitizeFileName } from "./agentTools";
+import { hasDiagramArtifactIntent } from "./artifactIntent";
 
 export type DiagramKind = "architecture" | "flow";
 
@@ -33,10 +34,11 @@ export interface GeneratedDiagramResult {
   model: string;
 }
 
-const DIAGRAM_KEYWORDS = /流程图|架构图|拓扑图|部署图|技术架构|网络拓扑|业务流程|图示|配图|密码应用方案|完整方案|生成方案/;
+const DIAGRAM_CONTENT_KEYWORDS = /架构|流程|拓扑|密码|密钥|加密|签名|验签|证书|身份鉴别|日志审计|合规|等保/;
 
 export function shouldGenerateDiagramArtifacts(prompt: string, content: string): boolean {
-  return DIAGRAM_KEYWORDS.test(`${prompt}\n${content}`);
+  if (!hasDiagramArtifactIntent(prompt)) return false;
+  return DIAGRAM_CONTENT_KEYWORDS.test(`${prompt}\n${content}`);
 }
 
 export function buildDiagramPrompt(input: DiagramGenerationInput): string {
@@ -159,8 +161,8 @@ function createLocalSvgDiagram(kind: DiagramKind, title: string, input: DiagramG
   const orgName = pickFact(input.prompt, ["建设单位", "单位名称"]) || "建设单位";
   const subtitle =
     kind === "architecture"
-      ? "本地演示图：配置 OPENAI_API_KEY 后将使用 gpt-image-2 生成正式图像"
-      : "本地演示图：配置 OPENAI_API_KEY 后将使用 gpt-image-2 生成正式流程图";
+      ? "本地演示图：配置 OPENAI_IMAGE_API_KEY 或 OPENAI_API_KEY 后将使用 gpt-image-2 生成正式图像"
+      : "本地演示图：配置 OPENAI_IMAGE_API_KEY 或 OPENAI_API_KEY 后将使用 gpt-image-2 生成正式流程图";
   const nodes =
     kind === "architecture"
       ? [

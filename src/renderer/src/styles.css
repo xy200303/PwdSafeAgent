@@ -364,11 +364,13 @@ button {
   grid-template-columns: 30px minmax(0, 760px);
   gap: 12px;
   margin: 0 auto 18px;
-  max-width: 860px;
+  width: 100%;
+  max-width: 1120px;
+  justify-content: start;
 }
 
 .message-row.user {
-  grid-template-columns: 30px minmax(0, 640px);
+  grid-template-columns: minmax(0, 640px) 30px;
   justify-content: end;
 }
 
@@ -391,7 +393,12 @@ button {
 }
 
 .message-row.user .message-body {
-  border-left-color: #1b4f8a;
+  justify-self: end;
+  width: fit-content;
+  max-width: min(640px, 100%);
+  border-right: 3px solid #1b4f8a;
+  border-left: 0;
+  padding: 1px 14px 1px 0;
 }
 
 .message-body p {

@@ -116,6 +116,7 @@ export interface AppSettings {
   };
   openai: {
     baseUrl: string;
+    imageBaseUrl: string;
     chatModel: string;
     imageModel: string;
     imageSize: string;
@@ -124,6 +125,7 @@ export interface AppSettings {
     requestTimeoutMs: number;
     maxOutputTokens: number;
     apiKeyConfigured: boolean;
+    imageApiKeyConfigured: boolean;
   };
   document: {
     autoPdfExport: boolean;
@@ -137,6 +139,7 @@ export interface AppSettings {
 export interface UpdateAppSettingsInput {
   openai: {
     baseUrl: string;
+    imageBaseUrl: string;
     chatModel: string;
     imageModel: string;
     imageSize: string;
@@ -145,6 +148,7 @@ export interface UpdateAppSettingsInput {
     requestTimeoutMs: number;
     maxOutputTokens: number;
     apiKey?: string;
+    imageApiKey?: string;
   };
   document: {
     autoPdfExport: boolean;

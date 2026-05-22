@@ -11,6 +11,7 @@ import {
   writeUtf8File,
   type BuiltinToolName
 } from "./agentTools";
+import { hasDiagramArtifactIntent } from "./artifactIntent";
 import { exportDocxToPdf } from "./documentExport";
 import { generateDiagramImage, type DiagramKind } from "./imageGeneration";
 import { writeSchemeDocxFromTemplate } from "./schemeDocument";
@@ -23,8 +24,10 @@ export interface AgentToolExecutionContext {
   sessionTitle: string;
   memory: string;
   settings: AppSettings;
+  userPrompt?: string;
   signal?: AbortSignal;
   allowedReadDirs: string[];
+  allowedReadFiles?: string[];
   execBashEnabled: boolean;
 }
 
@@ -183,7 +186,8 @@ export function buildAgentChatTools(options: { includeExecBash: boolean }): Chat
       type: "function",
       function: {
         name: "image_generate",
-        description: "生成密码应用技术架构图或业务流程图，并发送为前端文件卡片。",
+        description:
+          "生成密码应用技术架构图或业务流程图，并发送为前端文件卡片。仅当用户明确要求生成方案交付物、架构图、流程图、拓扑图或配图时使用；寒暄、答疑、资料澄清阶段不要调用。",
         parameters: {
           type: "object",
           properties: {
@@ -406,7 +410,7 @@ async function executeReadFile(
   }
 
   const filePath = resolveToolPath(inputPath, context.rootDir);
-  assertPathInside(filePath, context.allowedReadDirs, "read_file");
+  assertPathAllowed(filePath, context.allowedReadDirs, context.allowedReadFiles ?? [], "read_file");
   const extension = extname(filePath).toLowerCase();
   if (requestedToolName === "read_word" && extension !== ".docx") {
     return {
@@ -487,12 +491,20 @@ async function executeImageGenerate(
   args: Record<string, unknown>,
   context: AgentToolExecutionContext
 ): Promise<AgentToolExecutionResult> {
+  if (!hasDiagramArtifactIntent(context.userPrompt || "")) {
+    return {
+      toolName: "image_generate",
+      summary: "未检测到明确生图意图，已跳过",
+      content: "image_generate skipped: user did not explicitly request a diagram or scheme artifact"
+    };
+  }
+
   const kind = normalizeDiagramKind(readStringArg(args, "kind"));
   const prompt = readStringArg(args, "prompt") || "生成密码应用方案配图";
   const result = await generateDiagramImage(
     {
-      apiKey: process.env.OPENAI_API_KEY,
-      baseUrl: context.settings.openai.baseUrl,
+      apiKey: process.env.OPENAI_IMAGE_API_KEY || process.env.OPENAI_API_KEY,
+      baseUrl: context.settings.openai.imageBaseUrl || context.settings.openai.baseUrl,
       imageModel: context.settings.openai.imageModel,
       imageSize: context.settings.openai.imageSize,
       imageQuality: context.settings.openai.imageQuality,
@@ -645,6 +657,18 @@ function assertPathInside(filePath: string, allowedDirs: string[], toolName: str
   if (!isAllowed) {
     throw new Error(`${toolName} 只能访问允许目录内的文件`);
   }
+}
+
+function assertPathAllowed(
+  filePath: string,
+  allowedDirs: string[],
+  allowedFiles: string[],
+  toolName: string
+): void {
+  const normalizedPath = resolve(filePath).toLowerCase();
+  const normalizedFiles = allowedFiles.map((file) => resolve(file).toLowerCase());
+  if (normalizedFiles.includes(normalizedPath)) return;
+  assertPathInside(filePath, allowedDirs, toolName);
 }
 
 function readStringArg(args: Record<string, unknown>, key: string): string {

@@ -96,6 +96,26 @@ describe("agentToolRegistry", () => {
     }
   });
 
+  it("allows model-selected reads for user-picked files explicitly whitelisted by the session", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-allowed-"));
+    const externalDir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-external-"));
+    const externalPath = join(externalDir, "需求说明.txt");
+
+    try {
+      await writeFile(externalPath, "系统名称：统一身份认证系统", "utf-8");
+      const result = await executeAgentToolCall(createToolCall("read_file", { path: externalPath }), {
+        ...createContext(dir),
+        allowedReadFiles: [externalPath]
+      });
+
+      expect(result.toolName).toBe("read_file");
+      expect(result.content).toContain("统一身份认证系统");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+      await rm(externalDir, { recursive: true, force: true });
+    }
+  });
+
   it("validates explicit read_word and read_pdf extensions", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-read-"));
     const textPath = join(dir, "note.txt");
@@ -106,6 +126,26 @@ describe("agentToolRegistry", () => {
 
       expect(result.toolName).toBe("read_word");
       expect(result.summary).toContain(".docx");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips image generation when the user did not explicitly request diagrams", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-image-"));
+
+    try {
+      const result = await executeAgentToolCall(
+        createToolCall("image_generate", {
+          kind: "architecture",
+          prompt: "生成密码应用方案配图"
+        }),
+        createContext(dir)
+      );
+
+      expect(result.toolName).toBe("image_generate");
+      expect(result.summary).toContain("已跳过");
+      expect(result.artifactPath).toBeUndefined();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -170,6 +210,7 @@ function createSettings(): AppSettings {
     },
     openai: {
       baseUrl: "https://api.openai.com/v1",
+      imageBaseUrl: "",
       chatModel: "gpt-5.5",
       imageModel: "gpt-image-2",
       imageSize: "1536x1024",
@@ -177,7 +218,8 @@ function createSettings(): AppSettings {
       autoImageGeneration: true,
       requestTimeoutMs: 120000,
       maxOutputTokens: 16000,
-      apiKeyConfigured: false
+      apiKeyConfigured: false,
+      imageApiKeyConfigured: false
     },
     document: {
       autoPdfExport: false,

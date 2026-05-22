@@ -101,6 +101,8 @@ OpenAI 当前文档仍提供 `Chat Completions`，虽然官方同时推荐新项
 ```env
 OPENAI_API_KEY=***
 OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_IMAGE_BASE_URL=
+OPENAI_IMAGE_API_KEY=
 OPENAI_CHAT_MODEL=gpt-5.5
 OPENAI_IMAGE_MODEL=gpt-image-2
 OPENAI_IMAGE_SIZE=1536x1024
@@ -112,9 +114,11 @@ OPENAI_MAX_OUTPUT_TOKENS=16000
 设计约束：
 
 1. Renderer 进程不直接读取 API Key。
-2. 不使用 `VITE_` 前缀暴露密钥到前端。
-3. Main 进程负责读取 `.env` 并向前端下发脱敏后的配置摘要。
-4. 设置页如果允许修改配置，应由 Main 进程写回 `.env.local` 并触发重载。
+2. `OPENAI_IMAGE_BASE_URL` 可单独配置生图服务地址；留空时生图沿用 `OPENAI_BASE_URL`。
+3. `OPENAI_IMAGE_API_KEY` 可单独配置生图密钥；留空时生图沿用 `OPENAI_API_KEY`。
+4. 不使用 `VITE_` 前缀暴露密钥到前端。
+5. Main 进程负责读取 `.env` 并向前端下发脱敏后的配置摘要。
+6. 设置页如果允许修改配置，应由 Main 进程写回 `.env.local` 并触发重载。
 
 ## 4. 总体架构
 

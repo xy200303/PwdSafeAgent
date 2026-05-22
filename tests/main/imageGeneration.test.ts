@@ -8,6 +8,7 @@ describe("imageGeneration", () => {
   it("detects scheme prompts that should generate diagram artifacts", () => {
     expect(shouldGenerateDiagramArtifacts("请生成密码应用方案", "需要技术架构设计")).toBe(true);
     expect(shouldGenerateDiagramArtifacts("只总结一下附件", "没有图表要求")).toBe(false);
+    expect(shouldGenerateDiagramArtifacts("你好", "我会按密码应用方案模板推进，并可生成技术架构图。")).toBe(false);
   });
 
   it("builds a professional diagram prompt from scheme context", () => {
