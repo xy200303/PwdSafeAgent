@@ -1,0 +1,8 @@
+node_modules/
+out/
+data/
+.env
+.env.local
+dev.stdout.log
+dev.stderr.log
+*.log

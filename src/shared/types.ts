@@ -1,0 +1,222 @@
+export type MessageRole = "user" | "assistant";
+
+export type SessionStatus = "idle" | "running" | "completed" | "failed";
+
+export type StreamItem =
+  | {
+      id: string;
+      kind: "message";
+      role: MessageRole;
+      content: string;
+      isFinished: boolean;
+      createdAt: string;
+      attachmentIds?: string[];
+    }
+  | {
+      id: string;
+      kind: "tool";
+      toolCallId: string;
+      toolName: string;
+      status: "running" | "success" | "failed";
+      summary?: string;
+      createdAt: string;
+    }
+  | {
+      id: string;
+      kind: "file";
+      artifactId: string;
+      name: string;
+      fileKind: ArtifactKind;
+      createdAt: string;
+    }
+  | {
+      id: string;
+      kind: "stage";
+      title: string;
+      detail?: string;
+      createdAt: string;
+    };
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  status: SessionStatus;
+  createdAt: string;
+  updatedAt: string;
+  items: StreamItem[];
+}
+
+export type ArtifactKind = "docx" | "pdf" | "png" | "jpg" | "jpeg" | "webp" | "svg" | "json" | "md" | "txt" | "log" | "other";
+
+export interface ArtifactSummary {
+  id: string;
+  sessionId?: string;
+  name: string;
+  kind: ArtifactKind;
+  path: string;
+  size: number;
+  createdAt: string;
+}
+
+export interface ArtifactListInput {
+  sessionId?: string;
+}
+
+export interface ArtifactPreview {
+  artifactId: string;
+  name: string;
+  kind: ArtifactKind;
+  mode: "text" | "image" | "pdf" | "unsupported";
+  text?: string;
+  dataUrl?: string;
+  mimeType?: string;
+  summary?: string;
+}
+
+export interface AttachmentRef {
+  id: string;
+  sessionId?: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  path: string;
+  source: "picker" | "clipboard";
+  createdAt: string;
+}
+
+export interface ClipboardAttachmentInput {
+  sessionId?: string;
+  files: Array<{
+    name: string;
+    mimeType: string;
+    dataBase64: string;
+  }>;
+}
+
+export interface PickAttachmentInput {
+  sessionId?: string;
+  multiple?: boolean;
+}
+
+export interface RenameSessionInput {
+  sessionId: string;
+  title: string;
+}
+
+export interface ChatPromptInput {
+  sessionId: string;
+  message: string;
+  attachments?: AttachmentRef[];
+}
+
+export interface AppSettings {
+  runtime: {
+    envFilePath: string;
+    configSource: ".env" | ".env.local" | "process";
+  };
+  openai: {
+    baseUrl: string;
+    chatModel: string;
+    imageModel: string;
+    imageSize: string;
+    imageQuality: string;
+    autoImageGeneration: boolean;
+    requestTimeoutMs: number;
+    maxOutputTokens: number;
+    apiKeyConfigured: boolean;
+  };
+  document: {
+    autoPdfExport: boolean;
+    libreOfficePath: string;
+  };
+  agent: {
+    execBashEnabled: boolean;
+  };
+}
+
+export interface UpdateAppSettingsInput {
+  openai: {
+    baseUrl: string;
+    chatModel: string;
+    imageModel: string;
+    imageSize: string;
+    imageQuality: string;
+    autoImageGeneration: boolean;
+    requestTimeoutMs: number;
+    maxOutputTokens: number;
+    apiKey?: string;
+  };
+  document: {
+    autoPdfExport: boolean;
+    libreOfficePath: string;
+  };
+  agent: {
+    execBashEnabled: boolean;
+  };
+}
+
+export type RendererEvent =
+  | {
+      id: string;
+      type: "session.created";
+      payload: ChatSession;
+    }
+  | {
+      id: string;
+      type: "session.updated";
+      payload: ChatSession;
+    }
+  | {
+      id: string;
+      type: "session.deleted";
+      sessionId: string;
+    }
+  | {
+      id: string;
+      type: "stream.item.added";
+      sessionId: string;
+      payload: StreamItem;
+    }
+  | {
+      id: string;
+      type: "stream.item.updated";
+      sessionId: string;
+      payload: StreamItem;
+    }
+  | {
+      id: string;
+      type: "artifact.created";
+      sessionId: string;
+      payload: ArtifactSummary;
+    };
+
+export interface PwdSafeAgentApi {
+  session: {
+    list(): Promise<ChatSession[]>;
+    create(): Promise<ChatSession>;
+    rename(input: RenameSessionInput): Promise<ChatSession>;
+    delete(sessionId: string): Promise<ChatSession[]>;
+  };
+  chat: {
+    prompt(input: ChatPromptInput): Promise<{ accepted: true }>;
+    abort(sessionId: string): Promise<void>;
+  };
+  attachment: {
+    pick(input: PickAttachmentInput): Promise<AttachmentRef[]>;
+    importClipboard(input: ClipboardAttachmentInput): Promise<AttachmentRef[]>;
+    remove(attachmentId: string): Promise<void>;
+  };
+  artifact: {
+    list(input?: ArtifactListInput): Promise<ArtifactSummary[]>;
+    open(artifactId: string): Promise<void>;
+    reveal(artifactId: string): Promise<void>;
+    preview(artifactId: string): Promise<ArtifactPreview>;
+  };
+  settings: {
+    get(): Promise<AppSettings>;
+    save(input: UpdateAppSettingsInput): Promise<AppSettings>;
+  };
+  events: {
+    subscribe(listener: (event: RendererEvent) => void): () => void;
+  };
+}
