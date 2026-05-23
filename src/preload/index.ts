@@ -34,7 +34,8 @@ const api: PwdSafeAgentApi = {
   },
   settings: {
     get: () => ipcRenderer.invoke("settings:get"),
-    save: (input: UpdateAppSettingsInput) => ipcRenderer.invoke("settings:save", input)
+    save: (input: UpdateAppSettingsInput) => ipcRenderer.invoke("settings:save", input),
+    checkRuntime: () => ipcRenderer.invoke("settings:check-runtime")
   },
   events: {
     subscribe: (listener: (event: RendererEvent) => void) => {

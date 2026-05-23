@@ -11,6 +11,7 @@ const IMAGE_MIME_TYPES: Record<string, string> = {
   ".webp": "image/webp",
   ".svg": "image/svg+xml"
 };
+const DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 export async function buildArtifactPreview(
   artifact: ArtifactSummary,
@@ -33,7 +34,10 @@ export async function buildArtifactPreview(
   }
 
   if (extension === ".docx") {
-    return buildDocumentTextPreview(artifact, maxTextChars);
+    if (fileStat.size <= maxDataBytes) {
+      return buildDataPreview(artifact, DOCX_MIME_TYPE, "docx", fileStat.size, maxDataBytes);
+    }
+    return buildDocumentTextPreview(artifact, maxTextChars, "Word 文件较大，已改为抽取文本预览。");
   }
 
   if (TEXT_EXTENSIONS.has(extension)) {
@@ -59,7 +63,7 @@ export async function buildArtifactPreview(
 async function buildDataPreview(
   artifact: ArtifactSummary,
   mimeType: string,
-  mode: "image" | "pdf",
+  mode: "image" | "pdf" | "docx",
   size: number,
   maxDataBytes: number
 ): Promise<ArtifactPreview> {

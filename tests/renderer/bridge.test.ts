@@ -1,0 +1,41 @@
+import { describe, expect, it } from "vitest";
+import { getErrorMessage, resolvePwdSafeAgentApi } from "../../src/renderer/src/bridge";
+
+describe("renderer bridge", () => {
+  it("rejects a missing preload bridge with a user-facing error", () => {
+    const result = resolvePwdSafeAgentApi(undefined);
+
+    expect(result.api).toBeUndefined();
+    expect(result.error).toContain("Electron 预加载桥未注入");
+  });
+
+  it("rejects an incomplete preload bridge before the app calls nested methods", () => {
+    const result = resolvePwdSafeAgentApi({
+      session: {},
+      events: {}
+    });
+
+    expect(result.api).toBeUndefined();
+    expect(result.error).toContain("session.list");
+    expect(result.error).toContain("events.subscribe");
+  });
+
+  it("accepts a complete bridge shape", () => {
+    const bridge = {
+      session: { list() {}, create() {} },
+      chat: { prompt() {} },
+      attachment: { pick() {} },
+      artifact: { list() {} },
+      settings: { get() {} },
+      events: { subscribe() {} }
+    };
+
+    expect(resolvePwdSafeAgentApi(bridge).api).toBe(bridge);
+  });
+
+  it("normalizes unknown errors into readable messages", () => {
+    expect(getErrorMessage(new Error("boom"))).toBe("boom");
+    expect(getErrorMessage("bad")).toBe("bad");
+    expect(getErrorMessage({})).toBe("操作失败，请稍后重试。");
+  });
+});

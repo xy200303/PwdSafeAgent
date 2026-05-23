@@ -2,6 +2,34 @@ export type MessageRole = "user" | "assistant";
 
 export type SessionStatus = "idle" | "running" | "completed" | "failed";
 
+export type AgentRuntimeKind = "openai-chat" | "pi-agent";
+
+export type BundledPythonRuntimeSource = "resources" | "project";
+
+export interface BundledPythonRuntimeStatus {
+  available: boolean;
+  source?: BundledPythonRuntimeSource;
+  homeDir?: string;
+  pythonExePath?: string;
+  scriptsDir?: string;
+}
+
+export interface RuntimeCommandCheck {
+  ok: boolean;
+  command: string;
+  source: "bundled" | "system";
+  output?: string;
+  error?: string;
+  durationMs: number;
+}
+
+export interface RuntimeCheckResult {
+  checkedAt: string;
+  bundledPython: BundledPythonRuntimeStatus;
+  python: RuntimeCommandCheck;
+  pip: RuntimeCommandCheck;
+}
+
 export type StreamItem =
   | {
       id: string;
@@ -19,6 +47,9 @@ export type StreamItem =
       toolName: string;
       status: "running" | "success" | "failed";
       summary?: string;
+      inputPreview?: string;
+      outputPreview?: string;
+      errorPreview?: string;
       createdAt: string;
     }
   | {
@@ -66,7 +97,7 @@ export interface ArtifactPreview {
   artifactId: string;
   name: string;
   kind: ArtifactKind;
-  mode: "text" | "image" | "pdf" | "unsupported";
+  mode: "text" | "image" | "pdf" | "docx" | "unsupported";
   text?: string;
   dataUrl?: string;
   mimeType?: string;
@@ -113,6 +144,7 @@ export interface AppSettings {
   runtime: {
     envFilePath: string;
     configSource: ".env" | ".env.local" | "process";
+    bundledPython: BundledPythonRuntimeStatus;
   };
   openai: {
     baseUrl: string;
@@ -132,7 +164,10 @@ export interface AppSettings {
     libreOfficePath: string;
   };
   agent: {
+    runtime: AgentRuntimeKind;
     execBashEnabled: boolean;
+    piAgentPackage: string;
+    piAgentExport: string;
   };
 }
 
@@ -155,7 +190,10 @@ export interface UpdateAppSettingsInput {
     libreOfficePath: string;
   };
   agent: {
+    runtime: AgentRuntimeKind;
     execBashEnabled: boolean;
+    piAgentPackage: string;
+    piAgentExport: string;
   };
 }
 
@@ -219,6 +257,7 @@ export interface PwdSafeAgentApi {
   settings: {
     get(): Promise<AppSettings>;
     save(input: UpdateAppSettingsInput): Promise<AppSettings>;
+    checkRuntime(): Promise<RuntimeCheckResult>;
   };
   events: {
     subscribe(listener: (event: RendererEvent) => void): () => void;

@@ -1,4 +1,5 @@
 import { exec } from "node:child_process";
+import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import type { ChatCompletionMessageToolCall, ChatCompletionTool } from "openai/resources/chat/completions";
@@ -12,6 +13,7 @@ import {
   type BuiltinToolName
 } from "./agentTools";
 import { hasDiagramArtifactIntent } from "./artifactIntent";
+import { createBundledPythonEnv, type BundledPythonRuntime } from "./bundledRuntime";
 import { exportDocxToPdf } from "./documentExport";
 import { generateDiagramImage, type DiagramKind } from "./imageGeneration";
 import { writeSchemeDocxFromTemplate } from "./schemeDocument";
@@ -20,6 +22,7 @@ const execAsync = promisify(exec);
 
 export interface AgentToolExecutionContext {
   rootDir: string;
+  docsDir: string;
   outputDir: string;
   sessionTitle: string;
   memory: string;
@@ -29,6 +32,7 @@ export interface AgentToolExecutionContext {
   allowedReadDirs: string[];
   allowedReadFiles?: string[];
   execBashEnabled: boolean;
+  bundledPythonRuntime?: BundledPythonRuntime;
 }
 
 export interface AgentToolExecutionResult {
@@ -138,7 +142,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean }): Chat
       type: "function",
       function: {
         name: "write_file",
-        description: "把中间分析、清单或方案片段写入 data/output，并发送为前端文件卡片。",
+        description: "把中间分析、清单或方案片段写入 data/output，并登记为前端文件卡片。",
         parameters: {
           type: "object",
           properties: {
@@ -160,7 +164,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean }): Chat
       type: "function",
       function: {
         name: "write_word",
-        description: "按照 docs/密码应用方案.docx 模板生成专业密码应用方案 Word 文档，并发送为前端文件卡片。",
+        description: "按照 docs/密码应用方案.docx 模板生成专业密码应用方案 Word 文档，并登记为前端文件卡片。",
         parameters: {
           type: "object",
           properties: {
@@ -187,7 +191,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean }): Chat
       function: {
         name: "image_generate",
         description:
-          "生成密码应用技术架构图或业务流程图，并发送为前端文件卡片。仅当用户明确要求生成方案交付物、架构图、流程图、拓扑图或配图时使用；寒暄、答疑、资料澄清阶段不要调用。",
+          "生成密码应用技术架构图或业务流程图，并登记为前端文件卡片。仅当用户明确要求生成方案交付物、架构图、流程图、拓扑图或配图时使用；寒暄、答疑、资料澄清阶段不要调用。",
         parameters: {
           type: "object",
           properties: {
@@ -228,7 +232,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean }): Chat
       type: "function",
       function: {
         name: "write_pdf",
-        description: "将 data/output 中已经存在的 Word 方案文档导出为 PDF，并发送为前端文件卡片。需要本机安装 LibreOffice/soffice。",
+        description: "将 data/output 中已经存在的 Word 方案文档导出为 PDF，并登记为前端文件卡片。需要本机安装 LibreOffice/soffice。",
         parameters: {
           type: "object",
           properties: {
@@ -249,7 +253,8 @@ export function buildAgentChatTools(options: { includeExecBash: boolean }): Chat
       type: "function",
       function: {
         name: "exec_bash",
-        description: "执行诊断命令。仅用于非破坏性的本地检查，禁止删除、移动、覆盖系统文件。",
+        description:
+          "执行诊断命令。仅用于非破坏性的本地检查，禁止删除、移动、覆盖系统文件。Windows 打包环境会优先注入内置 Python runtime。",
         parameters: {
           type: "object",
           properties: {
@@ -409,7 +414,7 @@ async function executeReadFile(
     return { toolName: requestedToolName, summary: "缺少文件路径", content: `${requestedToolName} failed: missing path` };
   }
 
-  const filePath = resolveToolPath(inputPath, context.rootDir);
+  const filePath = resolveToolPath(inputPath, context);
   assertPathAllowed(filePath, context.allowedReadDirs, context.allowedReadFiles ?? [], "read_file");
   const extension = extname(filePath).toLowerCase();
   if (requestedToolName === "read_word" && extension !== ".docx") {
@@ -448,7 +453,7 @@ async function executeWriteWord(
   const rawName = readStringArg(args, "name") || `${context.sessionTitle}-密码应用方案.docx`;
   const safeName = sanitizeFileName(rawName.endsWith(".docx") ? rawName : `${rawName}.docx`);
   const outputPath = join(context.outputDir, `${Date.now().toString(36)}-${safeName}`);
-  const templatePath = join(context.rootDir, "docs", "密码应用方案.docx");
+  const templatePath = join(context.docsDir, "密码应用方案.docx");
   const result = await writeSchemeDocxFromTemplate(templatePath, outputPath, {
     prompt: prompt || context.sessionTitle,
     memory: context.memory,
@@ -491,6 +496,14 @@ async function executeImageGenerate(
   args: Record<string, unknown>,
   context: AgentToolExecutionContext
 ): Promise<AgentToolExecutionResult> {
+  if (!context.settings.openai.autoImageGeneration) {
+    return {
+      toolName: "image_generate",
+      summary: "生图工具已在设置中关闭",
+      content: "image_generate skipped: OPENAI_AUTO_IMAGE_GENERATION=false"
+    };
+  }
+
   if (!hasDiagramArtifactIntent(context.userPrompt || "")) {
     return {
       toolName: "image_generate",
@@ -539,8 +552,12 @@ function executeSendFile(
     return { toolName: "send_file", summary: "缺少文件路径", content: "send_file failed: missing path" };
   }
 
-  const filePath = resolveToolPath(inputPath, context.rootDir);
+  const filePath = resolveOutputToolPath(inputPath, context);
   assertPathInside(filePath, [context.outputDir], "send_file");
+  if (!existsSync(filePath)) {
+    throw new Error(`send_file 文件不存在：${basename(filePath)}`);
+  }
+
   return {
     toolName: "send_file",
     summary: `已发送 ${basename(filePath)}`,
@@ -558,7 +575,7 @@ async function executeWritePdf(
     return { toolName: "write_pdf", summary: "缺少 Word 文件路径", content: "write_pdf failed: missing path" };
   }
 
-  const filePath = resolveToolPath(inputPath, context.rootDir);
+  const filePath = resolveOutputToolPath(inputPath, context);
   assertPathInside(filePath, [context.outputDir], "write_pdf");
   const result = await exportDocxToPdf(filePath, context.outputDir, {
     libreOfficePath: context.settings.document.libreOfficePath,
@@ -596,16 +613,23 @@ async function executeBash(
     };
   }
 
+  const env = context.bundledPythonRuntime
+    ? createBundledPythonEnv(context.bundledPythonRuntime, process.env)
+    : process.env;
   const { stdout, stderr } = await execAsync(command, {
     cwd: context.rootDir,
+    env,
     timeout: 15000,
     maxBuffer: 1024 * 256,
-    windowsHide: true
+    windowsHide: true,
+    signal: context.signal
   });
   const output = compactText([stdout, stderr].filter(Boolean).join("\n"), 12000);
   return {
     toolName: "exec_bash",
-    summary: output ? "命令执行完成" : "命令执行完成，无输出",
+    summary: output
+      ? `命令执行完成${context.bundledPythonRuntime ? "（已注入内置 Python）" : ""}`
+      : `命令执行完成，无输出${context.bundledPythonRuntime ? "（已注入内置 Python）" : ""}`,
     content: output || "(empty output)"
   };
 }
@@ -646,17 +670,37 @@ function normalizeDuckDuckGoUrl(rawUrl: string): string {
   return rawUrl;
 }
 
-function resolveToolPath(inputPath: string, rootDir: string): string {
-  return isAbsolute(inputPath) ? resolve(inputPath) : resolve(rootDir, inputPath);
+function resolveToolPath(inputPath: string, context: AgentToolExecutionContext): string {
+  if (isAbsolute(inputPath)) return resolve(inputPath);
+
+  const normalizedInput = inputPath.replace(/\\/g, "/");
+  if (normalizedInput === "docs" || normalizedInput.startsWith("docs/")) {
+    return resolve(context.docsDir, normalizedInput.replace(/^docs\/?/, ""));
+  }
+
+  return resolve(context.rootDir, inputPath);
+}
+
+function resolveOutputToolPath(inputPath: string, context: AgentToolExecutionContext): string {
+  if (isAbsolute(inputPath)) return resolve(inputPath);
+
+  const rootRelativePath = resolve(context.rootDir, inputPath);
+  if (isPathInside(rootRelativePath, [context.outputDir])) {
+    return rootRelativePath;
+  }
+
+  return resolve(context.outputDir, inputPath);
 }
 
 function assertPathInside(filePath: string, allowedDirs: string[], toolName: string): void {
+  if (isPathInside(filePath, allowedDirs)) return;
+  throw new Error(`${toolName} 只能访问允许目录内的文件`);
+}
+
+function isPathInside(filePath: string, allowedDirs: string[]): boolean {
   const normalizedPath = resolve(filePath).toLowerCase();
   const normalizedDirs = allowedDirs.map((dir) => resolve(dir).toLowerCase());
-  const isAllowed = normalizedDirs.some((dir) => normalizedPath === dir || normalizedPath.startsWith(`${dir}\\`) || normalizedPath.startsWith(`${dir}/`));
-  if (!isAllowed) {
-    throw new Error(`${toolName} 只能访问允许目录内的文件`);
-  }
+  return normalizedDirs.some((dir) => normalizedPath === dir || normalizedPath.startsWith(`${dir}\\`) || normalizedPath.startsWith(`${dir}/`));
 }
 
 function assertPathAllowed(

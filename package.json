@@ -1,21 +1,74 @@
 {
   "name": "pwd-safe-agent",
   "version": "0.1.0",
+  "description": "Desktop password application scheme generation agent",
+  "author": "PwdSafeAgent Team",
   "private": true,
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "node scripts/run-electron-vite.mjs dev",
+    "icon:generate": "node scripts/run-generate-app-icon.mjs",
     "build": "tsc --noEmit && electron-vite build",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
     "preview": "node scripts/run-electron-vite.mjs preview",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
+  "build": {
+    "appId": "com.local.pwdsafeagent",
+    "productName": "PwdSafeAgent",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "runtime",
+        "to": "runtime",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "docs",
+        "to": "docs",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "build",
+        "to": "build",
+        "filter": [
+          "icon.png",
+          "icon.ico"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "icon.ico",
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
   "dependencies": {
     "@incremark/react": "^1.0.2",
     "@incremark/theme": "^1.0.2",
     "@radix-ui/react-alert-dialog": "^1.1.15",
+    "@radix-ui/react-collapsible": "^1.1.12",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
     "@radix-ui/react-scroll-area": "^1.2.10",
@@ -23,12 +76,14 @@
     "@radix-ui/react-tabs": "^1.1.13",
     "@radix-ui/react-tooltip": "^1.2.8",
     "@reduxjs/toolkit": "^2.11.2",
+    "docx-preview": "^0.3.7",
     "docxtemplater": "^3.68.7",
     "dotenv": "^17.2.3",
     "lucide-react": "^0.562.0",
     "mammoth": "^1.12.0",
     "openai": "^6.15.0",
     "pdf-parse": "^2.4.5",
+    "pdfjs-dist": "^5.7.284",
     "pizzip": "^3.2.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
@@ -40,6 +95,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.2",
     "electron": "^39.2.7",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^4.0.0",
     "typescript": "^5.9.3",
     "vite": "^7.3.0",

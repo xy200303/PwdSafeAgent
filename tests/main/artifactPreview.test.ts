@@ -43,6 +43,22 @@ describe("artifactPreview", () => {
     }
   });
 
+  it("builds docx data previews for open-source renderer consumption", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-preview-docx-"));
+    const filePath = join(dir, "方案.docx");
+
+    try {
+      await writeFile(filePath, Buffer.from([80, 75, 3, 4]));
+      const preview = await buildArtifactPreview(createArtifact(filePath, "方案.docx", "docx"));
+
+      expect(preview.mode).toBe("docx");
+      expect(preview.mimeType).toBe("application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+      expect(preview.dataUrl).toMatch(/^data:application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document;base64,/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("returns unsupported previews for unknown artifact types", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-preview-other-"));
     const filePath = join(dir, "archive.bin");

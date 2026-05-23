@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import mammoth from "mammoth";
@@ -84,6 +84,39 @@ describe("agentToolRegistry", () => {
     }
   });
 
+  it("sends an existing output file when the model only provides the file name", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-send-"));
+    const outputDir = join(dir, "output");
+    const outputPath = join(outputDir, "方案.md");
+
+    try {
+      await mkdir(outputDir, { recursive: true });
+      await writeFile(outputPath, "# 方案", "utf-8");
+      const result = await executeAgentToolCall(createToolCall("send_file", { path: "方案.md" }), {
+        ...createContext(dir),
+        outputDir
+      });
+
+      expect(result.toolName).toBe("send_file");
+      expect(result.artifactPath).toBe(outputPath);
+      expect(result.summary).toContain("方案.md");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects send_file when the target output file does not exist", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-send-missing-"));
+
+    try {
+      await expect(executeAgentToolCall(createToolCall("send_file", { path: "missing.md" }), createContext(dir))).rejects.toThrow(
+        "文件不存在"
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("refuses read_file outside allowed directories", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-"));
 
@@ -151,6 +184,32 @@ describe("agentToolRegistry", () => {
     }
   });
 
+  it("skips image generation when the image tool is disabled in settings", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-image-disabled-"));
+
+    try {
+      const settings = createSettings();
+      settings.openai.autoImageGeneration = false;
+      const result = await executeAgentToolCall(
+        createToolCall("image_generate", {
+          kind: "architecture",
+          prompt: "生成密码应用技术架构图"
+        }),
+        {
+          ...createContext(dir),
+          settings,
+          userPrompt: "请生成密码应用方案和技术架构图"
+        }
+      );
+
+      expect(result.toolName).toBe("image_generate");
+      expect(result.summary).toContain("关闭");
+      expect(result.artifactPath).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("executes write_word with the official scheme template", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-word-"));
 
@@ -193,6 +252,7 @@ function createToolCall(name: string, args: Record<string, unknown>): ChatComple
 function createContext(dir: string): AgentToolExecutionContext {
   return {
     rootDir: dir,
+    docsDir: join(dir, "docs"),
     outputDir: join(dir, "output"),
     sessionTitle: "统一身份认证系统",
     memory: "",
@@ -206,7 +266,10 @@ function createSettings(): AppSettings {
   return {
     runtime: {
       envFilePath: "",
-      configSource: "process"
+      configSource: "process",
+      bundledPython: {
+        available: false
+      }
     },
     openai: {
       baseUrl: "https://api.openai.com/v1",
@@ -226,6 +289,7 @@ function createSettings(): AppSettings {
       libreOfficePath: ""
     },
     agent: {
+      runtime: "openai-chat",
       execBashEnabled: false
     }
   };

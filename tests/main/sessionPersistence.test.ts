@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -50,7 +50,6 @@ describe("sessionPersistence", () => {
           createdAt: "2026-05-23T00:01:00.000Z"
         }
       ],
-      templateLoadedSessionIds: ["session_1"],
       sessionMemories: {
         session_1: [{ source: "Word 模板", content: "模板内容" }]
       }
@@ -63,7 +62,6 @@ describe("sessionPersistence", () => {
       expect(restored?.sessions[0]?.title).toBe("统一身份认证系统");
       expect(restored?.attachments[0]?.name).toBe("需求说明.docx");
       expect(restored?.artifacts[0]?.kind).toBe("docx");
-      expect(restored?.templateLoadedSessionIds).toEqual(["session_1"]);
       expect(restored?.sessionMemories.session_1[0]?.content).toBe("模板内容");
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -72,5 +70,39 @@ describe("sessionPersistence", () => {
 
   it("returns null when no state file exists", () => {
     expect(loadPersistedState(join(tmpdir(), "missing-pwd-safe-agent-state.json"))).toBeNull();
+  });
+
+  it("ignores legacy template preload state while restoring", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-legacy-state-"));
+    const filePath = join(dir, "state.json");
+
+    try {
+      await writeFile(
+        filePath,
+        JSON.stringify(
+          {
+            version: 1,
+            savedAt: "2026-05-23T00:00:00.000Z",
+            sessions: [],
+            attachments: [],
+            artifacts: [],
+            templateLoadedSessionIds: ["legacy_session"],
+            sessionMemories: {}
+          },
+          null,
+          2
+        ),
+        "utf-8"
+      );
+
+      expect(loadPersistedState(filePath)).toEqual({
+        sessions: [],
+        attachments: [],
+        artifacts: [],
+        sessionMemories: {}
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

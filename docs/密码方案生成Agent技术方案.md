@@ -7,7 +7,7 @@
 基于 `pi-agent + Electron + React + shadcn/ui + Redux Toolkit + electron-vite` 构建一个桌面客户端，用于生成专业的密码应用方案。系统应满足以下目标：
 
 1. 以 [密码应用方案.docx](./密码应用方案.docx) 为唯一权威模板，最终交付文档必须保持模板章节、样式、表格和排版结构。
-2. 通过对话式交互持续采集项目资料，自动补全《密码应用方案》正文、表格、流程图和技术架构图。
+2. 通过对话式交互持续采集项目资料，由模型按任务需要自主调用工具补全《密码应用方案》正文、表格、流程图和技术架构图。
 3. Agent 具备上下文记忆、工具调用、生成过程可视化、草稿迭代和文件交付能力。
 4. Electron 后端负责 Agent 运行、文档渲染、文件落盘和本地安全存储；React 前端负责会话流界面、过程回放和文件展示。
 5. 支持 `send_file` 工具将生成产物推送给前端，前端以聊天流内联文件条目的形式展示，并支持打开、预览、再次导出。
@@ -109,6 +109,8 @@ OPENAI_IMAGE_SIZE=1536x1024
 OPENAI_IMAGE_QUALITY=high
 OPENAI_REQUEST_TIMEOUT_MS=120000
 OPENAI_MAX_OUTPUT_TOKENS=16000
+AGENT_RUNTIME=openai-chat
+AGENT_EXEC_BASH_ENABLED=true
 ```
 
 设计约束：
@@ -116,9 +118,10 @@ OPENAI_MAX_OUTPUT_TOKENS=16000
 1. Renderer 进程不直接读取 API Key。
 2. `OPENAI_IMAGE_BASE_URL` 可单独配置生图服务地址；留空时生图沿用 `OPENAI_BASE_URL`。
 3. `OPENAI_IMAGE_API_KEY` 可单独配置生图密钥；留空时生图沿用 `OPENAI_API_KEY`。
-4. 不使用 `VITE_` 前缀暴露密钥到前端。
-5. Main 进程负责读取 `.env` 并向前端下发脱敏后的配置摘要。
-6. 设置页如果允许修改配置，应由 Main 进程写回 `.env.local` 并触发重载。
+4. `AGENT_RUNTIME` 默认使用 `openai-chat`；可切换为 `pi-agent` 适配层，当前版本会保留 OpenAI Chat Runtime 回退链路。
+5. 不使用 `VITE_` 前缀暴露密钥到前端。
+6. Main 进程负责读取 `.env` 并向前端下发脱敏后的配置摘要。
+7. 设置页如果允许修改配置，应由 Main 进程写回 `.env.local` 并触发重载。
 
 ## 4. 总体架构
 
@@ -311,6 +314,7 @@ stateDiagram-v2
 4. `send_file` 不直接暴露任意系统路径，只允许发送已登记到 `artifact-service` 的文件。
 5. `image_generate` 先生成结构化图描述，再生成图片，保证图与文一致。
 6. Word/PDF 工具只允许访问项目目录、模板目录和系统临时转换目录。
+7. Windows 安装包内置 `runtime/win/python` 或兼容历史目录 `runtime/win/pyhton` 时，`exec_bash` 自动把该 Python 运行时注入 PATH，优先提供 `python`、`pip` 等命令。
 
 ### 7.3 流程图和技术架构图生成建议
 
@@ -341,6 +345,31 @@ stateDiagram-v2
 2. Word 输出：模板归一化后走 Open XML / `docxtemplater` 风格渲染。
 3. PDF 读取：`pdfjs-dist` 或同类解析方案。
 4. PDF 导出：优先通过本地 LibreOffice / Office 自动化受控导出。
+
+### 7.5 内置 Python Runtime
+
+为降低终端用户环境依赖，Windows 版本支持把 Python 运行时放入 `runtime/win/python`。当前工程同时兼容已有的 `runtime/win/pyhton` 目录，避免因为历史目录名导致打包后不可用。
+
+运行时发现顺序：
+
+1. 打包态优先查找 Electron `resources/runtime/win/python`，再查找 `resources/runtime/win/pyhton`。
+2. 开发态查找项目根目录 `runtime/win/python`，再查找 `runtime/win/pyhton`。
+3. 如果找到 `python.exe`，`exec_bash` 执行命令时会把 Python 根目录、`Scripts`、`DLLs`、`Library/bin` 注入 PATH，并设置 `PYTHONUTF8=1` 和 `PYTHONIOENCODING=utf-8`。
+4. 如果没有找到内置 Python，则保持系统 PATH 行为，继续使用用户本机已有的 Python。
+5. 设置页提供运行时自检入口，实际执行 `python --version` 和 `python -m pip --version`，用于确认随包运行时在当前用户电脑上可用。
+
+打包时通过 Electron Builder 的 `extraResources` 把 `runtime` 和 `docs` 一起复制到安装包资源目录。`docs` 也作为打包资源处理，是为了保证 `docs/密码应用方案.docx` 在无源码目录的用户电脑上仍可被 `read_word` 和 `write_word` 使用。
+
+### 7.6 打包态数据目录
+
+开发态为了便于调试，`data/input`、`data/output`、`data/state.json` 和 `.env.local` 仍保存在项目根目录。
+
+Windows 打包态需要避免写入安装目录，因此运行时路径分为两类：
+
+1. 只读资源：`resources/docs`、`resources/runtime`，随安装包分发。
+2. 可写数据：Electron `userData` 目录下的 `.env.local` 与 `data` 目录，保存模型配置、会话状态、附件副本和生成产物。
+
+这样用户把应用安装到 `Program Files` 或其他受控目录时，Agent 仍能保存配置并生成文件。
 
 ## 8. 文档模板引擎设计
 
@@ -599,8 +628,15 @@ PwdSafeAgent/
 ## 当前实现基线（2026-05-23）
 
 - Electron 后端已接入本地工具层：`time`、`read_file`、`read_word`、`read_pdf`、`write_file`、`send_file`。
-- `read_word` 使用 `mammoth` 从 `.docx` 抽取正文，启动生成时会自动读取 `docs/密码应用方案.docx` 作为会话模板上下文。
+- `read_word` 使用 `mammoth` 从 `.docx` 抽取正文；`docs/密码应用方案.docx` 会作为可读取资源暴露给 Agent，但不会在每轮对话开始时自动读取。
 - `read_pdf` 使用 `pdf-parse` 抽取 PDF 文本；文本类附件支持 `.md`、`.txt`、`.json`、`.csv`、`.log`、`.yaml`、`.yml`。
-- 附件解析结果会进入会话记忆，并作为 OpenAI Chat Completions 的系统上下文参与后续生成。
+- 用户选择或粘贴的附件会作为可读取资源进入会话；只有当模型判断需要分析资料、生成方案或导出文件时，才调用 `read_word`、`read_pdf` 或 `read_file` 读取内容。
+- 仅上传附件的回合会在聊天流中显示附件名称，并作为用户消息进入模型上下文，但不会直接读取文件正文。
+- 工具读取结果会进入会话记忆，并作为 OpenAI Chat Completions 的系统上下文参与后续生成。
+- 后端已抽出 `agentRuntime` 适配层，当前默认运行时为 `openai-chat`，`pi-agent` 作为可配置预留运行时并回退到现有 OpenAI Chat Runtime。
+- Windows 内置 Python runtime 已接入 `exec_bash`：开发态读取 `runtime/win/python` 或 `runtime/win/pyhton`，打包态读取 `resources/runtime/win/...`，用于无系统 Python 的用户电脑。
+- 打包入口已增加 Electron Builder，`runtime` 与 `docs` 会作为 `extraResources` 复制进安装包。
+- 打包态已区分只读资源目录和可写用户数据目录：`.env.local`、会话状态、附件和输出文件写入 Electron `userData`，避免安装目录不可写。
+- 设置页已提供 Python runtime 自检能力，可快速验证内置 Python 和 pip 是否能被主进程正常执行。
 - 无 `OPENAI_API_KEY` 时保留本地 mock 流式响应；配置后切换为真实 OpenAI Chat Completions 流。
-- 生成完成后，当内容符合方案/文档/报告语义，会通过 `write_file` 写入 Markdown 草稿，并通过 `send_file` 发送文件卡片给前端。
+- 当用户明确要求交付方案文件时，模型应自主调用 `write_word`、`write_pdf`、`write_file` 或 `image_generate` 生成真实产物，并通过 `send_file` 将文件卡片发送给前端；后端不再基于回复内容做启发式自动生成。

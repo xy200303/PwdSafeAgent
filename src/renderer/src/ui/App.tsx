@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type JSX } from "react";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
+import * as Collapsible from "@radix-ui/react-collapsible";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as ScrollArea from "@radix-ui/react-scroll-area";
@@ -10,6 +11,7 @@ import { IncremarkContent } from "@incremark/react";
 import {
   Bot,
   CheckCircle2,
+  ChevronDown,
   Eye,
   File,
   Files,
@@ -50,15 +52,20 @@ import type { AppDispatch } from "../store";
 import type { ReactNode } from "react";
 import type {
   AppSettings,
+  AgentRuntimeKind,
   ArtifactKind,
   ArtifactPreview,
   ArtifactSummary,
   AttachmentRef,
   ChatSession,
   PwdSafeAgentApi,
+  RuntimeCheckResult,
+  RuntimeCommandCheck,
   StreamItem
 } from "../../../shared/types";
+import { getErrorMessage, resolvePwdSafeAgentApi } from "../bridge";
 import { orderStreamItemsForDisplay } from "../streamOrdering";
+import { DocxPreview, PdfJsPreview } from "./ArtifactPreviewRenderers";
 
 export function App(): JSX.Element {
   const dispatch = useDispatch<AppDispatch>();
@@ -67,25 +74,36 @@ export function App(): JSX.Element {
   );
   const [preview, setPreview] = useState<ArtifactPreview | undefined>();
   const [previewError, setPreviewError] = useState("");
+  const [appError, setAppError] = useState("");
   const [renameTarget, setRenameTarget] = useState<ChatSession | undefined>();
   const [deleteTarget, setDeleteTarget] = useState<ChatSession | undefined>();
   const currentSession = sessions.find((session) => session.id === currentSessionId);
-  const api = window.pwdSafeAgent;
+  const bridge = resolvePwdSafeAgentApi(window.pwdSafeAgent);
+  const api = bridge.api;
 
   useEffect(() => {
     if (!api) return;
-    void bootstrap(dispatch, api);
-    const unsubscribe = api.events.subscribe((event) => {
-      dispatch(applyRendererEvent(event));
-    });
+    let unsubscribe: (() => void) | undefined;
+    void bootstrap(dispatch, api).catch((error: unknown) => setAppError(`启动初始化失败：${getErrorMessage(error)}`));
+    try {
+      unsubscribe = api.events.subscribe((event) => {
+        dispatch(applyRendererEvent(event));
+      });
+    } catch (error) {
+      setAppError(`事件订阅失败：${getErrorMessage(error)}`);
+    }
     return unsubscribe;
   }, [api, dispatch]);
 
   async function createConversation(): Promise<void> {
     if (!api) return;
-    const session = await api.session.create();
-    dispatch(upsertSession(session));
-    dispatch(setCurrentSession(session.id));
+    try {
+      const session = await api.session.create();
+      dispatch(upsertSession(session));
+      dispatch(setCurrentSession(session.id));
+    } catch (error) {
+      setAppError(`新建对话失败：${getErrorMessage(error)}`);
+    }
   }
 
   async function renameConversation(sessionId: string, title: string): Promise<void> {
@@ -108,7 +126,7 @@ export function App(): JSX.Element {
       setPreview(await api.artifact.preview(artifactId));
     } catch (error) {
       setPreview(undefined);
-      setPreviewError(error instanceof Error ? error.message : String(error));
+      setPreviewError(getErrorMessage(error));
     }
   }
 
@@ -119,7 +137,7 @@ export function App(): JSX.Element {
   }
 
   if (!api) {
-    return <MissingBridge />;
+    return <MissingBridge detail={bridge.error} />;
   }
 
   return (
@@ -151,6 +169,7 @@ export function App(): JSX.Element {
               void api.attachment.remove(id);
             }}
             onSent={() => dispatch(clearComposer())}
+            onError={(message) => setAppError(message)}
           />
         </main>
         {settingsOpen ? (
@@ -159,6 +178,7 @@ export function App(): JSX.Element {
             settings={settings}
             onClose={() => dispatch(setSettingsOpen(false))}
             onSaved={(next) => dispatch(setSettings(next))}
+            onError={(message) => setAppError(message)}
           />
         ) : null}
         {preview || previewError ? (
@@ -196,17 +216,29 @@ export function App(): JSX.Element {
             onDelete={(sessionId) => deleteConversation(sessionId)}
           />
         ) : null}
+        {appError ? <AppNotice message={appError} onClose={() => setAppError("")} /> : null}
       </div>
     </Tooltip.Provider>
   );
 }
 
-function MissingBridge(): JSX.Element {
+function MissingBridge({ detail }: { detail?: string }): JSX.Element {
   return (
     <div className="bridge-missing">
       <strong>Electron 预加载桥未就绪</strong>
-      <span>请通过 `npm run dev` 或打包后的 Electron 应用启动，不要直接在浏览器打开渲染页。</span>
+      <span>{detail || "请通过 `npm run dev` 或打包后的 Electron 应用启动，不要直接在浏览器打开渲染页。"}</span>
       <small>如果仍然出现该提示，请重启开发服务；preload 会注入 `window.pwdSafeAgent`。</small>
+    </div>
+  );
+}
+
+function AppNotice({ message, onClose }: { message: string; onClose: () => void }): JSX.Element {
+  return (
+    <div className="app-notice" role="status">
+      <span>{message}</span>
+      <button type="button" onClick={onClose} aria-label="关闭提示">
+        <X size={14} />
+      </button>
     </div>
   );
 }
@@ -390,19 +422,7 @@ function StreamRow({
   }
 
   if (item.kind === "tool") {
-    return (
-      <div className={`tool-row ${item.status}`}>
-        {item.status === "running" ? (
-          <Loader2 size={14} className="spin" />
-        ) : item.status === "failed" ? (
-          <XCircle size={14} />
-        ) : (
-          <CheckCircle2 size={14} />
-        )}
-        <span className="tool-name">{item.toolName}</span>
-        <span className="tool-summary">{item.summary}</span>
-      </div>
-    );
+    return <ToolRow item={item} />;
   }
 
   if (item.kind === "file") {
@@ -421,6 +441,50 @@ function StreamRow({
       <span>{item.title}</span>
       {item.detail ? <small>{item.detail}</small> : null}
     </div>
+  );
+}
+
+function ToolRow({ item }: { item: Extract<StreamItem, { kind: "tool" }> }): JSX.Element {
+  const hasDetails = Boolean(item.inputPreview || item.outputPreview || item.errorPreview);
+
+  return (
+    <Collapsible.Root className={`tool-row ${item.status}`}>
+      <div className="tool-row-main">
+        {item.status === "running" ? (
+          <Loader2 size={14} className="spin" />
+        ) : item.status === "failed" ? (
+          <XCircle size={14} />
+        ) : (
+          <CheckCircle2 size={14} />
+        )}
+        <span className="tool-name">{item.toolName}</span>
+        <span className="tool-summary">{item.summary}</span>
+        {hasDetails ? (
+          <Collapsible.Trigger asChild>
+            <button type="button" className="tool-detail-trigger">
+              详情
+              <ChevronDown size={13} />
+            </button>
+          </Collapsible.Trigger>
+        ) : null}
+      </div>
+      {hasDetails ? (
+        <Collapsible.Content className="tool-detail">
+          {item.inputPreview ? <ToolDetailBlock title="输入" content={item.inputPreview} /> : null}
+          {item.outputPreview ? <ToolDetailBlock title="输出" content={item.outputPreview} /> : null}
+          {item.errorPreview ? <ToolDetailBlock title="错误" content={item.errorPreview} /> : null}
+        </Collapsible.Content>
+      ) : null}
+    </Collapsible.Root>
+  );
+}
+
+function ToolDetailBlock({ title, content }: { title: string; content: string }): JSX.Element {
+  return (
+    <section className="tool-detail-block">
+      <span>{title}</span>
+      <pre>{formatToolPreview(content)}</pre>
+    </section>
   );
 }
 
@@ -501,7 +565,10 @@ function ArtifactPreviewPanel({
         <ScrollArea.Viewport className="preview-body">
           {error ? <p className="preview-empty">{error}</p> : null}
           {preview?.mode === "image" && preview.dataUrl ? <img src={preview.dataUrl} alt={preview.name} /> : null}
-          {preview?.mode === "pdf" && preview.dataUrl ? <iframe title={preview.name} src={preview.dataUrl} /> : null}
+          {preview?.mode === "pdf" && preview.dataUrl ? (
+            <PdfJsPreview dataUrl={preview.dataUrl} name={preview.name} />
+          ) : null}
+          {preview?.mode === "docx" && preview.dataUrl ? <DocxPreview dataUrl={preview.dataUrl} /> : null}
           {preview?.mode === "text" && preview.kind === "md" && preview.text ? (
             <div className="preview-markdown">
               <IncremarkContent content={preview.text} isFinished />
@@ -742,6 +809,7 @@ function Composer(props: {
   onAddAttachments: (attachments: AttachmentRef[]) => void;
   onRemoveAttachment: (id: string) => void;
   onSent: () => void;
+  onError: (message: string) => void;
 }): JSX.Element {
   const canSend = Boolean(props.session && (props.value.trim() || props.attachments.length));
   const running = props.session?.status === "running";
@@ -749,18 +817,26 @@ function Composer(props: {
   async function submit(event?: FormEvent): Promise<void> {
     event?.preventDefault();
     if (!props.session || !canSend) return;
-    await props.api.chat.prompt({
-      sessionId: props.session.id,
-      message: props.value.trim(),
-      attachments: props.attachments
-    });
-    props.onSent();
+    try {
+      await props.api.chat.prompt({
+        sessionId: props.session.id,
+        message: props.value.trim(),
+        attachments: props.attachments
+      });
+      props.onSent();
+    } catch (error) {
+      props.onError(`发送失败：${getErrorMessage(error)}`);
+    }
   }
 
   async function chooseFiles(): Promise<void> {
     if (!props.session) return;
-    const picked = await props.api.attachment.pick({ sessionId: props.session.id, multiple: true });
-    props.onAddAttachments(picked);
+    try {
+      const picked = await props.api.attachment.pick({ sessionId: props.session.id, multiple: true });
+      props.onAddAttachments(picked);
+    } catch (error) {
+      props.onError(`选择附件失败：${getErrorMessage(error)}`);
+    }
   }
 
   async function onPaste(event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> {
@@ -768,18 +844,22 @@ function Composer(props: {
     const files = Array.from(event.clipboardData.files);
     if (files.length === 0) return;
     event.preventDefault();
-    const payload = await Promise.all(
-      files.map(async (file) => ({
-        name: file.name || "clipboard-file",
-        mimeType: file.type || "application/octet-stream",
-        dataBase64: await fileToBase64(file)
-      }))
-    );
-    const imported = await props.api.attachment.importClipboard({
-      sessionId: props.session.id,
-      files: payload
-    });
-    props.onAddAttachments(imported);
+    try {
+      const payload = await Promise.all(
+        files.map(async (file) => ({
+          name: file.name || "clipboard-file",
+          mimeType: file.type || "application/octet-stream",
+          dataBase64: await fileToBase64(file)
+        }))
+      );
+      const imported = await props.api.attachment.importClipboard({
+        sessionId: props.session.id,
+        files: payload
+      });
+      props.onAddAttachments(imported);
+    } catch (error) {
+      props.onError(`粘贴附件失败：${getErrorMessage(error)}`);
+    }
   }
 
   return (
@@ -835,12 +915,14 @@ function SettingsPanel({
   api,
   settings,
   onClose,
-  onSaved
+  onSaved,
+  onError
 }: {
   api: PwdSafeAgentApi;
   settings?: AppSettings;
   onClose: () => void;
   onSaved: (settings: AppSettings) => void;
+  onError: (message: string) => void;
 }): JSX.Element {
   const [baseUrl, setBaseUrl] = useState(settings?.openai.baseUrl || "https://api.openai.com/v1");
   const [imageBaseUrl, setImageBaseUrl] = useState(settings?.openai.imageBaseUrl || "");
@@ -853,35 +935,62 @@ function SettingsPanel({
   const [libreOfficePath, setLibreOfficePath] = useState(settings?.document.libreOfficePath || "");
   const [timeout, setTimeoutValue] = useState(settings?.openai.requestTimeoutMs || 120000);
   const [maxTokens, setMaxTokens] = useState(settings?.openai.maxOutputTokens || 16000);
-  const [execBashEnabled, setExecBashEnabled] = useState(settings?.agent.execBashEnabled ?? false);
+  const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeKind>(settings?.agent.runtime ?? "openai-chat");
+  const [execBashEnabled, setExecBashEnabled] = useState(settings?.agent.execBashEnabled ?? true);
+  const [piAgentPackage, setPiAgentPackage] = useState(settings?.agent.piAgentPackage ?? "");
+  const [piAgentExport, setPiAgentExport] = useState(settings?.agent.piAgentExport ?? "");
   const [apiKey, setApiKey] = useState("");
   const [imageApiKey, setImageApiKey] = useState("");
+  const [runtimeCheck, setRuntimeCheck] = useState<RuntimeCheckResult | undefined>();
+  const [checkingRuntime, setCheckingRuntime] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   async function save(): Promise<void> {
-    const next = await api.settings.save({
-      openai: {
-        baseUrl,
-        imageBaseUrl,
-        chatModel,
-        imageModel,
-        imageSize,
-        imageQuality,
-        autoImageGeneration,
-        requestTimeoutMs: timeout,
-        maxOutputTokens: maxTokens,
-        apiKey: apiKey.trim() || undefined,
-        imageApiKey: imageApiKey.trim() || undefined
-      },
-      document: {
-        autoPdfExport,
-        libreOfficePath
-      },
-      agent: {
-        execBashEnabled
-      }
-    });
-    onSaved(next);
-    onClose();
+    setSaving(true);
+    try {
+      const next = await api.settings.save({
+        openai: {
+          baseUrl,
+          imageBaseUrl,
+          chatModel,
+          imageModel,
+          imageSize,
+          imageQuality,
+          autoImageGeneration,
+          requestTimeoutMs: timeout,
+          maxOutputTokens: maxTokens,
+          apiKey: apiKey.trim() || undefined,
+          imageApiKey: imageApiKey.trim() || undefined
+        },
+        document: {
+          autoPdfExport,
+          libreOfficePath
+        },
+        agent: {
+          runtime: agentRuntime,
+          execBashEnabled,
+          piAgentPackage,
+          piAgentExport
+        }
+      });
+      onSaved(next);
+      onClose();
+    } catch (error) {
+      onError(`保存设置失败：${getErrorMessage(error)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function runRuntimeCheck(): Promise<void> {
+    setCheckingRuntime(true);
+    try {
+      setRuntimeCheck(await api.settings.checkRuntime());
+    } catch (error) {
+      onError(`运行时自检失败：${getErrorMessage(error)}`);
+    } finally {
+      setCheckingRuntime(false);
+    }
   }
 
   return (
@@ -968,7 +1077,7 @@ function SettingsPanel({
 
               <Tabs.Content className="settings-form" value="document">
                 <SwitchRow checked={autoImageGeneration} onCheckedChange={setAutoImageGeneration}>
-                  生成方案时自动生成架构图和流程图
+                  允许 Agent 使用 image_generate 生成架构图和流程图
                 </SwitchRow>
                 <SwitchRow checked={autoPdfExport} onCheckedChange={setAutoPdfExport}>
                   生成 Word 后自动导出 PDF
@@ -987,6 +1096,47 @@ function SettingsPanel({
               </Tabs.Content>
 
               <Tabs.Content className="settings-form" value="advanced">
+                <label>
+                  Agent Runtime
+                  <select
+                    value={agentRuntime}
+                    onChange={(event) => setAgentRuntime(event.target.value as AgentRuntimeKind)}
+                  >
+                    <option value="openai-chat">OpenAI Chat Runtime</option>
+                    <option value="pi-agent">Pi Agent Runtime 适配层</option>
+                  </select>
+                </label>
+                <RuntimeStatusPanel settings={settings} check={runtimeCheck} />
+                <label>
+                  Pi Agent 包名
+                  <input
+                    value={piAgentPackage}
+                    onChange={(event) => setPiAgentPackage(event.target.value)}
+                    placeholder="例如 @scope/pi-agent-runtime，留空使用 OpenAI 回退"
+                  />
+                </label>
+                <label>
+                  Pi Agent 导出
+                  <input
+                    value={piAgentExport}
+                    onChange={(event) => setPiAgentExport(event.target.value)}
+                    placeholder="例如 createRuntime，留空使用 default"
+                  />
+                </label>
+                <p className="settings-note">
+                  Pi Agent 以可选插件方式动态加载；未配置或加载失败时，会保留当前 OpenAI Chat Runtime 回退链路。
+                </p>
+                <div className="runtime-check-actions">
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    onClick={() => void runRuntimeCheck()}
+                    disabled={checkingRuntime}
+                  >
+                    {checkingRuntime ? <Loader2 size={14} className="spin" /> : <Play size={14} />}
+                    运行 Python 自检
+                  </button>
+                </div>
                 <label>
                   请求超时 ms
                   <input
@@ -1018,13 +1168,56 @@ function SettingsPanel({
         </Tabs.Root>
         <footer>
           <span>{settings?.runtime.envFilePath || ".env.local"}</span>
-          <button className="send-action" onClick={() => void save()}>
+          <button className="send-action" onClick={() => void save()} disabled={saving}>
+            {saving ? <Loader2 size={14} className="spin" /> : null}
             保存
           </button>
         </footer>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
+  );
+}
+
+function RuntimeStatusPanel({
+  settings,
+  check
+}: {
+  settings?: AppSettings;
+  check?: RuntimeCheckResult;
+}): JSX.Element {
+  const bundledPython = settings?.runtime.bundledPython;
+  const available = bundledPython?.available ?? false;
+
+  return (
+    <div className={`runtime-status ${available ? "available" : "missing"}`}>
+      <div>
+        <strong>{available ? "内置 Python 已启用" : "未发现内置 Python"}</strong>
+        <span>
+          {available
+            ? `${runtimeSourceLabel(bundledPython?.source)} · exec_bash 会优先使用随包 Python`
+            : "exec_bash 将回退到用户系统 PATH 中的 Python"}
+        </span>
+      </div>
+      {available ? <code title={bundledPython?.pythonExePath}>{bundledPython?.pythonExePath}</code> : null}
+      {check ? (
+        <div className="runtime-check-result">
+          <RuntimeCommandLine label="Python" check={check.python} />
+          <RuntimeCommandLine label="pip" check={check.pip} />
+          <small>检测时间：{formatDateTime(check.checkedAt)}</small>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function RuntimeCommandLine({ label, check }: { label: string; check: RuntimeCommandCheck }): JSX.Element {
+  return (
+    <div className={`runtime-command-line ${check.ok ? "ok" : "failed"}`}>
+      <span>{label}</span>
+      <strong>{check.ok ? "可用" : "失败"}</strong>
+      <code title={check.output || check.error}>{check.output || check.error}</code>
+    </div>
   );
 }
 
@@ -1115,6 +1308,22 @@ function formatDateTime(value: string): string {
     hour: "2-digit",
     minute: "2-digit"
   });
+}
+
+function runtimeSourceLabel(source?: AppSettings["runtime"]["bundledPython"]["source"]): string {
+  if (source === "resources") return "安装包资源";
+  if (source === "project") return "项目目录";
+  return "运行时资源";
+}
+
+function formatToolPreview(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed) return "";
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return content;
+  }
 }
 
 async function fileToBase64(file: File): Promise<string> {

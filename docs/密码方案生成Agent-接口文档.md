@@ -89,6 +89,7 @@ export interface PwdSafeAgentApi {
   settings: {
     get(): Promise<AppSettings>;
     save(input: UpdateAppSettingsInput): Promise<AppSettings>;
+    checkRuntime(): Promise<RuntimeCheckResult>;
   };
   events: {
     subscribe(listener: (event: RendererEvent) => void): () => void;
@@ -134,6 +135,7 @@ export interface PwdSafeAgentApi {
 | `attachment:remove` | Renderer -> Main | 删除待发送附件 |
 | `settings:get` | Renderer -> Main | 读取设置 |
 | `settings:save` | Renderer -> Main | 保存设置 |
+| `settings:check-runtime` | Renderer -> Main | 执行内置 Python / pip 自检 |
 
 ### 5.2 Push 型事件
 
@@ -221,7 +223,14 @@ export interface AttachmentRef {
 export interface AppSettings {
   runtime: {
     envFilePath: string;
-    configSource: ".env" | ".env.local";
+    configSource: ".env" | ".env.local" | "process";
+    bundledPython: {
+      available: boolean;
+      source?: "resources" | "project";
+      homeDir?: string;
+      pythonExePath?: string;
+      scriptsDir?: string;
+    };
   };
   openai: {
     baseUrl: string;
@@ -229,9 +238,20 @@ export interface AppSettings {
     chatModel: string;
     imageModel: string;
     imageSize: string;
+    imageQuality: string;
+    autoImageGeneration: boolean;
     requestTimeoutMs: number;
+    maxOutputTokens: number;
     apiKeyConfigured: boolean;
     imageApiKeyConfigured: boolean;
+  };
+  document: {
+    autoPdfExport: boolean;
+    libreOfficePath: string;
+  };
+  agent: {
+    runtime: "openai-chat" | "pi-agent";
+    execBashEnabled: boolean;
   };
 }
 
@@ -242,10 +262,37 @@ export interface UpdateAppSettingsInput {
     chatModel: string;
     imageModel: string;
     imageSize: string;
+    imageQuality: string;
+    autoImageGeneration: boolean;
     requestTimeoutMs: number;
+    maxOutputTokens: number;
     apiKey?: string;
     imageApiKey?: string;
   };
+  document: {
+    autoPdfExport: boolean;
+    libreOfficePath: string;
+  };
+  agent: {
+    runtime: "openai-chat" | "pi-agent";
+    execBashEnabled: boolean;
+  };
+}
+
+export interface RuntimeCommandCheck {
+  ok: boolean;
+  command: string;
+  source: "bundled" | "system";
+  output?: string;
+  error?: string;
+  durationMs: number;
+}
+
+export interface RuntimeCheckResult {
+  checkedAt: string;
+  bundledPython: AppSettings["runtime"]["bundledPython"];
+  python: RuntimeCommandCheck;
+  pip: RuntimeCommandCheck;
 }
 ```
 
@@ -679,6 +726,8 @@ export interface ExecBashResult {
 1. `cwd` 仅允许项目目录、缓存目录和模板工作目录。
 2. 默认超时建议 `30s`。
 3. 记录完整审计日志。
+4. Windows 打包态如果存在 `resources/runtime/win/python/python.exe` 或历史兼容路径 `resources/runtime/win/pyhton/python.exe`，Main 进程会在执行命令前自动注入内置 Python PATH；开发态对应项目根目录下的 `runtime/win/...`。
+5. 内置 Python 注入只影响 `exec_bash` 子进程环境，不会修改用户系统环境变量。
 
 ### 11.5 `write_file`
 
@@ -755,9 +804,10 @@ export interface SendFileResult {
 ### 行为规范
 
 1. 校验文件存在。
-2. 将文件写入或登记到 `artifact-service`。
-3. 触发 `artifact.created` 事件。
-4. 如果 `autoOpen = true`，前端收到事件后展示醒目文件条目。
+2. 只允许发送 `data/output` 中的产物；`path` 可以是绝对路径、相对项目根目录的 `data/output/...` 路径，也可以是输出目录下的文件名。
+3. 将文件写入或登记到 `artifact-service`；同一会话内同一路径不重复生成文件卡片。
+4. 触发 `artifact.created` 事件。
+5. 如果 `autoOpen = true`，前端收到事件后展示醒目文件条目。
 
 ### 11.8 `read_word`
 
@@ -949,7 +999,8 @@ await imageClient.images.generate({
 这套接口设计的重点不是做成 HTTP 风格，而是做成桌面端最适合的“IPC 命令 + 事件流”模型。这样既能适配 Pi Agent 的流式事件能力，也能让前端把工具调用过程和文件交付过程展示得足够清楚。
 ## 当前实现基线（2026-05-23）
 
-- `chat:prompt` 会触发后端 Agent 流程：用户消息入流、读取时间、读取模板、解析附件、调用 OpenAI Chat Completions、写入草稿文件、发送文件卡片。
+- `chat:prompt` 会触发后端 Agent 流程：用户消息入流、进入工具规划、由模型自主判断是否读取模板/附件或调用其他工具，然后流式生成回复；当用户明确需要方案交付时，再写入草稿文件并发送文件卡片。
+- 当用户只发送附件但未输入正文时，后端会生成一条“已上传附件”的用户消息，确保会话流和模型上下文都能感知这些可按需读取的资料。
 - `session:rename` 支持从侧边栏重命名会话，返回更新后的 `ChatSession` 并推送 `session.updated`。
 - `session:delete` 支持删除会话历史，返回删除后的会话列表；若删除最后一个会话，后端会自动创建新的空会话。
 - `attachment:pick` 支持选择 `docx/pdf/md/txt/png/jpg/jpeg/xlsx` 等文件，其中 `docx/pdf/md/txt/json/csv/log/yaml/yml` 可进入文本上下文。
@@ -959,6 +1010,11 @@ await imageClient.images.generate({
 - `artifact:preview(artifactId)` 返回文本、Markdown、图片或 PDF 预览数据，用于前端侧滑预览面板。
 - `stream.item.added` 与 `stream.item.updated` 用于前端增量展示消息、工具调用、阶段提示和文件卡片。
 - `session.deleted` 用于前端同步移除会话，并保持侧边栏当前选择始终有效。
-- `AGENT_EXEC_BASH_ENABLED` 已作为设置项暴露，仍默认关闭；开启后 Agent 才会注册和执行 `exec_bash` 工具。
+- `AGENT_RUNTIME` 已作为设置项暴露，默认 `openai-chat`；选择 `pi-agent` 时进入 Pi Runtime 适配层，当前版本回退到现有 OpenAI Chat Runtime。
+- `AGENT_EXEC_BASH_ENABLED` 已作为设置项暴露，当前默认启用；设置为 `false` 后 Agent 不再注册和执行 `exec_bash` 工具。
+- `exec_bash` 已支持 Windows 内置 Python runtime：优先使用随安装包复制到 `resources/runtime/win/python` 或 `resources/runtime/win/pyhton` 的运行时，保障无系统 Python 环境也能执行 Python 命令。
+- `settings:get` 的 `runtime.bundledPython` 会返回内置 Python 探测状态，设置面板据此展示当前来源和 `python.exe` 路径。
+- `settings:check-runtime` 会实际执行 Python 与 pip 版本检测，设置面板可显示自检结果，便于定位运行时缺 DLL、权限或杀软拦截问题。
+- 打包态 `.env.local`、`data/state.json`、附件缓存和生成产物保存到 Electron `userData` 目录；开发态仍使用项目根目录，便于调试。
 - `OPENAI_IMAGE_BASE_URL` 已作为设置项暴露；填写后仅生图请求使用该地址，留空时沿用 `OPENAI_BASE_URL`。
 - `OPENAI_IMAGE_API_KEY` 已作为设置项暴露；填写后仅生图请求使用该密钥，留空时沿用 `OPENAI_API_KEY`。

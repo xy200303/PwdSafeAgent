@@ -80,6 +80,35 @@ describe("renderer store", () => {
 
     expect(store.getState().chat.artifacts).toEqual([{ ...event.payload, sessionId: "session_a" }]);
   });
+
+  it("preserves tool detail previews from stream events", () => {
+    const session = makeSession("session_a", "A");
+    const event: RendererEvent = {
+      id: "event_3",
+      type: "stream.item.added",
+      sessionId: session.id,
+      payload: {
+        id: "tool_1",
+        kind: "tool",
+        toolCallId: "call_1",
+        toolName: "read_word",
+        status: "success",
+        summary: "已读取模板",
+        inputPreview: "{\"path\":\"docs/密码应用方案.docx\"}",
+        outputPreview: "模板正文摘要",
+        createdAt: "2026-05-23T00:01:00.000Z"
+      }
+    };
+
+    store.dispatch(setSessions([session]));
+    store.dispatch(applyRendererEvent(event));
+
+    expect(store.getState().chat.sessions[0]?.items[0]).toMatchObject({
+      kind: "tool",
+      inputPreview: "{\"path\":\"docs/密码应用方案.docx\"}",
+      outputPreview: "模板正文摘要"
+    });
+  });
 });
 
 function makeSession(id: string, title: string): ChatSession {

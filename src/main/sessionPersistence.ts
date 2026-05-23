@@ -11,7 +11,6 @@ export interface PersistedStateSnapshot {
   sessions: ChatSession[];
   attachments: AttachmentRef[];
   artifacts: ArtifactSummary[];
-  templateLoadedSessionIds: string[];
   sessionMemories: Record<string, SessionMemoryEntry[]>;
 }
 
@@ -28,7 +27,6 @@ export function loadPersistedState(filePath: string): PersistedStateSnapshot | n
     sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
     attachments: Array.isArray(parsed.attachments) ? parsed.attachments : [],
     artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
-    templateLoadedSessionIds: Array.isArray(parsed.templateLoadedSessionIds) ? parsed.templateLoadedSessionIds : [],
     sessionMemories: isMemoryRecord(parsed.sessionMemories) ? parsed.sessionMemories : {}
   };
 }
@@ -41,7 +39,6 @@ export function savePersistedState(filePath: string, snapshot: PersistedStateSna
     sessions: snapshot.sessions,
     attachments: snapshot.attachments,
     artifacts: snapshot.artifacts,
-    templateLoadedSessionIds: snapshot.templateLoadedSessionIds,
     sessionMemories: snapshot.sessionMemories
   };
   writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
