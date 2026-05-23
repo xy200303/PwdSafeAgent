@@ -475,7 +475,7 @@ Electron 窗口建议最小宽度 `1280px`，最小高度 `800px`。
 - 设置面板已使用 Radix Tabs 分为“模型 / 文档 / 高级”，仍然以右侧滑出面板呈现，不进入聊天主流。
 - 设置面板模型页已支持“生图 Base URL”，可让图像生成走独立模型网关；留空时沿用通用 Base URL。
 - 设置面板模型页已支持“生图 API Key”，可让图像生成使用独立密钥；留空时沿用通用 API Key。
-- 设置面板高级页已加入 Agent Runtime 选择，默认 `openai-chat`，可切换到 `pi-agent` 适配层。
+- 设置面板高级页固定展示内置 Pi Agent 引擎；后端直接调用 `@mariozechner/pi-coding-agent`，不再要求配置插件包名。
 - 设置面板高级页已加入 `exec_bash` 开关，默认启用；如需收紧本地命令能力，可在设置中关闭或将 `AGENT_EXEC_BASH_ENABLED=false` 写入 `.env.local`。
 - 工具调用行支持 `running`、`success`、`failed` 三种状态，失败状态使用独立错误图标显示。
 - 输入区支持文本输入、选择文件、粘贴文件；附件在发送前以 chip 形式显示并可移除。

@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import dotenv from "dotenv";
 import { compactText, getCurrentTimeText } from "./agentTools";
-import { createAgentRuntime, normalizeAgentRuntimeKind, type AgentRuntimeHost, type MessageStreamItem } from "./agentRuntime";
+import { createAgentRuntime, type AgentRuntimeHost, type MessageStreamItem } from "./agentRuntime";
 import { prepareImportedAttachments } from "./attachmentImport";
 import { resolveAppPaths } from "./appPaths";
 import { buildArtifactPreview } from "./artifactPreview";
@@ -16,6 +16,7 @@ import {
   getBundledPythonRuntimeStatus
 } from "./runtimeDiagnostics";
 import { registerContentSecurityPolicy } from "./securityHeaders";
+import { renderSchemeChapterGuide } from "./schemePlan";
 import { loadPersistedState, savePersistedState, type PersistedStateSnapshot, type SessionMemoryEntry } from "./sessionPersistence";
 import type {
   AppSettings,
@@ -152,6 +153,8 @@ function loadEnv(): AppSettings {
       imageSize: process.env.OPENAI_IMAGE_SIZE || "1536x1024",
       imageQuality: process.env.OPENAI_IMAGE_QUALITY || "high",
       autoImageGeneration: parseBooleanEnv(process.env.OPENAI_AUTO_IMAGE_GENERATION, true),
+      thinkingEnabled: parseBooleanEnv(process.env.OPENAI_THINKING_ENABLED, true),
+      reasoningEffort: process.env.OPENAI_REASONING_EFFORT || "",
       requestTimeoutMs: Number(process.env.OPENAI_REQUEST_TIMEOUT_MS || 120000),
       maxOutputTokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS || 16000),
       apiKeyConfigured: Boolean(process.env.OPENAI_API_KEY),
@@ -162,10 +165,7 @@ function loadEnv(): AppSettings {
       libreOfficePath: process.env.LIBREOFFICE_PATH || ""
     },
     agent: {
-      runtime: normalizeAgentRuntimeKind(process.env.AGENT_RUNTIME),
-      execBashEnabled: parseBooleanEnv(process.env.AGENT_EXEC_BASH_ENABLED, true),
-      piAgentPackage: process.env.PI_AGENT_PACKAGE || "",
-      piAgentExport: process.env.PI_AGENT_EXPORT || ""
+      execBashEnabled: parseBooleanEnv(process.env.AGENT_EXEC_BASH_ENABLED, true)
     }
   };
 }
@@ -183,12 +183,11 @@ function saveEnv(input: UpdateAppSettingsInput): AppSettings {
     { key: "OPENAI_IMAGE_SIZE", value: input.openai.imageSize },
     { key: "OPENAI_IMAGE_QUALITY", value: input.openai.imageQuality },
     { key: "OPENAI_AUTO_IMAGE_GENERATION", value: input.openai.autoImageGeneration },
+    { key: "OPENAI_THINKING_ENABLED", value: input.openai.thinkingEnabled },
+    { key: "OPENAI_REASONING_EFFORT", value: input.openai.reasoningEffort },
     { key: "OPENAI_REQUEST_TIMEOUT_MS", value: input.openai.requestTimeoutMs },
     { key: "OPENAI_MAX_OUTPUT_TOKENS", value: input.openai.maxOutputTokens },
-    { key: "AGENT_RUNTIME", value: input.agent.runtime },
     { key: "AGENT_EXEC_BASH_ENABLED", value: input.agent.execBashEnabled },
-    { key: "PI_AGENT_PACKAGE", value: input.agent.piAgentPackage },
-    { key: "PI_AGENT_EXPORT", value: input.agent.piAgentExport },
     { key: "AGENT_AUTO_PDF_EXPORT", value: input.document.autoPdfExport },
     { key: "LIBREOFFICE_PATH", value: input.document.libreOfficePath }
   ]);
@@ -426,10 +425,12 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
     "不要在第一轮或资料明显不足时直接生成 Word、PDF、图片或发送文件；此时应先总结已知信息、指出缺口，并继续澄清关键事实。",
     "每当用户补充了项目关键信息，优先调用 remember_project 沉淀已确认事实和待补充信息。项目档案应覆盖：应用系统、建设单位、单位省份、单位地址、邮编、等保级别、系统边界、业务场景、部署架构、应用子系统、关键数据、用户角色、密码产品、机房/云平台、外部接口和交付要求。",
     "只有当用户明确说“生成/导出/输出/形成方案/出 Word/PDF/画图”等交付意图，或项目档案已经标记为生成就绪时，才调用 write_word、write_pdf、image_generate、send_file 等最终交付工具。",
-    "最终生成时需要严格参考用户给出的 Word 模板结构，生成专业、可复核、可落地的密码应用方案内容。",
-    "方案需要覆盖系统概况、密码应用需求、密码应用设计、密钥管理、实施计划、风险与符合性说明等章节。",
+    "最终生成时需要严格参考用户给出的 Word 模板结构，由大模型逐章生成所有正文内容，不要依赖模板中的“待补充/XXX”文本。",
+    "不要一次性粗糙生成：若信息不足，应引导用户按章节补齐；可以先生成第 1-2 章，再生成第 3-4 章，再生成第 5 章和图示，最后生成第 6-8 章与完整 Word。",
+    "方案图示也必须由工具真实生成：最终 Word 至少需要网络架构图、网络拓扑图、密码应用技术架构图、典型业务密码应用流程图。先调用 image_generate，再调用 write_word 并传入 diagrams。",
+    renderSchemeChapterGuide(),
     "回复使用中文 Markdown，必要时给出缺失资料清单。",
-    "不要编造用户未提供的关键事实；若资料不足，用“待补充/需确认”标识。",
+    "不要编造用户未提供的关键事实；对话阶段资料不足时可以说明“待补充/需确认”，但最终 Word 正文和图示不得残留这些标识。",
     "工具调用由你按任务需要自主决策：寒暄、普通问答和资料澄清阶段不要默认读取模板或附件；只有分析附件、查询最新资料、沉淀项目档案或交付文件确有需要时，才调用对应工具。",
     "当进入最终交付阶段并需要 Word、PDF、Markdown 或图片文件时，必须通过 write_word/write_pdf/write_file/image_generate 等工具真实生成文件；不要只在文本回复中声称已经生成。",
     "最终文件生成后，如果工具结果没有自动展示文件卡片，再调用 send_file 将 data/output 中的产物发送给前端。",
@@ -511,27 +512,6 @@ function buildUserMessageContent(input: ChatPromptInput): string {
   return `${message}\n\n${attachmentText}`;
 }
 
-async function streamMockResponse(sessionId: string, assistantItem: MessageStreamItem): Promise<void> {
-  const memory = sessionMemories.get(sessionId) ?? [];
-  const hasContext = memory.length > 0;
-  const chunks = [
-    "已收到你的需求。当前不会自动读取模板或附件，我会在生成方案、分析资料或导出文件时按需调用工具。\n\n",
-    hasContext ? `当前会话已有 ${memory.length} 份工具读取上下文。\n\n` : "当前还没有工具读取的模板或附件上下文。\n\n",
-    "我会按密码应用方案模板推进：\n\n",
-    "1. 建立系统事实模型：建设单位、系统边界、业务场景、数据类型和等保级别。\n",
-    "2. 对照 `GB/T 39786-2021` 组织密码应用需求与差距分析。\n",
-    "3. 输出密码应用总体架构、典型流程、密钥管理、产品部署和实施计划。\n",
-    "4. 对缺失材料使用“待补充/需确认”标识，避免编造。\n\n",
-    "当前处于本地演示模式。配置 `OPENAI_API_KEY` 后，会切换为 OpenAI Chat Completions 的真实流式生成。"
-  ];
-
-  for (const chunk of chunks) {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 140));
-    assistantItem.content += chunk;
-    updateItem(sessionId, assistantItem);
-  }
-}
-
 function createAssistantMessage(sessionId: string): MessageStreamItem {
   return addItem(sessionId, {
     id: createId("msg"),
@@ -563,8 +543,7 @@ function createAgentRuntimeHost(): AgentRuntimeHost {
     getBundledPythonRuntime: () => findBundledPythonRuntime({ rootDir: projectRootDir, resourcesDir }),
     createArtifact: (sessionId, filePath) => {
       createArtifact(sessionId, filePath);
-    },
-    streamMockResponse
+    }
   };
 }
 
@@ -574,7 +553,7 @@ async function runAgentResponse(
   userPrompt: string,
   onAssistantCreated: (assistantItem: MessageStreamItem) => void
 ): Promise<MessageStreamItem> {
-  const runtime = createAgentRuntime(loadEnv().agent.runtime, createAgentRuntimeHost());
+  const runtime = createAgentRuntime(createAgentRuntimeHost());
   return runtime.runTurn({
     sessionId,
     userPrompt,

@@ -247,13 +247,37 @@ describe("agentToolRegistry", () => {
 
   it("executes write_word with the official scheme template", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-word-"));
+    const diagramPaths = [
+      join(dir, "network-architecture.png"),
+      join(dir, "network-topology.png"),
+      join(dir, "crypto-architecture.png"),
+      join(dir, "business-flow.png")
+    ];
 
     try {
+      for (const diagramPath of diagramPaths) {
+        await writeFile(
+          diagramPath,
+          Buffer.from(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "base64"
+          )
+        );
+      }
+
       const result = await executeAgentToolCall(
         createToolCall("write_word", {
           name: "统一身份认证系统密码应用方案.docx",
           prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心\n单位省份：广东省",
-          content: "## 方案摘要\n本方案通过密码服务管理平台和服务器密码机提供密码应用能力。"
+          content: createCompleteSchemeContent(),
+          template_fields: createCompleteTemplateFields(),
+          diagrams: [
+            { label: "网络架构图", kind: "architecture", path: diagramPaths[0] },
+            { label: "网络拓扑图", kind: "architecture", path: diagramPaths[1] },
+            { label: "密码应用技术架构图", kind: "architecture", path: diagramPaths[2] },
+            { label: "典型业务密码应用流程图", kind: "flow", path: diagramPaths[3] }
+          ],
+          render_mode: "full_document"
         }),
         {
           ...createContext(process.cwd()),
@@ -266,7 +290,8 @@ describe("agentToolRegistry", () => {
       expect(result.artifactPath).toBeTruthy();
       expect(result.summary).toContain("已生成");
       expect(extracted.value).toContain("统一身份认证系统");
-      expect(extracted.value).toContain("方案摘要");
+      expect(extracted.value).toContain("密码应用设计");
+      expect(extracted.value).toContain("网络拓扑图");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -297,6 +322,95 @@ function createContext(dir: string): AgentToolExecutionContext {
   };
 }
 
+function createCompleteSchemeContent(): string {
+  return [
+    "# 统一身份认证系统密码应用方案",
+    "## 1. 背景",
+    "### 1.1. 系统建设规划",
+    "统一身份认证系统面向政务服务统一认证、权限管理和日志审计场景建设。",
+    "### 1.2. 法律法规要求",
+    "方案依据《密码法》、GB/T 39786-2021 等要求进行规划。",
+    "## 2. 系统概述",
+    "### 2.1. 基本情况",
+    "建设单位为示例政务服务中心，系统安全保护等级为三级。",
+    "### 2.2. 计算平台现状",
+    "系统采用 B/S 架构，部署在核心机房，包含应用服务器、数据库和日志审计组件。",
+    "### 2.2.2. 网络环境",
+    "网络划分为安全接入区、交换区、服务器区和安全运维区。",
+    "图：网络架构图",
+    "图：网络拓扑图",
+    "### 2.3. 业务应用现状",
+    "系统包含认证服务和权限管理两个应用子系统，处理身份鉴别数据、重要业务数据和日志数据。",
+    "## 3. 密码应用需求分析",
+    "### 3.1. 物理和环境安全",
+    "需保护门禁记录和视频监控记录完整性。",
+    "### 3.2. 网络和通信安全",
+    "需实现通信实体身份鉴别、重要数据传输机密性和完整性保护。",
+    "### 3.3. 设备和计算安全",
+    "需保护远程管理通道、系统资源访问控制信息和日志记录完整性。",
+    "### 3.4. 应用和数据安全",
+    "需实现应用身份鉴别、访问控制完整性、重要数据传输与存储保护。",
+    "## 4. 安全目标及设计原则",
+    "### 4.1. 安全目标",
+    "建立覆盖物理、网络、设备、应用和管理层面的密码应用保障体系。",
+    "### 4.2. 设计原则和依据",
+    "遵循合规性、适用性、体系化和可运维原则。",
+    "## 5. 密码应用设计",
+    "### 5.1. 密码应用技术框架",
+    "图：密码应用技术架构图",
+    "系统通过密码服务管理平台、服务器密码机、签名验签服务器和数字证书认证系统提供统一密码能力。",
+    "### 5.2. 计算平台密码应用方案",
+    "在网络和通信、设备和计算、应用和数据等层面部署密码防护措施。",
+    "### 5.3.7. 密钥管理方式",
+    "密钥管理覆盖密钥生成、分发、存储、使用、更新、归档、撤销、备份、恢复和销毁全过程。",
+    "### 5.4. 业务应用的密码应用方案",
+    "图：典型业务密码应用流程图",
+    "业务流程包括用户登录、证书校验、签名验签、数据加密存储和日志审计。",
+    "## 6. 安全管理方案",
+    "### 6.1. 管理制度",
+    "建立密码应用安全管理制度和密钥管理规则。",
+    "### 6.2. 人员管理",
+    "明确密钥管理员、密码操作员和密码审计员职责。",
+    "### 6.3. 建设运行",
+    "按照方案实施建设并在投运前完成密码应用安全性评估。",
+    "### 6.4. 应急处置",
+    "建立密码应用安全事件应急处置流程。",
+    "## 7. 安全与合规性分析",
+    "本方案对照 GB/T 39786-2021 对物理、网络、设备、应用和管理要求进行符合性说明。",
+    "## 8. 实施保障方案",
+    "### 8.1. 实施内容",
+    "实施内容包括设备采购部署、系统集成改造、联调测试和试运行。",
+    "### 8.2. 实施计划",
+    "项目按启动、调研、设计、实施、测试、试运行和验收阶段推进。",
+    "### 8.3. 保障措施",
+    "通过组织、人员、经费和质量保障确保项目落地。",
+    "### 8.4. 经费概算",
+    "经费覆盖密码产品、集成实施、测试评估和运维保障。"
+  ].join("\n\n");
+}
+
+function createCompleteTemplateFields(): Array<{ key: string; value: string }> {
+  return [
+    { key: "应用系统", value: "统一身份认证系统" },
+    { key: "建设单位", value: "示例政务服务中心" },
+    { key: "单位省份", value: "广东省" },
+    { key: "单位地址", value: "广州市天河区示例路 1 号" },
+    { key: "单位邮编", value: "510000" },
+    { key: "等保级别", value: "三级" },
+    { key: "应用子系统1", value: "认证服务" },
+    { key: "应用子系统2", value: "权限管理" },
+    { key: "物理机房1", value: "核心机房" },
+    { key: "物理机房1管理单位", value: "示例政务服务中心" },
+    { key: "物理机房1地址", value: "广州市天河区数据中心" },
+    { key: "物理机房2", value: "不涉及灾备机房" },
+    { key: "物理机房2管理单位", value: "不涉及" },
+    { key: "物理机房2地址", value: "不涉及" },
+    { key: "云平台", value: "不涉及云平台" },
+    { key: "密码系统产品", value: "密码服务管理平台、服务器密码机、签名验签服务器" },
+    { key: "密码安全产品", value: "密码服务管理平台、服务器密码机、签名验签服务器" }
+  ];
+}
+
 function createSettings(): AppSettings {
   return {
     runtime: {
@@ -314,6 +428,8 @@ function createSettings(): AppSettings {
       imageSize: "1536x1024",
       imageQuality: "high",
       autoImageGeneration: true,
+      thinkingEnabled: true,
+      reasoningEffort: "",
       requestTimeoutMs: 120000,
       maxOutputTokens: 16000,
       apiKeyConfigured: false,
@@ -324,7 +440,6 @@ function createSettings(): AppSettings {
       libreOfficePath: ""
     },
     agent: {
-      runtime: "openai-chat",
       execBashEnabled: false
     }
   };

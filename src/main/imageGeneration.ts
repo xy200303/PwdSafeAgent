@@ -18,6 +18,7 @@ export interface ImageGenerationConfig {
 
 export interface DiagramGenerationInput {
   kind: DiagramKind;
+  label?: string;
   sessionTitle: string;
   prompt: string;
   memory: string;
@@ -42,7 +43,7 @@ export function shouldGenerateDiagramArtifacts(prompt: string, content: string):
 }
 
 export function buildDiagramPrompt(input: DiagramGenerationInput): string {
-  const title = input.kind === "architecture" ? "密码应用技术架构图" : "典型业务密码应用流程图";
+  const title = input.label || (input.kind === "architecture" ? "密码应用技术架构图" : "典型业务密码应用流程图");
   const context = compactText(`${input.prompt}\n\n${input.generatedMarkdown}\n\n${input.memory}`, 9000);
   const focus =
     input.kind === "architecture"
@@ -54,7 +55,7 @@ export function buildDiagramPrompt(input: DiagramGenerationInput): string {
     "视觉风格：专业政务/企业安全方案插图，蓝灰色系，扁平矢量信息图，白底，线条清晰，中文标签清晰可读，不要照片质感。",
     `内容重点：${focus}`,
     "输出要求：使用分区、箭头、编号和简洁中文标签；不要出现乱码、英文占位符、水印、品牌 Logo 或虚构产品厂商。",
-    "如果资料不足，可使用“待补充”标识，但图中结构必须完整、可用于方案评审。",
+    "如果资料不足，应优先依据已确认信息绘制通用结构，不要在最终图中出现“待补充”“需确认”“XXX”等占位标识。",
     "",
     "参考上下文：",
     context
@@ -67,7 +68,7 @@ export async function generateDiagramImage(
   signal?: AbortSignal
 ): Promise<GeneratedDiagramResult> {
   const prompt = buildDiagramPrompt(input);
-  const diagramName = input.kind === "architecture" ? "密码应用技术架构图" : "典型业务密码应用流程图";
+  const diagramName = input.label || (input.kind === "architecture" ? "密码应用技术架构图" : "典型业务密码应用流程图");
   const safeBaseName = sanitizeFileName(`${input.sessionTitle}-${diagramName}-${input.artifactStamp}`);
 
   if (!config.apiKey) {

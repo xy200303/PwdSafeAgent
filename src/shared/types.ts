@@ -2,8 +2,6 @@ export type MessageRole = "user" | "assistant";
 
 export type SessionStatus = "idle" | "running" | "completed" | "failed";
 
-export type AgentRuntimeKind = "openai-chat" | "pi-agent";
-
 export type BundledPythonRuntimeSource = "resources" | "project";
 
 export interface BundledPythonRuntimeStatus {
@@ -156,6 +154,8 @@ export interface AppSettings {
     imageSize: string;
     imageQuality: string;
     autoImageGeneration: boolean;
+    thinkingEnabled: boolean;
+    reasoningEffort: string;
     requestTimeoutMs: number;
     maxOutputTokens: number;
     apiKeyConfigured: boolean;
@@ -166,10 +166,7 @@ export interface AppSettings {
     libreOfficePath: string;
   };
   agent: {
-    runtime: AgentRuntimeKind;
     execBashEnabled: boolean;
-    piAgentPackage: string;
-    piAgentExport: string;
   };
 }
 
@@ -182,6 +179,8 @@ export interface UpdateAppSettingsInput {
     imageSize: string;
     imageQuality: string;
     autoImageGeneration: boolean;
+    thinkingEnabled: boolean;
+    reasoningEffort: string;
     requestTimeoutMs: number;
     maxOutputTokens: number;
     apiKey?: string;
@@ -192,10 +191,7 @@ export interface UpdateAppSettingsInput {
     libreOfficePath: string;
   };
   agent: {
-    runtime: AgentRuntimeKind;
     execBashEnabled: boolean;
-    piAgentPackage: string;
-    piAgentExport: string;
   };
 }
 

@@ -109,7 +109,6 @@ OPENAI_IMAGE_SIZE=1536x1024
 OPENAI_IMAGE_QUALITY=high
 OPENAI_REQUEST_TIMEOUT_MS=120000
 OPENAI_MAX_OUTPUT_TOKENS=16000
-AGENT_RUNTIME=openai-chat
 AGENT_EXEC_BASH_ENABLED=true
 ```
 
@@ -118,10 +117,11 @@ AGENT_EXEC_BASH_ENABLED=true
 1. Renderer 进程不直接读取 API Key。
 2. `OPENAI_IMAGE_BASE_URL` 可单独配置生图服务地址；留空时生图沿用 `OPENAI_BASE_URL`。
 3. `OPENAI_IMAGE_API_KEY` 可单独配置生图密钥；留空时生图沿用 `OPENAI_API_KEY`。
-4. `AGENT_RUNTIME` 默认使用 `openai-chat`；可切换为 `pi-agent` 适配层，当前版本会保留 OpenAI Chat Runtime 回退链路。
+4. Pi Agent 作为后端内置依赖直接调用，不再通过环境变量动态加载插件包，也不回退到自实现 OpenAI Chat Runtime。
 5. 不使用 `VITE_` 前缀暴露密钥到前端。
 6. Main 进程负责读取 `.env` 并向前端下发脱敏后的配置摘要。
 7. 设置页如果允许修改配置，应由 Main 进程写回 `.env.local` 并触发重载。
+8. 打包时项目根目录 `.env` 会作为只读资源复制到 `resources/.env`，用于给终端用户提供默认模型配置；用户本机 `.env.local` 仍然拥有更高优先级。
 
 ## 4. 总体架构
 
@@ -130,7 +130,7 @@ graph TB
     U[用户] --> R[React 侧边栏+会话区]
     R --> P[Preload 安全桥]
     P --> M[Electron Main]
-    M --> A[Pi Agent Runtime]
+    M --> A[Pi Agent Bridge]
     M --> L[OpenAI Chat Service]
     M --> I[OpenAI Image Service]
     M --> D[文档生成引擎]
@@ -202,8 +202,8 @@ graph TB
 
 | 模块 | 说明 |
 | --- | --- |
-| `agent-runtime` | Pi Session 创建、恢复、关闭、事件订阅 |
-| `llm-service` | OpenAI Chat Completions 适配、流式输出、工具调用转换 |
+| `pi-agent-bridge` | 直接调用 `@mariozechner/pi-coding-agent`，接入 Pi Session、流式消息和工具事件 |
+| `model-config` | 将 `.env` 中的 OpenAI-compatible 模型配置注册给 Pi Agent SDK |
 | `image-service` | OpenAI Images API 调用、图片落盘、元数据登记 |
 | `tool-registry` | 注册 `web_search/time/image_generate/...` 自定义工具 |
 | `document-tools-service` | Word 读取/填充、PDF 解析/导出、文档预处理 |
@@ -358,7 +358,7 @@ stateDiagram-v2
 4. 如果没有找到内置 Python，则保持系统 PATH 行为，继续使用用户本机已有的 Python。
 5. 设置页提供运行时自检入口，实际执行 `python --version` 和 `python -m pip --version`，用于确认随包运行时在当前用户电脑上可用。
 
-打包时通过 Electron Builder 的 `extraResources` 把 `runtime` 和 `docs` 一起复制到安装包资源目录。`docs` 也作为打包资源处理，是为了保证 `docs/密码应用方案.docx` 在无源码目录的用户电脑上仍可被 `read_word` 和 `write_word` 使用。
+打包时通过 Electron Builder 的 `extraResources` 把 `runtime`、`docs` 和 `.env` 一起复制到安装包资源目录。`docs` 也作为打包资源处理，是为了保证 `docs/密码应用方案.docx` 在无源码目录的用户电脑上仍可被 `read_word` 和 `write_word` 使用；`.env` 用于提供默认模型配置。
 
 ### 7.6 打包态数据目录
 
@@ -366,7 +366,7 @@ stateDiagram-v2
 
 Windows 打包态需要避免写入安装目录，因此运行时路径分为两类：
 
-1. 只读资源：`resources/docs`、`resources/runtime`，随安装包分发。
+1. 只读资源：`resources/docs`、`resources/runtime`、`resources/.env`，随安装包分发。
 2. 可写数据：Electron `userData` 目录下的 `.env.local` 与 `data` 目录，保存模型配置、会话状态、附件副本和生成产物。
 
 这样用户把应用安装到 `Program Files` 或其他受控目录时，Agent 仍能保存配置并生成文件。
@@ -632,11 +632,11 @@ PwdSafeAgent/
 - `read_pdf` 使用 `pdf-parse` 抽取 PDF 文本；文本类附件支持 `.md`、`.txt`、`.json`、`.csv`、`.log`、`.yaml`、`.yml`。
 - 用户选择或粘贴的附件会作为可读取资源进入会话；只有当模型判断需要分析资料、生成方案或导出文件时，才调用 `read_word`、`read_pdf` 或 `read_file` 读取内容。
 - 仅上传附件的回合会在聊天流中显示附件名称，并作为用户消息进入模型上下文，但不会直接读取文件正文。
-- 工具读取结果会进入会话记忆，并作为 OpenAI Chat Completions 的系统上下文参与后续生成。
-- 后端已抽出 `agentRuntime` 适配层，当前默认运行时为 `openai-chat`，`pi-agent` 作为可配置预留运行时并回退到现有 OpenAI Chat Runtime。
+- 工具读取结果会进入会话记忆，并由 Pi Agent 桥接层作为后续生成上下文使用。
+- 后端已改为强制 `pi-agent` 运行时；不再内置 OpenAI Chat Runtime 回退链路。
 - Windows 内置 Python runtime 已接入 `exec_bash`：开发态读取 `runtime/win/python` 或 `runtime/win/pyhton`，打包态读取 `resources/runtime/win/...`，用于无系统 Python 的用户电脑。
 - 打包入口已增加 Electron Builder，`runtime` 与 `docs` 会作为 `extraResources` 复制进安装包。
-- 打包态已区分只读资源目录和可写用户数据目录：`.env.local`、会话状态、附件和输出文件写入 Electron `userData`，避免安装目录不可写。
+- 打包态已区分只读资源目录和可写用户数据目录：内置 `.env` 读取自 `resources/.env`，`.env.local`、会话状态、附件和输出文件写入 Electron `userData`，避免安装目录不可写。
 - 设置页已提供 Python runtime 自检能力，可快速验证内置 Python 和 pip 是否能被主进程正常执行。
-- 无 `OPENAI_API_KEY` 时保留本地 mock 流式响应；配置后切换为真实 OpenAI Chat Completions 流。
+- Pi Agent 作为内部依赖直接调用；不再使用本地 mock、动态插件包或 OpenAI Chat Completions 回退。
 - 当用户明确要求交付方案文件时，模型应自主调用 `write_word`、`write_pdf`、`write_file` 或 `image_generate` 生成真实产物，并通过 `send_file` 将文件卡片发送给前端；后端不再基于回复内容做启发式自动生成。

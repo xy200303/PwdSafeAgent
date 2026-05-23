@@ -16,7 +16,14 @@ import { hasDiagramArtifactIntent } from "./artifactIntent";
 import { createBundledPythonEnv, type BundledPythonRuntime } from "./bundledRuntime";
 import { exportDocxToPdf } from "./documentExport";
 import { generateDiagramImage, type DiagramKind } from "./imageGeneration";
-import { writeSchemeDocxFromTemplate } from "./schemeDocument";
+import {
+  validateGeneratedSchemeDocx,
+  validateSchemeDraftCompleteness,
+  writeSchemeDocxFromTemplate,
+  type SchemeCompletenessResult,
+  type SchemeDiagramAsset
+} from "./schemeDocument";
+import { renderSchemeChapterGuide } from "./schemePlan";
 
 const execAsync = promisify(exec);
 
@@ -55,7 +62,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       function: {
         name: "remember_project",
         description:
-          "沉淀本轮对话中已经确认的项目事实和缺口。用于持续维护项目档案；信息收集阶段应优先使用它，而不是直接生成 Word 或图片。",
+          "沉淀本轮对话中已经确认的项目事实、待补充信息和章节生成进度。用于持续维护项目档案；信息收集阶段应优先使用它，而不是直接生成 Word 或图片。",
         parameters: {
           type: "object",
           properties: {
@@ -213,7 +220,12 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       type: "function",
       function: {
         name: "write_word",
-        description: "按照 docs/密码应用方案.docx 模板生成专业密码应用方案 Word 文档，并登记为前端文件卡片。",
+        description: [
+          "按照 docs/密码应用方案.docx 模板生成专业密码应用方案 Word 文档，并登记为前端文件卡片。",
+          "content 必须是大模型已经逐章生成的完整方案正文，不要只传摘要或局部章节；如果还缺章节，应继续对话补齐，不要调用本工具。",
+          "最终 Word 会进行完整性检查：不得残留待补充、需确认、XXX、${...}、{...} 等占位符，且必须包含核心章节和核心图示。",
+          renderSchemeChapterGuide()
+        ].join("\n"),
         parameters: {
           type: "object",
           properties: {
@@ -232,7 +244,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             template_fields: {
               type: "array",
               description:
-                "可选模板字段覆盖。用于把用户已明确提供的信息写入 Word 模板占位符，key 可用应用系统、建设单位、单位省份、单位地址、单位邮编、等保级别、物理机房1、物理机房1地址、云平台、密码系统产品等。",
+                "可选模板字段覆盖。用于把用户已明确提供的信息写入 Word 模板占位符，key 可用应用系统、建设单位、单位省份、单位地址、单位邮编、等保级别、物理机房1、物理机房1地址、物理机房2地址、云平台、密码系统产品等。不涉及的字段也要填“不涉及”，避免模板残留待补充。",
               items: {
                 type: "object",
                 properties: {
@@ -248,6 +260,35 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
                 required: ["key", "value"],
                 additionalProperties: false
               }
+            },
+            diagrams: {
+              type: "array",
+              description:
+                "已由 image_generate 生成的图示文件，用于嵌入 Word。至少包含网络架构图、网络拓扑图、密码应用技术架构图、典型业务密码应用流程图。",
+              items: {
+                type: "object",
+                properties: {
+                  label: {
+                    type: "string",
+                    description: "图示名称，例如 网络架构图、网络拓扑图、密码应用技术架构图、典型业务密码应用流程图。"
+                  },
+                  kind: {
+                    type: "string",
+                    description: "图示类型，architecture 或 flow。"
+                  },
+                  path: {
+                    type: "string",
+                    description: "image_generate 返回的 data/output 图片路径。"
+                  }
+                },
+                required: ["label", "path"],
+                additionalProperties: false
+              }
+            },
+            render_mode: {
+              type: "string",
+              enum: ["full_document"],
+              description: "固定传 full_document：使用模板样式渲染完整方案正文，替换模板中的待补充草稿内容。"
             }
           },
           required: ["content"],
@@ -269,6 +310,10 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
               enum: ["architecture", "flow"],
               description: "architecture 表示技术架构图，flow 表示业务流程图。"
             },
+            label: {
+              type: "string",
+              description: "图示名称，例如 网络架构图、网络拓扑图、密码应用技术架构图、典型业务密码应用流程图。"
+            },
             prompt: {
               type: "string",
               description: "图片生成说明，应包含系统名称、设备、流程和中文标签要求。"
@@ -283,7 +328,8 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       type: "function",
       function: {
         name: "send_file",
-        description: "把 data/output 中已经存在的文件发送给前端显示为文件卡片。",
+        description:
+          "把 data/output 中已经存在且已通过完整性检查的文件发送给前端显示为文件卡片。发送 .docx 前会强制检查章节、占位符和图示，半成品会被拒绝。",
         parameters: {
           type: "object",
           properties: {
@@ -566,21 +612,50 @@ async function executeWriteWord(
   const safeName = sanitizeFileName(rawName.endsWith(".docx") ? rawName : `${rawName}.docx`);
   const outputPath = join(context.outputDir, `${Date.now().toString(36)}-${safeName}`);
   const templatePath = join(context.docsDir, "密码应用方案.docx");
+  const diagrams = readDiagramAssetsArg(args, context);
+  const draftValidation = validateSchemeDraftCompleteness(content, diagrams);
+  if (!draftValidation.ok) {
+    return {
+      toolName: "write_word",
+      summary: "方案正文未完整，已阻止生成 Word",
+      content: [
+        "write_word blocked: scheme draft is incomplete",
+        formatSchemeValidationResult(draftValidation),
+        "请继续按章节生成缺失内容；缺图时先调用 image_generate，再把返回路径传入 write_word.diagrams。"
+      ].join("\n")
+    };
+  }
+
   const result = await writeSchemeDocxFromTemplate(templatePath, outputPath, {
     prompt: prompt || context.sessionTitle,
     memory: context.memory,
     generatedMarkdown: content,
     fields: readObjectArg(args, "fields"),
-    templateFields: readTemplateFieldsArg(args)
+    templateFields: readTemplateFieldsArg(args),
+    diagrams,
+    renderMode: "full_document"
   });
+  const documentValidation = await validateGeneratedSchemeDocx(outputPath);
+  if (!documentValidation.ok) {
+    return {
+      toolName: "write_word",
+      summary: "Word 已生成但未通过完整性检查，未登记为最终文件",
+      content: [
+        `write_word blocked: ${result.outputPath}`,
+        formatSchemeValidationResult(documentValidation),
+        "请补齐模板字段、章节正文和图示后重新调用 write_word。"
+      ].join("\n")
+    };
+  }
 
   return {
     toolName: "write_word",
-    summary: `已生成 ${result.fileName}，填充 ${result.filledFields.length} 项，待补充 ${result.missingFields.length} 项`,
+    summary: `已生成完整方案 ${result.fileName}，填充 ${result.filledFields.length} 项，嵌入图示 ${result.embeddedDiagrams.length} 项`,
     content: [
       `write_word completed: ${result.outputPath}`,
       `填充字段：${result.filledFields.join("、") || "无"}`,
-      `待补充字段：${result.missingFields.join("、") || "无"}`
+      `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`,
+      formatSchemeValidationResult(documentValidation)
     ].join("\n"),
     artifactPath: result.outputPath
   };
@@ -627,6 +702,7 @@ async function executeImageGenerate(
   }
 
   const kind = normalizeDiagramKind(readStringArg(args, "kind"));
+  const label = readStringArg(args, "label") || (kind === "architecture" ? "密码应用技术架构图" : "典型业务密码应用流程图");
   const prompt = readStringArg(args, "prompt") || "生成密码应用方案配图";
   const result = await generateDiagramImage(
     {
@@ -639,6 +715,7 @@ async function executeImageGenerate(
     },
     {
       kind,
+      label,
       sessionTitle: context.sessionTitle,
       prompt,
       memory: context.memory,
@@ -651,16 +728,16 @@ async function executeImageGenerate(
 
   return {
     toolName: "image_generate",
-    summary: `已生成 ${result.fileName}`,
-    content: `image_generate completed: ${result.fileName}`,
+    summary: `已生成 ${label}：${result.fileName}`,
+    content: [`image_generate completed: ${result.outputPath}`, `图示名称：${label}`, `图示类型：${kind}`].join("\n"),
     artifactPath: result.outputPath
   };
 }
 
-function executeSendFile(
+async function executeSendFile(
   args: Record<string, unknown>,
   context: AgentToolExecutionContext
-): AgentToolExecutionResult {
+): Promise<AgentToolExecutionResult> {
   const inputPath = readStringArg(args, "path");
   if (!inputPath) {
     return { toolName: "send_file", summary: "缺少文件路径", content: "send_file failed: missing path" };
@@ -670,6 +747,12 @@ function executeSendFile(
   assertPathInside(filePath, [context.outputDir], "send_file");
   if (!existsSync(filePath)) {
     throw new Error(`send_file 文件不存在：${basename(filePath)}`);
+  }
+  if (extname(filePath).toLowerCase() === ".docx") {
+    const validation = await validateGeneratedSchemeDocx(filePath);
+    if (!validation.ok) {
+      throw new Error(`send_file 已阻止发送未完成 Word：${formatSchemeValidationResult(validation)}`);
+    }
   }
 
   return {
@@ -870,6 +953,59 @@ function readTemplateFieldsArg(args: Record<string, unknown>): Array<Record<stri
   const value = args.template_fields ?? args.templateFields;
   if (!Array.isArray(value)) return undefined;
   return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+}
+
+function readDiagramAssetsArg(args: Record<string, unknown>, context: AgentToolExecutionContext): SchemeDiagramAsset[] {
+  const value = args.diagrams;
+  const explicitDiagrams = Array.isArray(value)
+    ? value
+        .map((item) => normalizeDiagramAsset(item, context))
+        .filter((item): item is SchemeDiagramAsset => Boolean(item))
+    : [];
+  if (explicitDiagrams.length) return explicitDiagrams;
+  return extractDiagramAssetsFromMemory(context.memory, context);
+}
+
+function normalizeDiagramAsset(item: unknown, context: AgentToolExecutionContext): SchemeDiagramAsset | undefined {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+  const record = item as Record<string, unknown>;
+  const label = typeof record.label === "string" ? record.label.trim() : "";
+  const rawPath = typeof record.path === "string" ? record.path.trim() : "";
+  if (!label || !rawPath) return undefined;
+
+  const path = resolveOutputToolPath(rawPath, context);
+  assertPathInside(path, [context.outputDir], "write_word.diagrams");
+  if (!existsSync(path)) return undefined;
+  return {
+    label,
+    kind: typeof record.kind === "string" ? record.kind.trim() : undefined,
+    path
+  };
+}
+
+function extractDiagramAssetsFromMemory(memory: string, context: AgentToolExecutionContext): SchemeDiagramAsset[] {
+  const assets: SchemeDiagramAsset[] = [];
+  const pattern = /image_generate completed:\s*(.+?)\s*\n图示名称：(.+?)(?:\n图示类型：(.+?))?(?=\n## |\nimage_generate completed:|$)/gs;
+  for (const match of memory.matchAll(pattern)) {
+    const rawPath = match[1]?.trim();
+    const label = match[2]?.trim();
+    if (!rawPath || !label) continue;
+    const asset = normalizeDiagramAsset({ path: rawPath, label, kind: match[3]?.trim() }, context);
+    if (asset && !assets.some((item) => item.path === asset.path)) assets.push(asset);
+  }
+  return assets;
+}
+
+function formatSchemeValidationResult(result: SchemeCompletenessResult): string {
+  return [
+    result.summary,
+    result.missingSections.length ? `缺少章节：${result.missingSections.join("、")}` : "",
+    result.missingDiagrams.length ? `缺少图示：${result.missingDiagrams.join("、")}` : "",
+    result.unresolvedMarkers.length ? `未完成标记：${result.unresolvedMarkers.join("、")}` : "",
+    `图示数量：${result.diagramCount}`
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function readNumberArg(args: Record<string, unknown>, key: string, fallback: number): number {

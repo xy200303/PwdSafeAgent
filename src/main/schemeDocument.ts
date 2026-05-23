@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, extname } from "node:path";
 import PizZip from "pizzip";
 import { compactText, getCurrentTimeText, sanitizeFileName } from "./agentTools";
+import { findMissingSchemeDiagrams, findMissingSchemeSections, REQUIRED_SCHEME_DIAGRAMS } from "./schemePlan";
 
 export interface SchemeDocumentInput {
   prompt: string;
@@ -10,9 +11,11 @@ export interface SchemeDocumentInput {
   fields?: SchemeTemplateFieldInput;
   templateFields?: SchemeTemplateFieldInput;
   diagrams?: SchemeDiagramAsset[];
+  renderMode?: SchemeDocumentRenderMode;
 }
 
 export type SchemeTemplateFieldInput = Record<string, unknown> | Array<Record<string, unknown>>;
+export type SchemeDocumentRenderMode = "append" | "full_document";
 
 export interface SchemeDiagramAsset {
   label: string;
@@ -29,6 +32,16 @@ export interface SchemeDocumentResult {
   appendedMarkdown: boolean;
   embeddedDiagrams: string[];
   templateReplacementCount: number;
+  renderMode: SchemeDocumentRenderMode;
+}
+
+export interface SchemeCompletenessResult {
+  ok: boolean;
+  missingSections: string[];
+  unresolvedMarkers: string[];
+  missingDiagrams: string[];
+  diagramCount: number;
+  summary: string;
 }
 
 export interface SchemeFactModel {
@@ -239,7 +252,11 @@ export async function writeSchemeDocxFromTemplate(
   const zip = new PizZip(content);
   const templateReplacementCount = replaceTemplatePlaceholders(zip, data);
   const renderedZip = zip;
-  const appendedMarkdown = appendGeneratedMarkdown(renderedZip, input.generatedMarkdown, facts);
+  const renderMode = input.renderMode ?? "append";
+  const appendedMarkdown =
+    renderMode === "full_document"
+      ? replaceDocumentBodyWithGeneratedMarkdown(renderedZip, input.generatedMarkdown, facts)
+      : appendGeneratedMarkdown(renderedZip, input.generatedMarkdown, facts);
   const embeddedDiagrams = await appendGeneratedDiagrams(renderedZip, input.diagrams ?? []);
   await mkdir(dirname(outputPath), { recursive: true });
   const buffer = renderedZip.generate({ type: "nodebuffer", compression: "DEFLATE" });
@@ -255,8 +272,41 @@ export async function writeSchemeDocxFromTemplate(
     facts,
     appendedMarkdown,
     embeddedDiagrams,
-    templateReplacementCount
+    templateReplacementCount,
+    renderMode
   };
+}
+
+export function validateSchemeDraftCompleteness(
+  markdown: string,
+  diagrams: SchemeDiagramAsset[] = []
+): SchemeCompletenessResult {
+  const text = normalizeValidationText(markdown);
+  const missingSections = findMissingSchemeSections(text);
+  const unresolvedMarkers = findUnresolvedSchemeMarkers(text);
+  const diagramText = `${text}\n${diagrams.map((diagram) => diagram.label).join("\n")}`;
+  const missingDiagrams = findMissingSchemeDiagrams(diagramText);
+  const diagramCount = diagrams.filter((diagram) => diagram.path && diagram.label.trim()).length;
+  return buildCompletenessResult({ missingSections, unresolvedMarkers, missingDiagrams, diagramCount });
+}
+
+export async function validateGeneratedSchemeDocx(filePath: string): Promise<SchemeCompletenessResult> {
+  const content = await readFile(filePath, "binary");
+  const zip = new PizZip(content);
+  const documentText = extractWordPackageText(zip);
+  const documentXml = zip.file("word/document.xml")?.asText() ?? "";
+  const missingSections = findMissingSchemeSections(documentText);
+  const unresolvedMarkers = findUnresolvedSchemeMarkers(documentText);
+  const missingDiagrams = findMissingSchemeDiagrams(documentText);
+  const diagramCount = (documentXml.match(/<w:drawing\b/g) ?? []).length;
+  const effectiveMissingDiagrams =
+    diagramCount >= REQUIRED_SCHEME_DIAGRAMS.length ? missingDiagrams : unique([...missingDiagrams, ...REQUIRED_SCHEME_DIAGRAMS.map((diagram) => diagram.label)]);
+  return buildCompletenessResult({
+    missingSections,
+    unresolvedMarkers,
+    missingDiagrams: effectiveMissingDiagrams,
+    diagramCount
+  });
 }
 
 export function replaceTemplatePlaceholders(zip: PizZip, data: TemplateData): number {
@@ -583,6 +633,34 @@ function findTextTokenAt(tokens: TextNodeToken[], offset: number): TextNodeToken
 function ensureTextNodePreservesSpaces(openTag: string, text: string): string {
   if (!/^\s|\s$/.test(text) || /\sxml:space=/.test(openTag)) return openTag;
   return openTag.replace(/>$/, ' xml:space="preserve">');
+}
+
+function replaceDocumentBodyWithGeneratedMarkdown(zip: PizZip, markdown: string, facts: SchemeFactModel): boolean {
+  const compactedMarkdown = compactText(markdown, 120000);
+  if (!compactedMarkdown.trim()) return false;
+
+  const documentFile = zip.file("word/document.xml");
+  const documentXml = documentFile?.asText();
+  if (!documentXml) return false;
+
+  const bodyOpen = documentXml.match(/<w:body\b[^>]*>/);
+  const bodyEnd = documentXml.lastIndexOf("</w:body>");
+  if (!bodyOpen || bodyOpen.index === undefined || bodyEnd < 0) return false;
+
+  const bodyStart = bodyOpen.index + bodyOpen[0].length;
+  const bodyXml = documentXml.slice(bodyStart, bodyEnd);
+  const sectionProperties = bodyXml.match(/<w:sectPr[\s\S]*?<\/w:sectPr>/)?.[0] ?? "";
+  const title = facts.systemName ? `${facts.systemName}密码应用方案` : "密码应用方案";
+  const startsWithHeading = /^#{1,6}\s+/.test(compactedMarkdown.trim());
+  const generatedXml = [
+    startsWithHeading ? "" : buildWordParagraph(title, { heading: true }),
+    ...markdownToWordParagraphs(compactedMarkdown),
+    sectionProperties
+  ].join("");
+
+  const nextXml = `${documentXml.slice(0, bodyStart)}${generatedXml}${documentXml.slice(bodyEnd)}`;
+  zip.file("word/document.xml", nextXml);
+  return true;
 }
 
 function appendGeneratedMarkdown(zip: PizZip, markdown: string, facts: SchemeFactModel): boolean {
@@ -928,6 +1006,70 @@ export function renderFactSummaryMarkdown(facts: SchemeFactModel): string {
     `- 待补充字段：${facts.missingFields.join("、") || "无"}`
   ];
   return lines.join("\n");
+}
+
+function buildCompletenessResult(input: {
+  missingSections: string[];
+  unresolvedMarkers: string[];
+  missingDiagrams: string[];
+  diagramCount: number;
+}): SchemeCompletenessResult {
+  const missingSections = unique(input.missingSections);
+  const unresolvedMarkers = unique(input.unresolvedMarkers).slice(0, 20);
+  const missingDiagrams = unique(input.missingDiagrams);
+  const hasRequiredDiagramCount = input.diagramCount >= REQUIRED_SCHEME_DIAGRAMS.length;
+  const ok = missingSections.length === 0 && unresolvedMarkers.length === 0 && missingDiagrams.length === 0 && hasRequiredDiagramCount;
+  const summaryParts = [
+    missingSections.length ? `缺少章节：${missingSections.join("、")}` : "",
+    unresolvedMarkers.length ? `存在未完成标记：${unresolvedMarkers.join("、")}` : "",
+    missingDiagrams.length ? `缺少图示：${missingDiagrams.join("、")}` : "",
+    hasRequiredDiagramCount ? "" : `已嵌入图示 ${input.diagramCount}/${REQUIRED_SCHEME_DIAGRAMS.length}`
+  ].filter(Boolean);
+
+  return {
+    ok,
+    missingSections,
+    unresolvedMarkers,
+    missingDiagrams,
+    diagramCount: input.diagramCount,
+    summary: ok ? "方案完整性检查通过" : summaryParts.join("；")
+  };
+}
+
+function findUnresolvedSchemeMarkers(text: string): string[] {
+  const markers = new Set<string>();
+  const normalized = normalizeValidationText(text);
+  const markerPatterns = [
+    /待补充(?:[\u4e00-\u9fa5A-Za-z0-9_ -]{0,20})?/g,
+    /需确认(?:[\u4e00-\u9fa5A-Za-z0-9_ -]{0,20})?/g,
+    /\bXXX(?:\.\.\.XXX)?\b/gi,
+    /\$\{[^}\n]{1,60}\}/g,
+    /(?<!\$)\{[^}\n]{1,60}\}/g
+  ];
+
+  for (const pattern of markerPatterns) {
+    for (const match of normalized.matchAll(pattern)) {
+      const value = match[0]?.trim();
+      if (value) markers.add(value);
+    }
+  }
+  return Array.from(markers);
+}
+
+function normalizeValidationText(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\s+/g, " ").trim();
+}
+
+function extractWordPackageText(zip: PizZip): string {
+  return getTemplateXmlFileNames(zip)
+    .map((fileName) => zip.file(fileName)?.asText() ?? "")
+    .filter(Boolean)
+    .map(extractTextFromXml)
+    .join("\n");
+}
+
+function extractTextFromXml(xml: string): string {
+  return collectTextNodeTokens(xml).map((token) => token.text).join("");
 }
 
 function pickValue(source: string, patterns: RegExp[]): string {

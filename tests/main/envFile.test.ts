@@ -16,8 +16,7 @@ describe("envFile", () => {
       { key: "OPENAI_BASE_URL", value: "https://proxy.example.com/openai v1" },
       { key: "OPENAI_CHAT_MODEL", value: "gpt-5.5" },
       { key: "LIBREOFFICE_PATH", value: "C:\\Program Files\\LibreOffice\\program\\soffice.exe" },
-      { key: "PI_AGENT_PACKAGE", value: "@scope/pi-agent runtime" },
-      { key: "PI_AGENT_EXPORT", value: 'factory"name' },
+      { key: "CUSTOM_LABEL", value: 'factory"name' },
       { key: "MULTILINE_VALUE", value: "line1\nline2" }
     ]);
     const parsed = dotenv.parse(Buffer.from(content));
@@ -26,8 +25,7 @@ describe("envFile", () => {
     expect(parsed.OPENAI_BASE_URL).toBe("https://proxy.example.com/openai v1");
     expect(parsed.OPENAI_CHAT_MODEL).toBe("gpt-5.5");
     expect(parsed.LIBREOFFICE_PATH).toBe("C:\\Program Files\\LibreOffice\\program\\soffice.exe");
-    expect(parsed.PI_AGENT_PACKAGE).toBe("@scope/pi-agent runtime");
-    expect(parsed.PI_AGENT_EXPORT).toBe('factory"name');
+    expect(parsed.CUSTOM_LABEL).toBe('factory"name');
     expect(parsed.MULTILINE_VALUE).toBe("line1\nline2");
   });
 });

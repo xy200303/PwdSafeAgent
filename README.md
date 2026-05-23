@@ -5,8 +5,8 @@ PwdSafeAgent 是一个基于 Electron、React、Redux Toolkit、Radix UI、Incre
 ## 核心能力
 
 - 以 `docs/密码应用方案.docx` 作为方案模板资源，支持按需读取 Word/PDF/文本资料。
-- 支持 OpenAI Chat Completions 格式的流式对话，模型配置保存在本地 `.env.local`。
-- 支持可选 `pi-agent` 运行时适配；未配置或加载失败时回退到 OpenAI Chat Runtime。
+- Agent 对话运行时强制使用 `@mariozechner/pi-coding-agent`，模型配置保存在本地 `.env.local`。
+- 不再内置或回退到自实现 OpenAI Chat Runtime；Agent 循环推理和工具调用决策由 Pi Agent 的 `AgentSession` 完成。
 - 内置工具包括 `time`、`web_search`、`read_file`、`read_word`、`read_pdf`、`write_file`、`write_word`、`write_pdf`、`image_generate`、`exec_bash`、`send_file`。
 - 前端支持工具调用折叠详情、文件卡片、系统打开、文件夹定位、PDF.js / docx-preview 预览。
 - 支持粘贴、拖拽和选择附件，并对直接导入附件做数量、单文件大小、总大小和 Windows 文件名安全校验。
@@ -59,6 +59,8 @@ npm run dev
 
 `.env.local` 会优先于 `.env` 加载。也可以在应用内“设置”面板保存配置，配置会写入本地 `.env.local`。
 
+打包时会把项目根目录的 `.env` 一起复制到安装包 `resources/.env`，用于给终端用户提供默认模型配置。请注意：如果 `.env` 内包含真实 API Key，安装包接收者可以提取并使用这些密钥，建议使用单独创建的低额度 Key。
+
 ```env
 OPENAI_API_KEY=
 OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -71,10 +73,7 @@ OPENAI_IMAGE_QUALITY=high
 OPENAI_AUTO_IMAGE_GENERATION=true
 OPENAI_REQUEST_TIMEOUT_MS=120000
 OPENAI_MAX_OUTPUT_TOKENS=16000
-AGENT_RUNTIME=openai-chat
 AGENT_EXEC_BASH_ENABLED=true
-PI_AGENT_PACKAGE=
-PI_AGENT_EXPORT=
 AGENT_AUTO_PDF_EXPORT=false
 LIBREOFFICE_PATH=
 ```
@@ -85,9 +84,7 @@ LIBREOFFICE_PATH=
 - `OPENAI_BASE_URL`：OpenAI 兼容接口地址。
 - `OPENAI_IMAGE_API_KEY`：生图 API Key；留空时沿用 `OPENAI_API_KEY`。
 - `OPENAI_IMAGE_BASE_URL`：生图接口地址；留空时沿用 `OPENAI_BASE_URL`。
-- `AGENT_RUNTIME`：`openai-chat` 或 `pi-agent`。
 - `AGENT_EXEC_BASH_ENABLED`：是否允许 Agent 使用命令执行工具，默认启用。
-- `PI_AGENT_PACKAGE` / `PI_AGENT_EXPORT`：可选 pi-agent 插件包名和导出名。
 - `AGENT_AUTO_PDF_EXPORT`：生成 Word 后是否自动尝试导出 PDF。
 - `LIBREOFFICE_PATH`：LibreOffice 可执行文件路径；留空时自动查找。
 

@@ -5,7 +5,7 @@
 本文档定义三类接口：
 
 1. React Renderer 与 Electron Main 之间的 IPC 接口。
-2. Electron Main 与 Pi Agent Runtime 之间的会话与事件接口。
+2. Electron Main 与 Pi Agent SDK 桥接层之间的会话与事件接口。
 3. Agent 自定义工具的输入输出协议。
 
 本文档默认采用 TypeScript 类型描述，便于直接落地到 `electron-vite` 工程。
@@ -250,7 +250,6 @@ export interface AppSettings {
     libreOfficePath: string;
   };
   agent: {
-    runtime: "openai-chat" | "pi-agent";
     execBashEnabled: boolean;
   };
 }
@@ -274,7 +273,6 @@ export interface UpdateAppSettingsInput {
     libreOfficePath: string;
   };
   agent: {
-    runtime: "openai-chat" | "pi-agent";
     execBashEnabled: boolean;
   };
 }
@@ -1011,11 +1009,11 @@ await imageClient.images.generate({
 - `artifact:preview(artifactId)` 返回文本、Markdown、图片或 PDF 预览数据，用于前端侧滑预览面板。
 - `stream.item.added` 与 `stream.item.updated` 用于前端增量展示消息、工具调用、阶段提示和文件卡片。
 - `session.deleted` 用于前端同步移除会话，并保持侧边栏当前选择始终有效。
-- `AGENT_RUNTIME` 已作为设置项暴露，默认 `openai-chat`；选择 `pi-agent` 时进入 Pi Runtime 适配层，当前版本回退到现有 OpenAI Chat Runtime。
+- 后端内置直接调用 `@mariozechner/pi-coding-agent`，不再通过环境变量动态加载插件包，也不回退到自实现 OpenAI Chat Runtime。
 - `AGENT_EXEC_BASH_ENABLED` 已作为设置项暴露，当前默认启用；设置为 `false` 后 Agent 不再注册和执行 `exec_bash` 工具。
 - `exec_bash` 已支持 Windows 内置 Python runtime：优先使用随安装包复制到 `resources/runtime/win/python` 或 `resources/runtime/win/pyhton` 的运行时，保障无系统 Python 环境也能执行 Python 命令。
 - `settings:get` 的 `runtime.bundledPython` 会返回内置 Python 探测状态，设置面板据此展示当前来源和 `python.exe` 路径。
 - `settings:check-runtime` 会实际执行 Python 与 pip 版本检测，设置面板可显示自检结果，便于定位运行时缺 DLL、权限或杀软拦截问题。
-- 打包态 `.env.local`、`data/state.json`、附件缓存和生成产物保存到 Electron `userData` 目录；开发态仍使用项目根目录，便于调试。
+- 打包态内置 `.env` 读取自 `resources/.env`，`.env.local`、`data/state.json`、附件缓存和生成产物保存到 Electron `userData` 目录；开发态仍使用项目根目录，便于调试。
 - `OPENAI_IMAGE_BASE_URL` 已作为设置项暴露；填写后仅生图请求使用该地址，留空时沿用 `OPENAI_BASE_URL`。
 - `OPENAI_IMAGE_API_KEY` 已作为设置项暴露；填写后仅生图请求使用该密钥，留空时沿用 `OPENAI_API_KEY`。

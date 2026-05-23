@@ -63,7 +63,6 @@ import type { AppDispatch } from "../store";
 import type { ReactNode } from "react";
 import type {
   AppSettings,
-  AgentRuntimeKind,
   ArtifactKind,
   ArtifactPreview,
   ArtifactSummary,
@@ -372,8 +371,7 @@ function Header({ session, settings }: { session?: ChatSession; settings?: AppSe
       <div>
         <h1>{session?.title || "新的密码方案对话"}</h1>
         <p>
-          模板：密码应用方案.docx · 模型：{settings?.openai.chatModel || "未加载"} ·
-          {settings?.openai.apiKeyConfigured ? " API Key 已配置" : " 本地演示模式"}
+          模板：密码应用方案.docx · Agent：内置 Pi Agent · 模型：{settings?.openai.chatModel || "未加载"}
         </p>
       </div>
       <div className={`status-pill ${session?.status === "running" ? "running" : ""}`}>
@@ -396,6 +394,11 @@ function MessagePane({
   onError: (message: string) => void;
 }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const orderedItems = session ? orderStreamItemsForDisplay(session.items) : [];
+  const visibleItems = orderedItems.filter(shouldRenderStreamItem);
+  const shouldShowPendingThinking = Boolean(
+    session?.status === "running" && !orderedItems.some(isUnfinishedAssistantMessage)
+  );
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -411,15 +414,39 @@ function MessagePane({
             <span>输入系统名称、建设单位、等保级别或直接粘贴现有资料。</span>
           </div>
         ) : (
-          orderStreamItemsForDisplay(session.items).map((item) => (
-            <StreamRow key={item.id} api={api} item={item} onPreviewArtifact={onPreviewArtifact} onError={onError} />
-          ))
+          <>
+            {visibleItems.map((item) => (
+              <StreamRow key={item.id} api={api} item={item} onPreviewArtifact={onPreviewArtifact} onError={onError} />
+            ))}
+            {shouldShowPendingThinking ? <PendingAssistantRow /> : null}
+          </>
         )}
       </ScrollArea.Viewport>
       <ScrollArea.Scrollbar className="scrollbar" orientation="vertical">
         <ScrollArea.Thumb className="scrollbar-thumb" />
       </ScrollArea.Scrollbar>
     </ScrollArea.Root>
+  );
+}
+
+function isUnfinishedAssistantMessage(item: StreamItem): boolean {
+  return item.kind === "message" && item.role === "assistant" && !item.isFinished;
+}
+
+function shouldRenderStreamItem(item: StreamItem): boolean {
+  return !(item.kind === "message" && item.role === "assistant" && item.isFinished && !item.content.trim());
+}
+
+function PendingAssistantRow(): JSX.Element {
+  return (
+    <article className="message-row assistant thinking-row">
+      <div className="avatar">
+        <Bot size={15} />
+      </div>
+      <div className="message-body">
+        <ThinkingIndicator />
+      </div>
+    </article>
   );
 }
 
@@ -441,7 +468,13 @@ function StreamRow({
         {!isUser ? <div className="avatar"><Bot size={15} /></div> : null}
         <div className="message-body">
           {item.role === "assistant" ? (
-            <IncremarkContent content={item.content} isFinished={item.isFinished} />
+            item.content.trim() ? (
+              <IncremarkContent content={item.content} isFinished={item.isFinished} />
+            ) : item.isFinished ? (
+              null
+            ) : (
+              <ThinkingIndicator />
+            )
           ) : (
             <p>{item.content}</p>
           )}
@@ -475,6 +508,19 @@ function StreamRow({
     <div className="stage-row">
       <span>{item.title}</span>
       {item.detail ? <small>{item.detail}</small> : null}
+    </div>
+  );
+}
+
+function ThinkingIndicator(): JSX.Element {
+  return (
+    <div className="thinking-indicator" role="status" aria-live="polite" aria-label="Agent 正在思考">
+      <span className="thinking-label">正在思考</span>
+      <span className="thinking-dots" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </span>
     </div>
   );
 }
@@ -986,14 +1032,13 @@ function SettingsPanel({
   const [imageSize, setImageSize] = useState(settings?.openai.imageSize || "1536x1024");
   const [imageQuality, setImageQuality] = useState(settings?.openai.imageQuality || "high");
   const [autoImageGeneration, setAutoImageGeneration] = useState(settings?.openai.autoImageGeneration ?? true);
+  const [thinkingEnabled, setThinkingEnabled] = useState(settings?.openai.thinkingEnabled ?? true);
+  const [reasoningEffort, setReasoningEffort] = useState(settings?.openai.reasoningEffort || "");
   const [autoPdfExport, setAutoPdfExport] = useState(settings?.document.autoPdfExport ?? false);
   const [libreOfficePath, setLibreOfficePath] = useState(settings?.document.libreOfficePath || "");
   const [timeout, setTimeoutValue] = useState(settings?.openai.requestTimeoutMs || 120000);
   const [maxTokens, setMaxTokens] = useState(settings?.openai.maxOutputTokens || 16000);
-  const [agentRuntime, setAgentRuntime] = useState<AgentRuntimeKind>(settings?.agent.runtime ?? "openai-chat");
   const [execBashEnabled, setExecBashEnabled] = useState(settings?.agent.execBashEnabled ?? true);
-  const [piAgentPackage, setPiAgentPackage] = useState(settings?.agent.piAgentPackage ?? "");
-  const [piAgentExport, setPiAgentExport] = useState(settings?.agent.piAgentExport ?? "");
   const [apiKey, setApiKey] = useState("");
   const [imageApiKey, setImageApiKey] = useState("");
   const [runtimeCheck, setRuntimeCheck] = useState<RuntimeCheckResult | undefined>();
@@ -1012,6 +1057,8 @@ function SettingsPanel({
           imageSize,
           imageQuality,
           autoImageGeneration,
+          thinkingEnabled,
+          reasoningEffort,
           requestTimeoutMs: timeout,
           maxOutputTokens: maxTokens,
           apiKey: apiKey.trim() || undefined,
@@ -1022,10 +1069,7 @@ function SettingsPanel({
           libreOfficePath
         },
         agent: {
-          runtime: agentRuntime,
-          execBashEnabled,
-          piAgentPackage,
-          piAgentExport
+          execBashEnabled
         }
       });
       onSaved(next);
@@ -1116,6 +1160,24 @@ function SettingsPanel({
                   Chat 模型
                   <input value={chatModel} onChange={(event) => setChatModel(event.target.value)} />
                 </label>
+                <SwitchRow checked={thinkingEnabled} onCheckedChange={setThinkingEnabled}>
+                  启用模型思考模式
+                </SwitchRow>
+                <label>
+                  推理强度
+                  <select value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value)}>
+                    <option value="">默认</option>
+                    <option value="none">none（关闭）</option>
+                    <option value="minimal">minimal</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="xhigh">xhigh</option>
+                  </select>
+                </label>
+                <p className="settings-note">
+                  关闭后会写入 `OPENAI_THINKING_ENABLED=false`。Qwen/DashScope 兼容模型会使用 qwen 思考参数格式。
+                </p>
                 <label>
                   生图模型
                   <input value={imageModel} onChange={(event) => setImageModel(event.target.value)} />
@@ -1152,34 +1214,12 @@ function SettingsPanel({
 
               <Tabs.Content className="settings-form" value="advanced">
                 <label>
-                  Agent Runtime
-                  <select
-                    value={agentRuntime}
-                    onChange={(event) => setAgentRuntime(event.target.value as AgentRuntimeKind)}
-                  >
-                    <option value="openai-chat">OpenAI Chat Runtime</option>
-                    <option value="pi-agent">Pi Agent Runtime 适配层</option>
-                  </select>
+                  Agent 引擎
+                  <input value="内置 @mariozechner/pi-coding-agent" readOnly />
                 </label>
                 <RuntimeStatusPanel settings={settings} check={runtimeCheck} />
-                <label>
-                  Pi Agent 包名
-                  <input
-                    value={piAgentPackage}
-                    onChange={(event) => setPiAgentPackage(event.target.value)}
-                    placeholder="例如 @scope/pi-agent-runtime，留空使用 OpenAI 回退"
-                  />
-                </label>
-                <label>
-                  Pi Agent 导出
-                  <input
-                    value={piAgentExport}
-                    onChange={(event) => setPiAgentExport(event.target.value)}
-                    placeholder="例如 createRuntime，留空使用 default"
-                  />
-                </label>
                 <p className="settings-note">
-                  Pi Agent 以可选插件方式动态加载；未配置或加载失败时，会保留当前 OpenAI Chat Runtime 回退链路。
+                  后端直接调用 Pi Agent SDK，并通过桥接层接入桌面端消息流、工具事件和文件产物。
                 </p>
                 <div className="runtime-check-actions">
                   <button

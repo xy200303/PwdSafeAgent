@@ -23,6 +23,9 @@ export interface AppPaths {
 export function resolveAppPaths(options: AppPathOptions): AppPaths {
   const rootDir = options.packaged ? options.userDataDir : options.projectRootDir;
   const dataDir = join(rootDir, "data");
+  const bundledEnvPath = options.packaged && options.resourcesDir
+    ? join(options.resourcesDir, ".env")
+    : join(options.projectRootDir, ".env");
 
   return {
     rootDir,
@@ -33,6 +36,6 @@ export function resolveAppPaths(options: AppPathOptions): AppPaths {
     outputDir: join(dataDir, "output"),
     statePath: join(dataDir, "state.json"),
     envLocalPath: join(rootDir, ".env.local"),
-    envPath: join(options.projectRootDir, ".env")
+    envPath: bundledEnvPath
   };
 }

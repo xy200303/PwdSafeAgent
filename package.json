@@ -50,10 +50,14 @@
           "icon.png",
           "icon.ico"
         ]
+      },
+      {
+        "from": ".env",
+        "to": ".env"
       }
     ],
     "win": {
-      "icon": "icon.ico",
+      "icon": "build/icon.ico",
       "target": [
         "nsis",
         "zip"
@@ -68,6 +72,7 @@
     "@dev_xiaoyun/vane-file-preview": "^1.0.9",
     "@incremark/react": "^1.0.2",
     "@incremark/theme": "^1.0.2",
+    "@mariozechner/pi-coding-agent": "^0.73.1",
     "@radix-ui/react-alert-dialog": "^1.1.15",
     "@radix-ui/react-collapsible": "^1.1.12",
     "@radix-ui/react-dialog": "^1.1.15",

@@ -32,7 +32,7 @@ describe("appPaths", () => {
     expect(paths.envPath).toBe("C:\\Program Files\\PwdSafeAgent\\.env");
   });
 
-  it("resolves packaged docs from resources while keeping writable data in userData", async () => {
+  it("resolves packaged resources while keeping writable data in userData", async () => {
     const projectRootDir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-paths-project-"));
     const resourcesDir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-paths-resources-"));
     const userDataDir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-paths-user-"));
@@ -50,6 +50,7 @@ describe("appPaths", () => {
 
       expect(paths.docsDir).toBe(docsDir);
       expect(paths.dataDir).toBe(join(userDataDir, "data"));
+      expect(paths.envPath).toBe(join(resourcesDir, ".env"));
     } finally {
       await rm(projectRootDir, { recursive: true, force: true });
       await rm(resourcesDir, { recursive: true, force: true });
