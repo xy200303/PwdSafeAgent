@@ -40,6 +40,17 @@ describe("streamOrdering", () => {
       "assistant_2"
     ]);
   });
+
+  it("hides internal OpenAI tool planning rows from the chat transcript", () => {
+    const items: StreamItem[] = [
+      message("user_1", "user", "文件发送给我啊"),
+      tool("planner_1", "openai.chat.tools"),
+      tool("tool_1", "send_file"),
+      message("assistant_1", "assistant", "文件已发送")
+    ];
+
+    expect(orderStreamItemsForDisplay(items).map((item) => item.id)).toEqual(["user_1", "tool_1", "assistant_1"]);
+  });
 });
 
 function message(id: string, role: "user" | "assistant", content: string): StreamItem {

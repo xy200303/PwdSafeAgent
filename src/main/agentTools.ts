@@ -5,6 +5,7 @@ import { PDFParse } from "pdf-parse";
 
 export type BuiltinToolName =
   | "time"
+  | "remember_project"
   | "read_file"
   | "read_word"
   | "read_pdf"

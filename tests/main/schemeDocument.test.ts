@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildSchemeTemplateData,
   extractSchemeFacts,
+  replaceTemplatePlaceholders,
   renderFactSummaryMarkdown,
   writeSchemeDocxFromTemplate
 } from "../../src/main/schemeDocument";
@@ -24,6 +25,29 @@ describe("schemeDocument", () => {
     expect(data["建设单位"]).toBe("示例政务服务中心");
     expect(data["单位省份"]).toBe("广东省");
     expect(data["等保级别"]).toBe("三级");
+  });
+
+  it("lets explicit template fields override inferred values", () => {
+    const data = buildSchemeTemplateData({
+      prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心",
+      memory: "",
+      generatedMarkdown: "本方案用于统一身份认证系统。",
+      templateFields: [
+        { key: "${应用系统}", value: "智慧园区综合管理平台" },
+        { key: "cloudPlatform", value: "政务云专有区" }
+      ],
+      fields: {
+        constructionUnit: "示例科技有限公司",
+        subsystems: ["统一门户", "权限中心"],
+        machineRooms: [{ name: "核心机房", owner: "示例科技有限公司", address: "广州市天河区 1 号" }]
+      }
+    });
+
+    expect(data["应用系统"]).toBe("智慧园区综合管理平台");
+    expect(data["建设单位"]).toBe("示例科技有限公司");
+    expect(data["应用子系统1"]).toBe("统一门户");
+    expect(data["物理机房1"]).toBe("核心机房");
+    expect(data["云平台"]).toBe("政务云专有区");
   });
 
   it("extracts a structured scheme fact model", () => {
@@ -137,5 +161,81 @@ describe("schemeDocument", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("replaces official template placeholders without leaving template markers", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-fields-"));
+    const outputPath = join(dir, "智慧园区综合管理平台密码应用方案.docx");
+
+    try {
+      const result = await writeSchemeDocxFromTemplate(
+        join(process.cwd(), "docs", "密码应用方案.docx"),
+        outputPath,
+        {
+          prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心",
+          memory: "",
+          generatedMarkdown: "## 方案摘要\n本方案用于智慧园区综合管理平台。",
+          templateFields: [
+            { key: "应用系统", value: "智慧园区综合管理平台" },
+            { key: "建设单位", value: "示例科技有限公司" },
+            { key: "单位省份", value: "浙江省" },
+            { key: "单位地址", value: "杭州市西湖区 88 号" },
+            { key: "单位邮编", value: "310000" },
+            { key: "物理机房1", value: "核心机房" },
+            { key: "物理机房1地址", value: "杭州市西湖区数据中心" },
+            { key: "物理机房1管理单位", value: "示例科技有限公司" },
+            { key: "应用子系统1", value: "统一门户" },
+            { key: "应用子系统2", value: "权限中心" },
+            { key: "云平台", value: "政务云专有区" }
+          ]
+        }
+      );
+      const zip = new PizZip(await readFile(outputPath, "binary"));
+      const documentXml = zip.file("word/document.xml")?.asText() ?? "";
+      const extracted = await mammoth.extractRawText({ path: result.outputPath });
+
+      expect(result.templateReplacementCount).toBeGreaterThan(10);
+      expect(extracted.value).toContain("智慧园区综合管理平台");
+      expect(extracted.value).toContain("示例科技有限公司");
+      expect(extracted.value).toContain("核心机房");
+      expect(documentXml).not.toContain("${应用系统}");
+      expect(documentXml).not.toContain("{物理机房1地址}");
+      expect(documentXml).not.toContain("${云平台}");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces placeholders split across Word text nodes", () => {
+    const zip = new PizZip();
+    zip.file(
+      "[Content_Types].xml",
+      '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
+    );
+    zip.file(
+      "word/document.xml",
+      [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>',
+        "<w:r><w:t>${应用</w:t></w:r>",
+        "<w:r><w:t>系统}</w:t></w:r>",
+        "<w:r><w:t>由</w:t></w:r>",
+        "<w:r><w:t>{建设</w:t></w:r>",
+        "<w:r><w:t>单位}</w:t></w:r>",
+        "</w:p></w:body></w:document>"
+      ].join("")
+    );
+
+    const count = replaceTemplatePlaceholders(zip, {
+      应用系统: "统一身份认证系统",
+      建设单位: "示例政务服务中心"
+    });
+    const xml = zip.file("word/document.xml")?.asText() ?? "";
+
+    expect(count).toBe(2);
+    expect(xml).toContain("统一身份认证系统");
+    expect(xml).toContain("示例政务服务中心");
+    expect(xml).not.toContain("${应用");
+    expect(xml).not.toContain("{建设");
   });
 });

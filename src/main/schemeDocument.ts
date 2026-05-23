@@ -1,6 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, extname } from "node:path";
-import Docxtemplater from "docxtemplater";
 import PizZip from "pizzip";
 import { compactText, getCurrentTimeText, sanitizeFileName } from "./agentTools";
 
@@ -8,8 +7,12 @@ export interface SchemeDocumentInput {
   prompt: string;
   memory: string;
   generatedMarkdown: string;
+  fields?: SchemeTemplateFieldInput;
+  templateFields?: SchemeTemplateFieldInput;
   diagrams?: SchemeDiagramAsset[];
 }
+
+export type SchemeTemplateFieldInput = Record<string, unknown> | Array<Record<string, unknown>>;
 
 export interface SchemeDiagramAsset {
   label: string;
@@ -25,6 +28,7 @@ export interface SchemeDocumentResult {
   facts: SchemeFactModel;
   appendedMarkdown: boolean;
   embeddedDiagrams: string[];
+  templateReplacementCount: number;
 }
 
 export interface SchemeFactModel {
@@ -57,6 +61,7 @@ const PLACEHOLDER_KEYS = [
   "单位邮编",
   "等保级别",
   "应用子系统 1",
+  "应用子系统1",
   "应用子系统 2",
   "应用子系统2",
   "物理机房 1",
@@ -72,12 +77,20 @@ const PLACEHOLDER_KEYS = [
   "密码安全设备",
   "网络安全设备",
   "运维网关1",
+  "运维网关2",
+  "安全接入网关1",
+  "安全接入网关2",
+  "运维安全网关2",
   "安全认证网关",
   "服务器密码机",
   "签名验签服务器",
   "数字证书认证系统",
   "协同签名系统",
   "密码服务管理平台",
+  "密码系统产品",
+  "云平台",
+  "网络安全产品",
+  "密码安全产品",
   "编制日期"
 ] as const;
 
@@ -85,7 +98,7 @@ type PlaceholderKey = (typeof PLACEHOLDER_KEYS)[number];
 type TemplateData = Record<string, string>;
 
 export function extractSchemeFacts(input: SchemeDocumentInput): SchemeFactModel {
-  const source = `${input.prompt}\n\n${input.memory}\n\n${input.generatedMarkdown}`;
+  const source = `${renderExplicitTemplateFieldSource(input)}\n\n${input.prompt}\n\n${input.memory}\n\n${input.generatedMarkdown}`;
   const appName = pickValue(source, [
     /(?:系统名称|项目名称|应用系统)\s*[：:]\s*([^\n，。；;]+)/,
     /([^\n，。；;]{2,40})(?:密码应用方案|系统密码应用方案)/
@@ -168,6 +181,7 @@ export function buildSchemeTemplateData(input: SchemeDocumentInput): TemplateDat
     单位邮编: zipCode || "待补充邮编",
     等保级别: level || "三级",
     "应用子系统 1": facts.subsystems[0] || (appName ? `${appName}业务子系统` : "待补充应用子系统1"),
+    应用子系统1: facts.subsystems[0] || (appName ? `${appName}业务子系统` : "待补充应用子系统1"),
     "应用子系统 2": facts.subsystems[1] || (appName ? `${appName}管理子系统` : "待补充应用子系统2"),
     应用子系统2: facts.subsystems[1] || (appName ? `${appName}管理子系统` : "待补充应用子系统2"),
     "物理机房 1": machineRoom || "主机房",
@@ -183,18 +197,29 @@ export function buildSchemeTemplateData(input: SchemeDocumentInput): TemplateDat
     密码安全设备: "服务器密码机",
     网络安全设备: "防火墙",
     运维网关1: "运维安全网关",
+    运维网关2: "运维安全网关",
+    安全接入网关1: "安全接入网关",
+    安全接入网关2: "安全接入网关",
+    运维安全网关2: "运维安全网关",
     安全认证网关: "安全认证网关",
     服务器密码机: "服务器密码机",
     签名验签服务器: "签名验签服务器",
     数字证书认证系统: "数字证书认证系统",
     协同签名系统: "协同签名系统",
     密码服务管理平台: "密码服务管理平台",
+    密码系统产品: facts.cryptoProducts.join("、") || "密码服务管理平台、服务器密码机、签名验签服务器",
+    云平台: facts.cloudPlatform || "待补充云平台",
+    网络安全产品: "防火墙、入侵检测系统、日志审计系统",
+    密码安全产品: facts.cryptoProducts.join("、") || "密码服务管理平台、服务器密码机、签名验签服务器",
     编制日期: formatChineseDate(new Date())
   };
 
   const data: TemplateData = {};
   for (const key of PLACEHOLDER_KEYS) {
     addTemplateValue(data, key, base[key]);
+  }
+  for (const [key, value] of Object.entries(buildExplicitTemplateFieldOverrides(input))) {
+    addTemplateValue(data, key, value);
   }
 
   data["方案生成正文"] = input.generatedMarkdown;
@@ -212,16 +237,8 @@ export async function writeSchemeDocxFromTemplate(
   const data = buildSchemeTemplateData(input);
   const content = await readFile(templatePath, "binary");
   const zip = new PizZip(content);
-  const doc = new Docxtemplater(zip, {
-    paragraphLoop: true,
-    linebreaks: true,
-    nullGetter(part) {
-      return `待补充：${part.value}`;
-    }
-  });
-
-  doc.render(data);
-  const renderedZip = doc.getZip();
+  const templateReplacementCount = replaceTemplatePlaceholders(zip, data);
+  const renderedZip = zip;
   const appendedMarkdown = appendGeneratedMarkdown(renderedZip, input.generatedMarkdown, facts);
   const embeddedDiagrams = await appendGeneratedDiagrams(renderedZip, input.diagrams ?? []);
   await mkdir(dirname(outputPath), { recursive: true });
@@ -237,15 +254,335 @@ export async function writeSchemeDocxFromTemplate(
     missingFields,
     facts,
     appendedMarkdown,
-    embeddedDiagrams
+    embeddedDiagrams,
+    templateReplacementCount
   };
 }
+
+export function replaceTemplatePlaceholders(zip: PizZip, data: TemplateData): number {
+  const replacements = buildPlaceholderReplacements(data);
+  if (!replacements.length) return 0;
+
+  let replacementCount = 0;
+  for (const fileName of getTemplateXmlFileNames(zip)) {
+    const file = zip.file(fileName);
+    const xml = file?.asText();
+    if (!xml) continue;
+
+    const result = replaceTextNodePlaceholders(xml, replacements);
+    if (result.count > 0) {
+      zip.file(fileName, result.xml);
+      replacementCount += result.count;
+    }
+  }
+
+  return replacementCount;
+}
+
+function buildExplicitTemplateFieldOverrides(input: SchemeDocumentInput): TemplateData {
+  const overrides: TemplateData = {};
+  applyTemplateFieldInput(overrides, input.fields);
+  applyTemplateFieldInput(overrides, input.templateFields);
+  return overrides;
+}
+
+function renderExplicitTemplateFieldSource(input: SchemeDocumentInput): string {
+  const fields = buildExplicitTemplateFieldOverrides(input);
+  return Object.entries(fields)
+    .filter(([key]) => !key.startsWith("$"))
+    .map(([key, value]) => `${key}：${value}`)
+    .join("\n");
+}
+
+function applyTemplateFieldInput(target: TemplateData, input: SchemeTemplateFieldInput | undefined): void {
+  if (!input) return;
+
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const record = item as Record<string, unknown>;
+      applyTemplateField(target, record.key, record.value);
+    }
+    return;
+  }
+
+  if (typeof input !== "object") return;
+  applyStructuredTemplateFieldGroups(target, input);
+  for (const [key, value] of Object.entries(input)) {
+    applyTemplateField(target, key, value);
+  }
+}
+
+function applyStructuredTemplateFieldGroups(target: TemplateData, input: Record<string, unknown>): void {
+  const subsystems = readStringArrayField(input, ["subsystems", "applicationSubsystems", "application_subsystems"]);
+  if (subsystems[0]) applyTemplateField(target, "应用子系统1", subsystems[0]);
+  if (subsystems[1]) applyTemplateField(target, "应用子系统2", subsystems[1]);
+
+  const cryptoProducts = readStringArrayField(input, ["cryptoProducts", "crypto_products", "passwordProducts", "password_products"]);
+  if (cryptoProducts.length) {
+    const value = cryptoProducts.join("、");
+    applyTemplateField(target, "密码系统产品", value);
+    applyTemplateField(target, "密码安全产品", value);
+  }
+
+  const networkProducts = readStringArrayField(input, ["networkSecurityProducts", "network_security_products"]);
+  if (networkProducts.length) applyTemplateField(target, "网络安全产品", networkProducts.join("、"));
+
+  const machineRooms = input.machineRooms ?? input.machine_rooms;
+  if (Array.isArray(machineRooms)) {
+    for (const [index, room] of machineRooms.slice(0, 2).entries()) {
+      if (!room || typeof room !== "object" || Array.isArray(room)) continue;
+      const record = room as Record<string, unknown>;
+      const roomNumber = index + 1;
+      applyTemplateField(target, `物理机房${roomNumber}`, record.name);
+      applyTemplateField(target, `物理机房${roomNumber}管理单位`, record.owner ?? record.manager ?? record.organization);
+      applyTemplateField(target, `物理机房${roomNumber}地址`, record.address);
+    }
+  }
+}
+
+function readStringArrayField(input: Record<string, unknown>, keys: string[]): string[] {
+  for (const key of keys) {
+    const value = input[key];
+    if (!Array.isArray(value)) continue;
+    return value.map(stringifyTemplateFieldValue).filter(Boolean);
+  }
+  return [];
+}
+
+function applyTemplateField(target: TemplateData, rawKey: unknown, rawValue: unknown): void {
+  if (typeof rawKey !== "string") return;
+  const key = normalizeTemplateFieldKey(rawKey);
+  const value = stringifyTemplateFieldValue(rawValue);
+  if (!key || !value) return;
+  addTemplateValue(target, key, value);
+}
+
+function normalizeTemplateFieldKey(rawKey: string): string {
+  const stripped = stripTemplateDelimiters(rawKey);
+  const aliasKey = stripped.replace(/[\s_\-]+/g, "").toLowerCase();
+  return TEMPLATE_FIELD_ALIASES[aliasKey] ?? stripped;
+}
+
+function stripTemplateDelimiters(rawKey: string): string {
+  let key = rawKey.trim();
+  if (key.startsWith("${") && key.endsWith("}")) {
+    key = key.slice(2, -1);
+  } else if (key.startsWith("{") && key.endsWith("}")) {
+    key = key.slice(1, -1);
+  }
+  return key.replace(/^\$/, "").trim();
+}
+
+function stringifyTemplateFieldValue(value: unknown): string {
+  if (typeof value === "string") return cleanValue(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(stringifyTemplateFieldValue).filter(Boolean).join("、");
+  if (!value || typeof value !== "object") return "";
+
+  const record = value as Record<string, unknown>;
+  return (
+    stringifyTemplateFieldValue(record.value) ||
+    stringifyTemplateFieldValue(record.name) ||
+    stringifyTemplateFieldValue(record.label) ||
+    stringifyTemplateFieldValue(record.title)
+  );
+}
+
+const TEMPLATE_FIELD_ALIASES: Record<string, PlaceholderKey> = {
+  applicationsystem: "应用系统",
+  systemname: "应用系统",
+  projectname: "应用系统",
+  constructionunit: "建设单位",
+  organizationname: "建设单位",
+  organisationname: "建设单位",
+  orgname: "建设单位",
+  unitname: "建设单位",
+  province: "单位省份",
+  unitprovince: "单位省份",
+  address: "单位地址",
+  unitaddress: "单位地址",
+  zipcode: "单位邮编",
+  postalcode: "单位邮编",
+  securitylevel: "等保级别",
+  protectionlevel: "等保级别",
+  subsystem1: "应用子系统1",
+  applicationsubsystem1: "应用子系统1",
+  subsystem2: "应用子系统2",
+  applicationsubsystem2: "应用子系统2",
+  machineroom1: "物理机房1",
+  machineroom1owner: "物理机房1管理单位",
+  machineroom1manager: "物理机房1管理单位",
+  machineroom1address: "物理机房1地址",
+  machineroom2: "物理机房2",
+  machineroom2owner: "物理机房2管理单位",
+  machineroom2manager: "物理机房2管理单位",
+  machineroom2address: "物理机房2地址",
+  cloudplatform: "云平台",
+  networksecurityproducts: "网络安全产品",
+  cryptosecurityproducts: "密码安全产品",
+  cryptoproducts: "密码系统产品",
+  cryptosystemproducts: "密码系统产品",
+  passwordproducts: "密码系统产品",
+  compiledate: "编制日期",
+  compilationdate: "编制日期"
+};
 
 function addTemplateValue(data: TemplateData, key: string, value: string): void {
   data[key] = value;
   data[`$${key}`] = value;
   data[key.replace(/\s+/g, "")] = value;
   data[`$${key.replace(/\s+/g, "")}`] = value;
+}
+
+interface PlaceholderReplacement {
+  placeholder: string;
+  value: string;
+}
+
+interface TextNodeToken {
+  start: number;
+  end: number;
+  openTag: string;
+  closeTag: string;
+  text: string;
+  textStart: number;
+  textEnd: number;
+}
+
+function buildPlaceholderReplacements(data: TemplateData): PlaceholderReplacement[] {
+  const replacements = new Map<string, string>();
+  for (const [key, value] of Object.entries(data)) {
+    if (!key || key.startsWith("$")) continue;
+    if (key === "方案生成正文" || key === "结构化事实摘要" || key === "当前时间") continue;
+    replacements.set(`{${key}}`, value);
+    replacements.set(`\${${key}}`, value);
+  }
+
+  return Array.from(replacements, ([placeholder, value]) => ({ placeholder, value })).sort(
+    (left, right) => right.placeholder.length - left.placeholder.length
+  );
+}
+
+function getTemplateXmlFileNames(zip: PizZip): string[] {
+  return Object.keys(zip.files).filter((fileName) =>
+    /^word\/(?:document|header\d+|footer\d+|footnotes|endnotes|comments).*\.xml$/i.test(fileName)
+  );
+}
+
+function replaceTextNodePlaceholders(
+  xml: string,
+  replacements: PlaceholderReplacement[]
+): { xml: string; count: number } {
+  const tokens = collectTextNodeTokens(xml);
+  if (!tokens.length) return { xml, count: 0 };
+
+  const fullText = tokens.map((token) => token.text).join("");
+  const matches = selectNonOverlappingMatches(fullText, replacements);
+  if (!matches.length) return { xml, count: 0 };
+
+  for (const match of matches.sort((left, right) => right.start - left.start)) {
+    applyPlaceholderMatch(tokens, match);
+  }
+
+  let nextXml = xml;
+  for (const token of [...tokens].reverse()) {
+    const openTag = ensureTextNodePreservesSpaces(token.openTag, token.text);
+    nextXml = `${nextXml.slice(0, token.start)}${openTag}${escapeXml(token.text)}${token.closeTag}${nextXml.slice(token.end)}`;
+  }
+
+  return { xml: nextXml, count: matches.length };
+}
+
+function collectTextNodeTokens(xml: string): TextNodeToken[] {
+  const tokens: TextNodeToken[] = [];
+  const pattern = /(<((?:w|a|m):t|w:instrText)\b[^>]*>)([\s\S]*?)(<\/\2>)/g;
+  let textOffset = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(xml))) {
+    const text = decodeXmlText(match[3]);
+    tokens.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      openTag: match[1],
+      closeTag: match[4],
+      text,
+      textStart: textOffset,
+      textEnd: textOffset + text.length
+    });
+    textOffset += text.length;
+  }
+
+  return tokens;
+}
+
+function selectNonOverlappingMatches(fullText: string, replacements: PlaceholderReplacement[]): PlaceholderMatch[] {
+  const candidates: PlaceholderMatch[] = [];
+  for (const replacement of replacements) {
+    let index = fullText.indexOf(replacement.placeholder);
+    while (index >= 0) {
+      candidates.push({
+        start: index,
+        end: index + replacement.placeholder.length,
+        value: replacement.value,
+        placeholder: replacement.placeholder
+      });
+      index = fullText.indexOf(replacement.placeholder, index + 1);
+    }
+  }
+
+  const selected: PlaceholderMatch[] = [];
+  let lastEnd = -1;
+  for (const candidate of candidates.sort(comparePlaceholderMatches)) {
+    if (candidate.start < lastEnd) continue;
+    selected.push(candidate);
+    lastEnd = candidate.end;
+  }
+  return selected;
+}
+
+interface PlaceholderMatch {
+  start: number;
+  end: number;
+  value: string;
+  placeholder: string;
+}
+
+function comparePlaceholderMatches(left: PlaceholderMatch, right: PlaceholderMatch): number {
+  if (left.start !== right.start) return left.start - right.start;
+  return right.placeholder.length - left.placeholder.length;
+}
+
+function applyPlaceholderMatch(tokens: TextNodeToken[], match: PlaceholderMatch): void {
+  const startToken = findTextTokenAt(tokens, match.start);
+  const endToken = findTextTokenAt(tokens, match.end - 1);
+  if (!startToken || !endToken) return;
+
+  const startOffset = match.start - startToken.textStart;
+  const endOffset = match.end - endToken.textStart;
+  const startIndex = tokens.indexOf(startToken);
+  const endIndex = tokens.indexOf(endToken);
+
+  if (startIndex === endIndex) {
+    startToken.text = `${startToken.text.slice(0, startOffset)}${match.value}${startToken.text.slice(endOffset)}`;
+    return;
+  }
+
+  startToken.text = `${startToken.text.slice(0, startOffset)}${match.value}`;
+  for (let index = startIndex + 1; index < endIndex; index += 1) {
+    tokens[index].text = "";
+  }
+  endToken.text = endToken.text.slice(endOffset);
+}
+
+function findTextTokenAt(tokens: TextNodeToken[], offset: number): TextNodeToken | undefined {
+  return tokens.find((token) => offset >= token.textStart && offset < token.textEnd);
+}
+
+function ensureTextNodePreservesSpaces(openTag: string, text: string): string {
+  if (!/^\s|\s$/.test(text) || /\sxml:space=/.test(openTag)) return openTag;
+  return openTag.replace(/>$/, ' xml:space="preserve">');
 }
 
 function appendGeneratedMarkdown(zip: PizZip, markdown: string, facts: SchemeFactModel): boolean {
@@ -723,6 +1060,27 @@ function escapeXml(value: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+function decodeXmlText(value: string): string {
+  return value
+    .replace(/&#x([0-9a-f]+);/gi, (_, codePoint: string) => decodeXmlCodePoint(Number.parseInt(codePoint, 16)))
+    .replace(/&#(\d+);/g, (_, codePoint: string) => decodeXmlCodePoint(Number.parseInt(codePoint, 10)))
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function decodeXmlCodePoint(codePoint: number): string {
+  if (!Number.isFinite(codePoint) || codePoint < 0) return "";
+  try {
+    return String.fromCodePoint(codePoint);
+  } catch {
+    return "";
+  }
 }
 
 function formatChineseDate(date: Date): string {

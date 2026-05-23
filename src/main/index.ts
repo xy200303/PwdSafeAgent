@@ -6,6 +6,7 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import dotenv from "dotenv";
 import { compactText, getCurrentTimeText } from "./agentTools";
 import { createAgentRuntime, normalizeAgentRuntimeKind, type AgentRuntimeHost, type MessageStreamItem } from "./agentRuntime";
+import { prepareImportedAttachments } from "./attachmentImport";
 import { resolveAppPaths } from "./appPaths";
 import { buildArtifactPreview } from "./artifactPreview";
 import { findBundledPythonRuntime, getProcessResourcesDir } from "./bundledRuntime";
@@ -421,13 +422,17 @@ function artifactBelongsToSession(artifact: ArtifactSummary, sessionId: string):
 function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
   const systemPrompt = [
     "你是专业的密码应用方案生成 Agent。",
-    "你需要严格参考用户给出的 Word 模板结构，生成专业、可复核、可落地的密码应用方案内容。",
+    "你的核心工作流是：先通过多轮对话收集项目事实，持续总结项目档案；中途按需读取附件、检索资料或做中间分析；当信息基本充分或用户明确要求交付时，再生成最终方案文件。",
+    "不要在第一轮或资料明显不足时直接生成 Word、PDF、图片或发送文件；此时应先总结已知信息、指出缺口，并继续澄清关键事实。",
+    "每当用户补充了项目关键信息，优先调用 remember_project 沉淀已确认事实和待补充信息。项目档案应覆盖：应用系统、建设单位、单位省份、单位地址、邮编、等保级别、系统边界、业务场景、部署架构、应用子系统、关键数据、用户角色、密码产品、机房/云平台、外部接口和交付要求。",
+    "只有当用户明确说“生成/导出/输出/形成方案/出 Word/PDF/画图”等交付意图，或项目档案已经标记为生成就绪时，才调用 write_word、write_pdf、image_generate、send_file 等最终交付工具。",
+    "最终生成时需要严格参考用户给出的 Word 模板结构，生成专业、可复核、可落地的密码应用方案内容。",
     "方案需要覆盖系统概况、密码应用需求、密码应用设计、密钥管理、实施计划、风险与符合性说明等章节。",
     "回复使用中文 Markdown，必要时给出缺失资料清单。",
     "不要编造用户未提供的关键事实；若资料不足，用“待补充/需确认”标识。",
-    "工具调用由你按任务需要自主决策：寒暄、普通问答和资料澄清阶段不要默认读取模板或附件；只有生成/完善方案、分析附件、导出文件、查询最新资料等确有需要时，才调用对应工具。",
-    "当用户明确要求交付 Word、PDF、Markdown 或图片文件时，必须通过 write_word/write_pdf/write_file/image_generate 等工具真实生成文件；不要只在文本回复中声称已经生成。",
-    "生成文件后，如果工具结果没有自动展示文件卡片，应继续调用 send_file 将 data/output 中的产物发送给前端。",
+    "工具调用由你按任务需要自主决策：寒暄、普通问答和资料澄清阶段不要默认读取模板或附件；只有分析附件、查询最新资料、沉淀项目档案或交付文件确有需要时，才调用对应工具。",
+    "当进入最终交付阶段并需要 Word、PDF、Markdown 或图片文件时，必须通过 write_word/write_pdf/write_file/image_generate 等工具真实生成文件；不要只在文本回复中声称已经生成。",
+    "最终文件生成后，如果工具结果没有自动展示文件卡片，再调用 send_file 将 data/output 中的产物发送给前端。",
     `当前时间：${getCurrentTimeText()}`
   ].join("\n");
 
@@ -444,7 +449,7 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
   if (memory) {
     messages.push({
       role: "system",
-      content: `以下是本会话内置工具读取到的模板与附件上下文，生成方案时必须优先参考：\n\n${memory}`
+      content: `以下是本会话已沉淀的项目档案、模板/附件上下文和工具结果。继续对话时优先基于这些信息更新项目档案；最终生成方案时必须优先参考：\n\n${memory}`
     });
   }
 
@@ -671,19 +676,19 @@ async function pickAttachments(input: PickAttachmentInput): Promise<AttachmentRe
 
 function importClipboardAttachments(input: ClipboardAttachmentInput): AttachmentRef[] {
   ensureDataDirs();
-  return input.files.map((file) => {
-    const safeName = file.name.replace(/[<>:"/\\|?*]/g, "_");
-    const id = createId("attachment");
-    const filePath = join(inputDir, `${id}-${safeName}`);
-    writeFileSync(filePath, Buffer.from(file.dataBase64, "base64"));
+  return prepareImportedAttachments(input, {
+    inputDir,
+    createId: () => createId("attachment")
+  }).map((file) => {
+    writeFileSync(file.outputPath, file.buffer);
     const attachment: AttachmentRef = {
-      id,
+      id: file.id,
       sessionId: input.sessionId,
-      name: safeName,
+      name: file.safeName,
       mimeType: file.mimeType,
-      size: statSync(filePath).size,
-      path: filePath,
-      source: "clipboard",
+      size: statSync(file.outputPath).size,
+      path: file.outputPath,
+      source: file.source,
       createdAt: now()
     };
     attachments.set(attachment.id, attachment);
@@ -712,13 +717,22 @@ function registerIpc(): void {
     schedulePersistState();
   });
   ipcMain.handle("artifact:list", (_event, input?: ArtifactListInput) => listArtifacts(input));
-  ipcMain.handle("artifact:open", (_event, artifactId: string) => {
+  ipcMain.handle("artifact:open", async (_event, artifactId: string) => {
     const artifact = artifacts.get(artifactId);
-    if (artifact) void shell.openPath(artifact.path);
+    if (!artifact) {
+      throw new Error("Artifact not found");
+    }
+    const errorMessage = await shell.openPath(artifact.path);
+    if (errorMessage) {
+      throw new Error(errorMessage);
+    }
   });
   ipcMain.handle("artifact:reveal", (_event, artifactId: string) => {
     const artifact = artifacts.get(artifactId);
-    if (artifact) shell.showItemInFolder(artifact.path);
+    if (!artifact) {
+      throw new Error("Artifact not found");
+    }
+    shell.showItemInFolder(artifact.path);
   });
   ipcMain.handle("artifact:preview", (_event, artifactId: string) => {
     const artifact = artifacts.get(artifactId);
@@ -758,6 +772,7 @@ function createWindow(): void {
     minWidth: 1180,
     minHeight: 760,
     title: "PwdSafeAgent",
+    autoHideMenuBar: true,
     ...(windowIconPath ? { icon: windowIconPath } : {}),
     webPreferences: {
       preload: join(__dirname, "../preload/index.cjs"),
@@ -765,6 +780,8 @@ function createWindow(): void {
       nodeIntegration: false
     }
   });
+  mainWindow.setMenuBarVisibility(false);
+  mainWindow.removeMenu();
 
   registerContentSecurityPolicy(mainWindow.webContents.session, {
     dev: Boolean(process.env.ELECTRON_RENDERER_URL)

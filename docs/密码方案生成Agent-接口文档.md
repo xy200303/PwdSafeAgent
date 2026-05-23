@@ -212,7 +212,7 @@ export interface AttachmentRef {
   mimeType: string;
   size: number;
   path: string;
-  source: "picker" | "clipboard";
+  source: "picker" | "clipboard" | "drop";
   createdAt: string;
 }
 ```
@@ -396,6 +396,7 @@ export interface PickAttachmentInput {
 export interface ClipboardAttachmentInput {
   projectId: string;
   sessionId?: string;
+  source?: "clipboard" | "drop";
   files: Array<{
     name: string;
     mimeType: string;

@@ -65,6 +65,7 @@
     }
   },
   "dependencies": {
+    "@dev_xiaoyun/vane-file-preview": "^1.0.9",
     "@incremark/react": "^1.0.2",
     "@incremark/theme": "^1.0.2",
     "@radix-ui/react-alert-dialog": "^1.1.15",

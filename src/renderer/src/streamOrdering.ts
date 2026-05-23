@@ -25,7 +25,7 @@ export function orderStreamItemsForDisplay(items: StreamItem[]): StreamItem[] {
     turnItems = [];
   };
 
-  for (const item of items) {
+  for (const item of items.filter(shouldDisplayStreamItem)) {
     if (item.kind === "message" && item.role === "user" && turnItems.length) {
       flushTurn();
     }
@@ -34,4 +34,8 @@ export function orderStreamItemsForDisplay(items: StreamItem[]): StreamItem[] {
 
   flushTurn();
   return ordered;
+}
+
+function shouldDisplayStreamItem(item: StreamItem): boolean {
+  return !(item.kind === "tool" && item.toolName === "openai.chat.tools");
 }

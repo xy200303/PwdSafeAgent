@@ -19,12 +19,27 @@ describe("agentToolRegistry", () => {
     const safeTools = buildAgentChatTools({ includeExecBash: false });
     const fullTools = buildAgentChatTools({ includeExecBash: true });
 
+    expect(safeTools.map((tool) => tool.function.name)).toContain("remember_project");
     expect(safeTools.map((tool) => tool.function.name)).toContain("web_search");
     expect(safeTools.map((tool) => tool.function.name)).toContain("read_word");
     expect(safeTools.map((tool) => tool.function.name)).toContain("read_pdf");
     expect(safeTools.map((tool) => tool.function.name)).toContain("write_word");
     expect(safeTools.map((tool) => tool.function.name)).not.toContain("exec_bash");
     expect(fullTools.map((tool) => tool.function.name)).toContain("exec_bash");
+    expect(fullTools.every((tool) => tool.type === "function" && tool.function.strict === true)).toBe(true);
+  });
+
+  it("can hide final artifact tools while collecting project information", () => {
+    const tools = buildAgentChatTools({ includeExecBash: false, includeArtifactTools: false });
+    const names = tools.map((tool) => tool.function.name);
+
+    expect(names).toContain("remember_project");
+    expect(names).toContain("read_word");
+    expect(names).toContain("write_file");
+    expect(names).not.toContain("write_word");
+    expect(names).not.toContain("write_pdf");
+    expect(names).not.toContain("image_generate");
+    expect(names).not.toContain("send_file");
   });
 
   it("parses tool arguments defensively", () => {
@@ -50,6 +65,26 @@ describe("agentToolRegistry", () => {
         snippet: "密码应用基本要求。"
       }
     ]);
+  });
+
+  it("records project memory facts without producing artifacts", async () => {
+    const result = await executeAgentToolCall(
+      createToolCall("remember_project", {
+        summary: "已确认统一身份认证系统基础信息",
+        facts: [
+          { key: "应用系统", value: "统一身份认证系统" },
+          { key: "建设单位", value: "示例政务服务中心" }
+        ],
+        gaps: ["单位地址", "等保级别"],
+        ready_for_generation: false
+      }),
+      createContext(process.cwd())
+    );
+
+    expect(result.toolName).toBe("remember_project");
+    expect(result.summary).toContain("继续收集");
+    expect(result.content).toContain("应用系统：统一身份认证系统");
+    expect(result.artifactPath).toBeUndefined();
   });
 
   it("formats web search results from an injected fetch implementation", async () => {

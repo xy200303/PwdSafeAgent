@@ -3,10 +3,12 @@ import OpenAI from "openai";
 import type {
   ChatCompletionAssistantMessageParam,
   ChatCompletionMessageParam,
+  ChatCompletionMessageToolCall,
   ChatCompletionToolMessageParam
 } from "openai/resources/chat/completions";
 import type { AgentRuntimeKind, AppSettings, ChatSession, StreamItem } from "../shared/types";
 import { compactText, sanitizeFileName } from "./agentTools";
+import { hasDiagramArtifactIntent, hasSchemeArtifactIntent } from "./artifactIntent";
 import { buildAgentChatTools, executeAgentToolCall } from "./agentToolRegistry";
 import type { BundledPythonRuntime } from "./bundledRuntime";
 import { loadPiAgentRuntime } from "./piAgentAdapter";
@@ -112,15 +114,14 @@ function createOpenAIChatRuntime(host: AgentRuntimeHost): AgentRuntime {
 
       const assistantItem = host.createAssistantMessage(input.sessionId);
       input.onAssistantCreated(assistantItem);
-      const stream = await client.chat.completions.create(
-        {
-          model: settings.openai.chatModel,
-          messages,
-          stream: true,
-          max_completion_tokens: settings.openai.maxOutputTokens
-        },
-        { signal: input.controller.signal }
-      );
+      const stream = await createFinalResponseStream({
+        sessionId: input.sessionId,
+        client,
+        settings,
+        messages,
+        controller: input.controller,
+        host
+      });
 
       for await (const part of stream) {
         const delta = part.choices[0]?.delta?.content;
@@ -132,6 +133,114 @@ function createOpenAIChatRuntime(host: AgentRuntimeHost): AgentRuntime {
       return assistantItem;
     }
   };
+}
+
+interface ChatCompletionStreamChunk {
+  choices: Array<{
+    delta?: {
+      content?: string | null;
+    };
+  }>;
+}
+
+type ChatCompletionStream = AsyncIterable<ChatCompletionStreamChunk>;
+
+async function createFinalResponseStream({
+  sessionId,
+  client,
+  settings,
+  messages,
+  controller,
+  host
+}: {
+  sessionId: string;
+  client: OpenAIChatClient;
+  settings: AppSettings;
+  messages: ChatCompletionMessageParam[];
+  controller: AbortController;
+  host: AgentRuntimeHost;
+}): Promise<ChatCompletionStream> {
+  try {
+    return (await client.chat.completions.create(
+      {
+        model: settings.openai.chatModel,
+        messages,
+        stream: true,
+        max_completion_tokens: settings.openai.maxOutputTokens
+      },
+      { signal: controller.signal }
+    )) as unknown as ChatCompletionStream;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!isFunctionArgumentsJsonError(message)) {
+      throw error;
+    }
+
+    host.addStage(
+      sessionId,
+      "最终回复已兼容降级",
+      "模型服务不接受工具调用历史，已将工具结果转换为普通上下文后重试"
+    );
+    return (await client.chat.completions.create(
+      {
+        model: settings.openai.chatModel,
+        messages: flattenToolHistoryForFinalResponse(messages),
+        stream: true,
+        max_completion_tokens: settings.openai.maxOutputTokens
+      },
+      { signal: controller.signal }
+    )) as unknown as ChatCompletionStream;
+  }
+}
+
+function flattenToolHistoryForFinalResponse(messages: ChatCompletionMessageParam[]): ChatCompletionMessageParam[] {
+  const flattened: ChatCompletionMessageParam[] = [];
+
+  for (const message of messages) {
+    if (message.role === "tool") {
+      flattened.push({
+        role: "system",
+        content: `以下是已执行工具的结果，请作为上下文参考：\n\n${stringifyChatContent(message.content)}`
+      });
+      continue;
+    }
+
+    if (message.role === "assistant" && "tool_calls" in message && message.tool_calls?.length) {
+      const content = stringifyChatContent(message.content);
+      if (content.trim()) {
+        flattened.push({ role: "assistant", content });
+      }
+      flattened.push({
+        role: "system",
+        content: formatToolCallHistory(message.tool_calls)
+      });
+      continue;
+    }
+
+    flattened.push(message);
+  }
+
+  return flattened;
+}
+
+function formatToolCallHistory(calls: ChatCompletionMessageToolCall[]): string {
+  return [
+    "模型在前一步曾请求以下工具调用，这些调用已由应用执行；请不要再次依赖 Chat Completions tool_call 历史格式：",
+    ...calls.map((call, index) => {
+      if (call.type !== "function") return `${index + 1}. ${call.type}`;
+      return `${index + 1}. ${call.function.name}(${sanitizeToolPreview(call.function.arguments)})`;
+    })
+  ].join("\n");
+}
+
+function stringifyChatContent(content: unknown): string {
+  if (content === null || content === undefined) return "";
+  if (typeof content === "string") return content;
+  try {
+    return JSON.stringify(content);
+  } catch {
+    return String(content);
+  }
 }
 
 function createPiAgentRuntime(host: AgentRuntimeHost): AgentRuntime {
@@ -168,43 +277,55 @@ async function runOpenAIToolPlanning(
   userPrompt: string,
   host: AgentRuntimeHost
 ): Promise<ChatCompletionMessageParam[]> {
-  const tools = buildAgentChatTools({ includeExecBash: settings.agent.execBashEnabled });
+  const includeArtifactTools = shouldExposeArtifactTools(userPrompt, host.formatSessionMemory(sessionId));
+  const tools = buildAgentChatTools({ includeExecBash: settings.agent.execBashEnabled, includeArtifactTools });
   const toolMessages = [...messages];
+
+  if (!includeArtifactTools) {
+    toolMessages.push({
+      role: "system",
+      content:
+        "当前处于项目资料收集阶段：最终交付工具 write_word、write_pdf、image_generate、send_file 暂不开放。请通过对话继续澄清信息，必要时调用 remember_project 更新项目档案；不要声称已经生成文件。"
+    });
+  } else {
+    toolMessages.push({
+      role: "system",
+      content:
+        "当前已进入方案生成/交付阶段：如需交付文件，先确保项目事实已沉淀，再调用 write_word 生成 Word；需要图示时再调用 image_generate；生成完成后可调用 send_file。"
+    });
+  }
 
   for (let round = 1; round <= MAX_AGENT_TOOL_ROUNDS; round += 1) {
     throwIfAborted(controller);
-    const plannerTool = host.startToolCall(sessionId, "openai.chat.tools", `工具规划第 ${round} 轮`);
-    const completion = await client.chat.completions.create(
-      {
-        model: settings.openai.chatModel,
-        messages: toolMessages,
-        tools,
-        tool_choice: "auto",
-        parallel_tool_calls: false,
-        max_completion_tokens: Math.min(settings.openai.maxOutputTokens, 2048)
-      },
-      { signal: controller.signal }
-    );
+    const completion = await createPlanningCompletion({
+      sessionId,
+      client,
+      settings,
+      toolMessages,
+      tools,
+      controller,
+      host
+    });
+    if (!completion) return toolMessages;
 
     const message = completion.choices[0]?.message;
     const calls = message?.tool_calls ?? [];
     if (!calls.length) {
-      host.finishToolCall(sessionId, plannerTool, "success", "模型判断无需继续调用工具");
       if (message?.content?.trim()) {
         toolMessages.push({ role: "assistant", content: message.content });
       }
       return toolMessages;
     }
 
-    host.finishToolCall(sessionId, plannerTool, "success", `模型请求 ${calls.length} 个工具调用`);
+    const normalizedCalls = normalizeToolCallsForChatHistory(calls);
     const assistantToolMessage: ChatCompletionAssistantMessageParam = {
       role: "assistant",
       content: message.content ?? null,
-      tool_calls: calls
+      tool_calls: normalizedCalls
     };
     toolMessages.push(assistantToolMessage);
 
-    for (const call of calls) {
+    for (const call of normalizedCalls) {
       throwIfAborted(controller);
       const functionName = call.type === "function" ? call.function.name : call.type;
       const toolItem = host.startToolCall(sessionId, functionName, `执行 ${functionName}`);
@@ -264,6 +385,56 @@ async function runOpenAIToolPlanning(
   return toolMessages;
 }
 
+function shouldExposeArtifactTools(userPrompt: string, memory: string): boolean {
+  if (hasSchemeArtifactIntent(userPrompt) || hasDiagramArtifactIntent(userPrompt)) return true;
+  return /生成就绪[：:]\s*是|ready_for_generation[：:=]\s*true/i.test(memory);
+}
+
+async function createPlanningCompletion({
+  sessionId,
+  client,
+  settings,
+  toolMessages,
+  tools,
+  controller,
+  host
+}: {
+  sessionId: string;
+  client: OpenAIChatClient;
+  settings: AppSettings;
+  toolMessages: ChatCompletionMessageParam[];
+  tools: ReturnType<typeof buildAgentChatTools>;
+  controller: AbortController;
+  host: AgentRuntimeHost;
+}) {
+  try {
+    return await client.chat.completions.create(
+      {
+        model: settings.openai.chatModel,
+        messages: toolMessages,
+        tools,
+        tool_choice: "auto",
+        parallel_tool_calls: false,
+        max_completion_tokens: Math.min(settings.openai.maxOutputTokens, 2048)
+      },
+      { signal: controller.signal }
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!isFunctionArgumentsJsonError(message)) {
+      throw error;
+    }
+
+    host.addStage(sessionId, "工具规划已兼容跳过", "模型服务返回了非法工具参数，已改为直接回复");
+    toolMessages.push({
+      role: "system",
+      content:
+        "本轮工具规划被跳过：兼容模型服务报告 function.arguments 不是合法 JSON。请不要继续调用工具，直接基于已有对话内容回复用户；如需要文件或模板，请提示用户重试或补充信息。"
+    });
+    return undefined;
+  }
+}
+
 function throwIfAborted(controller: AbortController): void {
   if (controller.signal.aborted) {
     throw new Error("用户已停止生成");
@@ -279,4 +450,72 @@ function sanitizeToolPreview(value: string): string {
       .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "sk-[REDACTED]"),
     TOOL_PREVIEW_CHARS
   );
+}
+
+function normalizeToolCallsForChatHistory(calls: ChatCompletionMessageToolCall[]): ChatCompletionMessageToolCall[] {
+  return calls.map((call) => {
+    if (call.type !== "function") return call;
+    return {
+      ...call,
+      function: {
+        ...call.function,
+        arguments: normalizeFunctionArguments(call.function.arguments, call.function.name)
+      }
+    };
+  });
+}
+
+function normalizeFunctionArguments(raw: string, functionName: string): string {
+  const parsed = parseJsonObject(raw);
+  if (parsed) return JSON.stringify(parsed);
+
+  const stripped = stripJsonCodeFence(raw);
+  const parsedStripped = stripped === raw ? undefined : parseJsonObject(stripped);
+  if (parsedStripped) return JSON.stringify(parsedStripped);
+
+  const repaired = repairLooseJsonObject(stripped);
+  const parsedRepaired = repaired ? parseJsonObject(repaired) : undefined;
+  if (parsedRepaired) return JSON.stringify(parsedRepaired);
+
+  return JSON.stringify(inferArgumentsFromPlainText(functionName, stripped));
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> | undefined {
+  if (!raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function stripJsonCodeFence(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
+function repairLooseJsonObject(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.startsWith("{") || !trimmed.includes(":")) return undefined;
+  return `{${trimmed}}`;
+}
+
+function inferArgumentsFromPlainText(functionName: string, raw: string): Record<string, unknown> {
+  const value = raw.trim();
+  if (!value || functionName === "time") return {};
+  if (functionName === "web_search") return { query: value };
+  if (["read_file", "read_word", "read_pdf", "send_file", "write_pdf"].includes(functionName)) return { path: value };
+  if (functionName === "exec_bash") return { command: value };
+  if (functionName === "image_generate") return { kind: "architecture", prompt: value };
+  if (functionName === "remember_project") return { summary: value, facts: [], gaps: [], ready_for_generation: false };
+  if (["write_file", "write_word"].includes(functionName)) return { content: value };
+  return {};
+}
+
+function isFunctionArgumentsJsonError(message: string): boolean {
+  return /function\.arguments/i.test(message) && /JSON/i.test(message);
 }

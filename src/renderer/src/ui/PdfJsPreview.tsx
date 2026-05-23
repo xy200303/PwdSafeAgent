@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState, type JSX } from "react";
-import { renderAsync } from "docx-preview";
 import { getDocument, GlobalWorkerOptions } from "pdfjs-dist";
 import type { PDFDocumentProxy } from "pdfjs-dist";
-import { dataUrlToBlob, dataUrlToUint8Array } from "./previewDataUrl";
+import { dataUrlToUint8Array } from "./previewDataUrl";
 
 GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
 
-export function PdfJsPreview({ dataUrl, name }: { dataUrl: string; name: string }): JSX.Element {
+export default function PdfJsPreview({ dataUrl, name }: { dataUrl: string; name: string }): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState("");
   const [pageCount, setPageCount] = useState(0);
@@ -68,49 +67,6 @@ export function PdfJsPreview({ dataUrl, name }: { dataUrl: string; name: string 
       <div className="preview-library-label">PDF.js 开源预览{pageCount ? ` · ${pageCount} 页` : ""}</div>
       {error ? <p className="preview-empty">PDF 渲染失败：{error}</p> : null}
       <div ref={containerRef} className="pdf-pages" />
-    </div>
-  );
-}
-
-export function DocxPreview({ dataUrl }: { dataUrl: string }): JSX.Element {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    let cancelled = false;
-    const container = containerRef.current;
-    if (!container) return;
-
-    container.replaceChildren();
-    setError("");
-
-    void (async () => {
-      try {
-        await renderAsync(dataUrlToBlob(dataUrl), container, undefined, {
-          breakPages: true,
-          className: "docx-preview-document",
-          inWrapper: true,
-          ignoreFonts: false,
-          renderHeaders: true,
-          renderFooters: true
-        });
-        if (cancelled) container.replaceChildren();
-      } catch (renderError) {
-        if (!cancelled) setError(renderError instanceof Error ? renderError.message : String(renderError));
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      container.replaceChildren();
-    };
-  }, [dataUrl]);
-
-  return (
-    <div className="docx-preview-host">
-      <div className="preview-library-label">docx-preview 开源预览</div>
-      {error ? <p className="preview-empty">Word 渲染失败：{error}</p> : null}
-      <div ref={containerRef} className="docx-pages" />
     </div>
   );
 }

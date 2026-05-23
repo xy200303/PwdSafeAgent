@@ -4,9 +4,15 @@ type ResponseHeaders = Record<string, string[] | string | undefined>;
 type CleanResponseHeaders = Record<string, string[] | string>;
 
 export function buildContentSecurityPolicy(options: { dev: boolean }): string {
-  const connectSrc = ["'self'", "https:"];
+  const connectSrc = ["'self'", "https:", "blob:"];
   if (options.dev) {
     connectSrc.push("http://localhost:*", "ws://localhost:*", "http://127.0.0.1:*", "ws://127.0.0.1:*");
+  }
+
+  const scriptSrc = ["'self'"];
+  if (options.dev) {
+    // Vite React Refresh injects an inline preamble during development.
+    scriptSrc.push("'unsafe-inline'");
   }
 
   const directives: Record<string, string[]> = {
@@ -14,7 +20,7 @@ export function buildContentSecurityPolicy(options: { dev: boolean }): string {
     "base-uri": ["'self'"],
     "object-src": ["'none'"],
     "frame-ancestors": ["'none'"],
-    "script-src": ["'self'"],
+    "script-src": scriptSrc,
     "style-src": ["'self'", "'unsafe-inline'"],
     "img-src": ["'self'", "data:", "blob:"],
     "font-src": ["'self'", "data:"],

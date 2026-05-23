@@ -98,6 +98,7 @@ export interface ArtifactPreview {
   name: string;
   kind: ArtifactKind;
   mode: "text" | "image" | "pdf" | "docx" | "unsupported";
+  size?: number;
   text?: string;
   dataUrl?: string;
   mimeType?: string;
@@ -111,12 +112,13 @@ export interface AttachmentRef {
   mimeType: string;
   size: number;
   path: string;
-  source: "picker" | "clipboard";
+  source: "picker" | "clipboard" | "drop";
   createdAt: string;
 }
 
 export interface ClipboardAttachmentInput {
   sessionId?: string;
+  source?: "clipboard" | "drop";
   files: Array<{
     name: string;
     mimeType: string;

@@ -1,4 +1,15 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type JSX } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type DragEvent,
+  type FormEvent,
+  type KeyboardEvent,
+  type JSX
+} from "react";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import * as Dialog from "@radix-ui/react-dialog";
@@ -65,7 +76,9 @@ import type {
 } from "../../../shared/types";
 import { getErrorMessage, resolvePwdSafeAgentApi } from "../bridge";
 import { orderStreamItemsForDisplay } from "../streamOrdering";
-import { DocxPreview, PdfJsPreview } from "./ArtifactPreviewRenderers";
+import { filesToAttachmentPayload } from "./attachmentPayload";
+
+const LazyArtifactPreviewPanel = lazy(() => import("./ArtifactPreviewPanel"));
 
 export function App(): JSX.Element {
   const dispatch = useDispatch<AppDispatch>();
@@ -156,7 +169,12 @@ export function App(): JSX.Element {
         />
         <main className="content-area">
           <Header session={currentSession} settings={settings} />
-          <MessagePane session={currentSession} onPreviewArtifact={(artifactId) => void previewArtifact(artifactId)} />
+          <MessagePane
+            api={api}
+            session={currentSession}
+            onPreviewArtifact={(artifactId) => void previewArtifact(artifactId)}
+            onError={(message) => setAppError(message)}
+          />
           <Composer
             api={api}
             session={currentSession}
@@ -182,20 +200,24 @@ export function App(): JSX.Element {
           />
         ) : null}
         {preview || previewError ? (
-          <ArtifactPreviewPanel
-            preview={preview}
-            error={previewError}
-            onClose={() => {
-              setPreview(undefined);
-              setPreviewError("");
-            }}
-          />
+          <Suspense fallback={<PreviewLoadingPanel />}>
+            <LazyArtifactPreviewPanel
+              preview={preview}
+              error={previewError}
+              onClose={() => {
+                setPreview(undefined);
+                setPreviewError("");
+              }}
+            />
+          </Suspense>
         ) : null}
         {artifactsOpen ? (
           <ArtifactHistoryPanel
             artifacts={artifacts}
             sessions={sessions}
             onClose={() => dispatch(setArtifactsOpen(false))}
+            api={api}
+            onError={(message) => setAppError(message)}
             onPreviewArtifact={(artifactId) => {
               dispatch(setArtifactsOpen(false));
               void previewArtifact(artifactId);
@@ -363,11 +385,15 @@ function Header({ session, settings }: { session?: ChatSession; settings?: AppSe
 }
 
 function MessagePane({
+  api,
   session,
-  onPreviewArtifact
+  onPreviewArtifact,
+  onError
 }: {
+  api: PwdSafeAgentApi;
   session?: ChatSession;
   onPreviewArtifact: (artifactId: string) => void;
+  onError: (message: string) => void;
 }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -386,7 +412,7 @@ function MessagePane({
           </div>
         ) : (
           orderStreamItemsForDisplay(session.items).map((item) => (
-            <StreamRow key={item.id} item={item} onPreviewArtifact={onPreviewArtifact} />
+            <StreamRow key={item.id} api={api} item={item} onPreviewArtifact={onPreviewArtifact} onError={onError} />
           ))
         )}
       </ScrollArea.Viewport>
@@ -398,11 +424,15 @@ function MessagePane({
 }
 
 function StreamRow({
+  api,
   item,
-  onPreviewArtifact
+  onPreviewArtifact,
+  onError
 }: {
+  api: PwdSafeAgentApi;
   item: StreamItem;
   onPreviewArtifact: (artifactId: string) => void;
+  onError: (message: string) => void;
 }): JSX.Element {
   if (item.kind === "message") {
     const isUser = item.role === "user";
@@ -431,7 +461,12 @@ function StreamRow({
         {isImageKind(item.fileKind) ? <Image size={16} /> : <File size={16} />}
         <span>{item.name}</span>
         <span className="file-kind">{item.fileKind}</span>
-        <ArtifactActions artifactId={item.artifactId} onPreview={() => onPreviewArtifact(item.artifactId)} />
+        <ArtifactActions
+          api={api}
+          artifactId={item.artifactId}
+          onPreview={() => onPreviewArtifact(item.artifactId)}
+          onError={onError}
+        />
       </div>
     );
   }
@@ -488,7 +523,33 @@ function ToolDetailBlock({ title, content }: { title: string; content: string })
   );
 }
 
-function ArtifactActions({ artifactId, onPreview }: { artifactId: string; onPreview: () => void }): JSX.Element {
+function ArtifactActions({
+  api,
+  artifactId,
+  onPreview,
+  onError
+}: {
+  api: PwdSafeAgentApi;
+  artifactId: string;
+  onPreview: () => void;
+  onError: (message: string) => void;
+}): JSX.Element {
+  async function openArtifact(): Promise<void> {
+    try {
+      await api.artifact.open(artifactId);
+    } catch (error) {
+      onError(`打开文件失败：${getErrorMessage(error)}`);
+    }
+  }
+
+  async function revealArtifact(): Promise<void> {
+    try {
+      await api.artifact.reveal(artifactId);
+    } catch (error) {
+      onError(`定位文件失败：${getErrorMessage(error)}`);
+    }
+  }
+
   return (
     <div className="file-actions">
       <button type="button" className="file-quick-action" onClick={onPreview}>
@@ -505,14 +566,14 @@ function ArtifactActions({ artifactId, onPreview }: { artifactId: string; onPrev
           <DropdownMenu.Content className="dropdown-content" align="end" sideOffset={6}>
             <DropdownMenu.Item
               className="dropdown-item"
-              onSelect={() => void window.pwdSafeAgent?.artifact.open(artifactId)}
+              onSelect={() => void openArtifact()}
             >
               <File size={14} />
               系统打开
             </DropdownMenu.Item>
             <DropdownMenu.Item
               className="dropdown-item"
-              onSelect={() => void window.pwdSafeAgent?.artifact.reveal(artifactId)}
+              onSelect={() => void revealArtifact()}
             >
               <FolderOpen size={14} />
               在文件夹中定位
@@ -524,66 +585,12 @@ function ArtifactActions({ artifactId, onPreview }: { artifactId: string; onPrev
   );
 }
 
-function ArtifactPreviewPanel({
-  preview,
-  error,
-  onClose
-}: {
-  preview?: ArtifactPreview;
-  error: string;
-  onClose: () => void;
-}): JSX.Element {
+function PreviewLoadingPanel(): JSX.Element {
   return (
-    <Dialog.Root
-      open
-      onOpenChange={(open) => {
-        if (!open) onClose();
-      }}
-    >
-      <Dialog.Portal>
-        <Dialog.Overlay className="preview-backdrop" />
-        <Dialog.Content className="preview-panel">
-        <header>
-          <div>
-            <Dialog.Title asChild>
-              <strong>{preview?.name || "预览失败"}</strong>
-            </Dialog.Title>
-            <span>{preview ? preview.kind.toUpperCase() : error}</span>
-          </div>
-          <Dialog.Close asChild>
-            <button type="button" aria-label="关闭预览">
-              <X size={16} />
-            </button>
-          </Dialog.Close>
-        </header>
-        {preview?.summary ? (
-          <Dialog.Description className="preview-summary">{preview.summary}</Dialog.Description>
-        ) : (
-          <Dialog.Description className="sr-only">文件预览内容</Dialog.Description>
-        )}
-        <ScrollArea.Root className="preview-scroll">
-        <ScrollArea.Viewport className="preview-body">
-          {error ? <p className="preview-empty">{error}</p> : null}
-          {preview?.mode === "image" && preview.dataUrl ? <img src={preview.dataUrl} alt={preview.name} /> : null}
-          {preview?.mode === "pdf" && preview.dataUrl ? (
-            <PdfJsPreview dataUrl={preview.dataUrl} name={preview.name} />
-          ) : null}
-          {preview?.mode === "docx" && preview.dataUrl ? <DocxPreview dataUrl={preview.dataUrl} /> : null}
-          {preview?.mode === "text" && preview.kind === "md" && preview.text ? (
-            <div className="preview-markdown">
-              <IncremarkContent content={preview.text} isFinished />
-            </div>
-          ) : null}
-          {preview?.mode === "text" && preview.kind !== "md" && preview.text ? <pre>{preview.text}</pre> : null}
-          {preview?.mode === "unsupported" ? <p className="preview-empty">{preview.summary}</p> : null}
-        </ScrollArea.Viewport>
-        <ScrollArea.Scrollbar className="scrollbar" orientation="vertical">
-          <ScrollArea.Thumb className="scrollbar-thumb" />
-        </ScrollArea.Scrollbar>
-        </ScrollArea.Root>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+    <div className="preview-loading-panel" role="status">
+      <Loader2 size={16} className="spin" />
+      正在加载文件预览...
+    </div>
   );
 }
 
@@ -591,11 +598,15 @@ function ArtifactHistoryPanel({
   artifacts,
   sessions,
   onClose,
+  api,
+  onError,
   onPreviewArtifact
 }: {
   artifacts: ArtifactSummary[];
   sessions: ChatSession[];
   onClose: () => void;
+  api: PwdSafeAgentApi;
+  onError: (message: string) => void;
   onPreviewArtifact: (artifactId: string) => void;
 }): JSX.Element {
   return (
@@ -641,7 +652,12 @@ function ArtifactHistoryPanel({
                       </span>
                     </div>
                     <time>{formatDateTime(artifact.createdAt)}</time>
-                    <ArtifactActions artifactId={artifact.id} onPreview={() => onPreviewArtifact(artifact.id)} />
+                    <ArtifactActions
+                      api={api}
+                      artifactId={artifact.id}
+                      onPreview={() => onPreviewArtifact(artifact.id)}
+                      onError={onError}
+                    />
                   </div>
                 ))
               )}
@@ -813,6 +829,7 @@ function Composer(props: {
 }): JSX.Element {
   const canSend = Boolean(props.session && (props.value.trim() || props.attachments.length));
   const running = props.session?.status === "running";
+  const [draggingFiles, setDraggingFiles] = useState(false);
 
   async function submit(event?: FormEvent): Promise<void> {
     event?.preventDefault();
@@ -839,31 +856,62 @@ function Composer(props: {
     }
   }
 
-  async function onPaste(event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> {
+  async function importFiles(files: File[], actionLabel: string, source: "clipboard" | "drop"): Promise<void> {
     if (!props.session) return;
-    const files = Array.from(event.clipboardData.files);
     if (files.length === 0) return;
-    event.preventDefault();
     try {
-      const payload = await Promise.all(
-        files.map(async (file) => ({
-          name: file.name || "clipboard-file",
-          mimeType: file.type || "application/octet-stream",
-          dataBase64: await fileToBase64(file)
-        }))
-      );
+      const payload = await filesToAttachmentPayload(files);
       const imported = await props.api.attachment.importClipboard({
         sessionId: props.session.id,
+        source,
         files: payload
       });
       props.onAddAttachments(imported);
     } catch (error) {
-      props.onError(`粘贴附件失败：${getErrorMessage(error)}`);
+      props.onError(`${actionLabel}附件失败：${getErrorMessage(error)}`);
     }
   }
 
+  async function onPaste(event: ClipboardEvent<HTMLTextAreaElement>): Promise<void> {
+    const files = Array.from(event.clipboardData.files);
+    if (files.length === 0) return;
+    event.preventDefault();
+    await importFiles(files, "粘贴", "clipboard");
+  }
+
+  function onDragOver(event: DragEvent<HTMLFormElement>): void {
+    if (!event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = props.session ? "copy" : "none";
+    setDraggingFiles(true);
+  }
+
+  function onDragLeave(event: DragEvent<HTMLFormElement>): void {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDraggingFiles(false);
+  }
+
+  async function onDrop(event: DragEvent<HTMLFormElement>): Promise<void> {
+    if (!event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    setDraggingFiles(false);
+    await importFiles(Array.from(event.dataTransfer.files), "拖入", "drop");
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    void submit();
+  }
+
   return (
-    <form className="composer" onSubmit={(event) => void submit(event)}>
+    <form
+      className={draggingFiles ? "composer dragging-files" : "composer"}
+      onSubmit={(event) => void submit(event)}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={(event) => void onDrop(event)}
+    >
       {props.attachments.length ? (
         <div className="attachment-strip">
           {props.attachments.map((attachment) => (
@@ -880,16 +928,23 @@ function Composer(props: {
       <textarea
         value={props.value}
         onChange={(event) => props.onChange(event.target.value)}
+        onKeyDown={onKeyDown}
         onPaste={(event) => void onPaste(event)}
         placeholder="输入系统背景、建设单位、网络拓扑、关键数据，或粘贴/选择文件..."
       />
+      {draggingFiles ? (
+        <div className="composer-drop-indicator">
+          <Upload size={18} />
+          松开即可添加附件
+        </div>
+      ) : null}
       <div className="composer-actions">
         <TooltipButton label="选择 Word、PDF、图片或文本附件" className="icon-action" onClick={chooseFiles}>
           <Paperclip size={16} />
         </TooltipButton>
         <div className="paste-hint">
           <Upload size={14} />
-          支持粘贴 Word、PDF、图片和文本资料
+          支持拖拽、粘贴 Word、PDF、图片和文本资料
         </div>
         <div className="spacer" />
         {running ? (
@@ -1324,14 +1379,4 @@ function formatToolPreview(content: string): string {
   } catch {
     return content;
   }
-}
-
-async function fileToBase64(file: File): Promise<string> {
-  const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
 }

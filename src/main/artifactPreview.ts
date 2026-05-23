@@ -47,6 +47,7 @@ export async function buildArtifactPreview(
       name: artifact.name,
       kind: artifact.kind,
       mode: "text",
+      size: fileStat.size,
       text: compactText(text, maxTextChars)
     };
   }
@@ -56,6 +57,7 @@ export async function buildArtifactPreview(
     name: artifact.name,
     kind: artifact.kind,
     mode: "unsupported",
+    size: fileStat.size,
     summary: "该文件类型暂不支持内置预览，请使用“打开”。"
   };
 }
@@ -73,6 +75,7 @@ async function buildDataPreview(
       name: artifact.name,
       kind: artifact.kind,
       mode: "unsupported",
+      size,
       summary: "文件较大，暂不内置预览，请使用“打开”。"
     };
   }
@@ -83,6 +86,7 @@ async function buildDataPreview(
     name: artifact.name,
     kind: artifact.kind,
     mode,
+    size,
     mimeType,
     dataUrl: `data:${mimeType};base64,${data.toString("base64")}`
   };
@@ -99,6 +103,7 @@ async function buildDocumentTextPreview(
     name: artifact.name,
     kind: artifact.kind,
     mode: "text",
+    size: artifact.size,
     text: result.content || result.summary,
     summary
   };

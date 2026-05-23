@@ -48,8 +48,57 @@ export interface WebSearchResult {
   snippet: string;
 }
 
-export function buildAgentChatTools(options: { includeExecBash: boolean }): ChatCompletionTool[] {
+export function buildAgentChatTools(options: { includeExecBash: boolean; includeArtifactTools?: boolean }): ChatCompletionTool[] {
   const tools: ChatCompletionTool[] = [
+    {
+      type: "function",
+      function: {
+        name: "remember_project",
+        description:
+          "沉淀本轮对话中已经确认的项目事实和缺口。用于持续维护项目档案；信息收集阶段应优先使用它，而不是直接生成 Word 或图片。",
+        parameters: {
+          type: "object",
+          properties: {
+            summary: {
+              type: "string",
+              description: "一句话概括当前已确认的项目情况。"
+            },
+            facts: {
+              type: "array",
+              description: "已确认的项目事实键值对，例如应用系统、建设单位、单位省份、等保级别、部署模式、应用子系统、关键数据、密码产品。",
+              items: {
+                type: "object",
+                properties: {
+                  key: {
+                    type: "string",
+                    description: "事实名称。"
+                  },
+                  value: {
+                    type: "string",
+                    description: "事实内容。"
+                  }
+                },
+                required: ["key", "value"],
+                additionalProperties: false
+              }
+            },
+            gaps: {
+              type: "array",
+              description: "仍需用户补充或确认的信息；没有缺口时传空数组。不要为了生成而虚构缺失事实。",
+              items: {
+                type: "string"
+              }
+            },
+            ready_for_generation: {
+              type: "boolean",
+              description: "当核心事实已足够支撑生成正式方案时为 true；仍需澄清时必须为 false。"
+            }
+          },
+          required: ["summary", "facts", "gaps", "ready_for_generation"],
+          additionalProperties: false
+        }
+      }
+    },
     {
       type: "function",
       function: {
@@ -179,6 +228,26 @@ export function buildAgentChatTools(options: { includeExecBash: boolean }): Chat
             content: {
               type: "string",
               description: "已经生成的方案正文 Markdown。"
+            },
+            template_fields: {
+              type: "array",
+              description:
+                "可选模板字段覆盖。用于把用户已明确提供的信息写入 Word 模板占位符，key 可用应用系统、建设单位、单位省份、单位地址、单位邮编、等保级别、物理机房1、物理机房1地址、云平台、密码系统产品等。",
+              items: {
+                type: "object",
+                properties: {
+                  key: {
+                    type: "string",
+                    description: "模板字段名或占位符名，例如 应用系统、${建设单位}、cloudPlatform。"
+                  },
+                  value: {
+                    type: "string",
+                    description: "模板字段值。"
+                  }
+                },
+                required: ["key", "value"],
+                additionalProperties: false
+              }
             }
           },
           required: ["content"],
@@ -270,7 +339,26 @@ export function buildAgentChatTools(options: { includeExecBash: boolean }): Chat
     });
   }
 
-  return tools;
+  const enabledTools =
+    options.includeArtifactTools === false
+      ? tools.filter((tool) => tool.type !== "function" || !isFinalArtifactToolName(tool.function.name))
+      : tools;
+
+  return enabledTools.map((tool) =>
+    tool.type === "function"
+      ? {
+          ...tool,
+          function: {
+            ...tool.function,
+            strict: true
+          }
+        }
+      : tool
+  );
+}
+
+function isFinalArtifactToolName(name: string): boolean {
+  return name === "write_word" || name === "write_pdf" || name === "image_generate" || name === "send_file";
 }
 
 export async function executeAgentToolCall(
@@ -293,6 +381,8 @@ export async function executeAgentToolCall(
       const time = getCurrentTimeText();
       return { toolName, summary: time, content: time };
     }
+    case "remember_project":
+      return executeRememberProject(args);
     case "web_search":
       return executeWebSearch(args);
     case "read_file":
@@ -404,6 +494,28 @@ function executeWebSearch(args: Record<string, unknown>): Promise<AgentToolExecu
   }));
 }
 
+function executeRememberProject(args: Record<string, unknown>): AgentToolExecutionResult {
+  const summary = readStringArg(args, "summary") || "已更新项目档案";
+  const facts = readKeyValueListArg(args, "facts");
+  const gaps = readStringListArg(args, "gaps");
+  const readyForGeneration = readBooleanArg(args, "ready_for_generation", false);
+  const lines = [
+    "项目档案更新",
+    `摘要：${summary}`,
+    "已确认事实：",
+    facts.length ? facts.map((fact) => `- ${fact.key}：${fact.value}`).join("\n") : "- 暂无新增事实",
+    "待补充信息：",
+    gaps.length ? gaps.map((gap) => `- ${gap}`).join("\n") : "- 暂无",
+    `生成就绪：${readyForGeneration ? "是" : "否"}`
+  ];
+
+  return {
+    toolName: "remember_project",
+    summary: readyForGeneration ? "项目档案已更新，信息已基本就绪" : "项目档案已更新，继续收集信息",
+    content: lines.join("\n")
+  };
+}
+
 async function executeReadFile(
   args: Record<string, unknown>,
   context: AgentToolExecutionContext,
@@ -457,7 +569,9 @@ async function executeWriteWord(
   const result = await writeSchemeDocxFromTemplate(templatePath, outputPath, {
     prompt: prompt || context.sessionTitle,
     memory: context.memory,
-    generatedMarkdown: content
+    generatedMarkdown: content,
+    fields: readObjectArg(args, "fields"),
+    templateFields: readTemplateFieldsArg(args)
   });
 
   return {
@@ -718,6 +832,44 @@ function assertPathAllowed(
 function readStringArg(args: Record<string, unknown>, key: string): string {
   const value = args[key];
   return typeof value === "string" ? value.trim() : "";
+}
+
+function readStringListArg(args: Record<string, unknown>, key: string): string[] {
+  const value = args[key];
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean);
+}
+
+function readKeyValueListArg(args: Record<string, unknown>, key: string): Array<{ key: string; value: string }> {
+  const value = args[key];
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+      const record = item as Record<string, unknown>;
+      const itemKey = typeof record.key === "string" ? record.key.trim() : "";
+      const itemValue = typeof record.value === "string" ? record.value.trim() : "";
+      return itemKey && itemValue ? { key: itemKey, value: itemValue } : undefined;
+    })
+    .filter((item): item is { key: string; value: string } => Boolean(item));
+}
+
+function readBooleanArg(args: Record<string, unknown>, key: string, fallback: boolean): boolean {
+  const value = args[key];
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return /^(1|true|yes|是|ready)$/i.test(value.trim());
+  return fallback;
+}
+
+function readObjectArg(args: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = args[key];
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function readTemplateFieldsArg(args: Record<string, unknown>): Array<Record<string, unknown>> | undefined {
+  const value = args.template_fields ?? args.templateFields;
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
 }
 
 function readNumberArg(args: Record<string, unknown>, key: string, fallback: number): number {
