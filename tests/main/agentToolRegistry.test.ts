@@ -23,6 +23,7 @@ describe("agentToolRegistry", () => {
     expect(safeTools.map((tool) => tool.function.name)).toContain("web_search");
     expect(safeTools.map((tool) => tool.function.name)).toContain("read_word");
     expect(safeTools.map((tool) => tool.function.name)).toContain("read_pdf");
+    expect(safeTools.map((tool) => tool.function.name)).toContain("create_word");
     expect(safeTools.map((tool) => tool.function.name)).toContain("write_word");
     expect(safeTools.map((tool) => tool.function.name)).not.toContain("exec_bash");
     expect(fullTools.map((tool) => tool.function.name)).toContain("exec_bash");
@@ -36,6 +37,7 @@ describe("agentToolRegistry", () => {
     expect(names).toContain("remember_project");
     expect(names).toContain("read_word");
     expect(names).toContain("write_file");
+    expect(names).not.toContain("create_word");
     expect(names).not.toContain("write_word");
     expect(names).not.toContain("write_pdf");
     expect(names).not.toContain("image_generate");
@@ -140,6 +142,27 @@ describe("agentToolRegistry", () => {
     }
   });
 
+  it("sends timestamp-prefixed generated files when the model provides the original name", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-send-prefixed-"));
+    const outputDir = join(dir, "output");
+    const outputPath = join(outputDir, "mpl38ooc-test_file.txt");
+
+    try {
+      await mkdir(outputDir, { recursive: true });
+      await writeFile(outputPath, "ok", "utf-8");
+      const result = await executeAgentToolCall(createToolCall("send_file", { path: "data/output/test_file.txt" }), {
+        ...createContext(dir),
+        outputDir
+      });
+
+      expect(result.toolName).toBe("send_file");
+      expect(result.artifactPath).toBe(outputPath);
+      expect(result.summary).toContain("mpl38ooc-test_file.txt");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects send_file when the target output file does not exist", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-send-missing-"));
 
@@ -199,10 +222,15 @@ describe("agentToolRegistry", () => {
     }
   });
 
-  it("skips image generation when the user did not explicitly request diagrams", async () => {
+  it("generates images whenever the image tool is called and enabled", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-image-"));
+    const previousImageKey = process.env.OPENAI_IMAGE_API_KEY;
+    const previousApiKey = process.env.OPENAI_API_KEY;
 
     try {
+      delete process.env.OPENAI_IMAGE_API_KEY;
+      delete process.env.OPENAI_API_KEY;
+
       const result = await executeAgentToolCall(
         createToolCall("image_generate", {
           kind: "architecture",
@@ -212,9 +240,19 @@ describe("agentToolRegistry", () => {
       );
 
       expect(result.toolName).toBe("image_generate");
-      expect(result.summary).toContain("已跳过");
-      expect(result.artifactPath).toBeUndefined();
+      expect(result.summary).toContain("已生成");
+      expect(result.artifactPath).toContain(".svg");
     } finally {
+      if (previousImageKey === undefined) {
+        delete process.env.OPENAI_IMAGE_API_KEY;
+      } else {
+        process.env.OPENAI_IMAGE_API_KEY = previousImageKey;
+      }
+      if (previousApiKey === undefined) {
+        delete process.env.OPENAI_API_KEY;
+      } else {
+        process.env.OPENAI_API_KEY = previousApiKey;
+      }
       await rm(dir, { recursive: true, force: true });
     }
   });
@@ -240,6 +278,68 @@ describe("agentToolRegistry", () => {
       expect(result.toolName).toBe("image_generate");
       expect(result.summary).toContain("关闭");
       expect(result.artifactPath).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("creates a Word file directly from the built-in template", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-create-word-"));
+
+    try {
+      const result = await executeAgentToolCall(
+        createToolCall("create_word", {
+          name: "模板副本.docx"
+        }),
+        {
+          ...createContext(process.cwd()),
+          outputDir: dir
+        }
+      );
+
+      expect(result.toolName).toBe("create_word");
+      expect(result.summary).toContain("已基于模板创建");
+      expect(result.artifactPath).toBeTruthy();
+      expect(Buffer.from(await readFile(result.artifactPath!)).equals(Buffer.from(await readFile(join(process.cwd(), "docs", "密码应用方案.docx"))))).toBe(
+        true
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("updates a single Word section without requiring the whole scheme", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-section-word-"));
+
+    try {
+      const created = await executeAgentToolCall(
+        createToolCall("create_word", {
+          name: "增量方案.docx"
+        }),
+        {
+          ...createContext(process.cwd()),
+          outputDir: dir
+        }
+      );
+      const result = await executeAgentToolCall(
+        createToolCall("write_word", {
+          path: created.artifactPath,
+          section: "1.1",
+          content: "本节为统一身份认证系统的系统建设规划增量内容。"
+        }),
+        {
+          ...createContext(process.cwd()),
+          outputDir: dir
+        }
+      );
+      const extracted = await mammoth.extractRawText({ path: result.artifactPath! });
+
+      expect(result.toolName).toBe("write_word");
+      expect(result.summary).toContain("已更新");
+      expect(result.artifactPath).toBe(created.artifactPath);
+      expect(extracted.value).toContain("系统建设规划");
+      expect(extracted.value).toContain("统一身份认证系统的系统建设规划增量内容");
+      expect(extracted.value).toContain("法律法规要求");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

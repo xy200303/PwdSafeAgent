@@ -83,11 +83,11 @@ export const REQUIRED_SCHEME_DIAGRAMS: SchemeDiagramRequirement[] = [
 
 export function renderSchemeChapterGuide(): string {
   return [
-    "章节生成清单（最终 Word 的 content 必须由大模型逐章生成，不要只写摘要）：",
+    "模板章节参考（可按章节增量写入 Word，不要求一次性全部完成）：",
     ...REQUIRED_SCHEME_SECTIONS.map((section) => `- ${section.title}`),
-    "核心图示清单（最终 Word 必须嵌入真实图片，先调用 image_generate 生成，再传给 write_word）：",
+    "常用图示清单（需要图片时先调用 image_generate 生成，再按需传给 write_word）：",
     ...REQUIRED_SCHEME_DIAGRAMS.map((diagram) => `- ${diagram.label}`),
-    "推荐节奏：先问清并沉淀项目事实；然后按 1-2、3-4、5、6-8 分批生成章节；每批生成后总结已完成章节和下一批所需信息；最终再统一生成 Word。"
+    "推荐节奏：先调用 create_word 创建模板副本；然后按 1-2、3-4、5、6-8 分批生成章节，并用 write_word 的 section 参数逐节替换。"
   ].join("\n");
 }
 

@@ -26,7 +26,12 @@ const chatSlice = createSlice({
   initialState,
   reducers: {
     setSessions(state, action: PayloadAction<ChatSession[]>) {
-      state.sessions = action.payload;
+      state.sessions = action.payload.map((session) =>
+        mergeSessionPreservingFileItems(
+          state.sessions.find((existing) => existing.id === session.id),
+          session
+        )
+      );
       if (!state.currentSessionId || !action.payload.some((session) => session.id === state.currentSessionId)) {
         state.currentSessionId = action.payload[0]?.id;
       }
@@ -36,17 +41,18 @@ const chatSlice = createSlice({
     },
     upsertSession(state, action: PayloadAction<ChatSession>) {
       const index = state.sessions.findIndex((session) => session.id === action.payload.id);
+      const nextSession = mergeSessionPreservingFileItems(state.sessions[index], action.payload);
       if (index >= 0) {
-        state.sessions[index] = action.payload;
+        state.sessions[index] = nextSession;
       } else {
-        state.sessions.unshift(action.payload);
+        state.sessions.unshift(nextSession);
       }
       state.currentSessionId ??= action.payload.id;
     },
     addStreamItem(state, action: PayloadAction<{ sessionId: string; item: StreamItem }>) {
       const session = state.sessions.find((existing) => existing.id === action.payload.sessionId);
       if (!session) return;
-      if (!session.items.some((item) => item.id === action.payload.item.id)) {
+      if (!hasMatchingStreamItem(session.items, action.payload.item)) {
         session.items.push(action.payload.item);
       }
     },
@@ -107,10 +113,11 @@ const chatSlice = createSlice({
       const event = action.payload;
       if (event.type === "session.created" || event.type === "session.updated") {
         const index = state.sessions.findIndex((session) => session.id === event.payload.id);
+        const nextSession = mergeSessionPreservingFileItems(state.sessions[index], event.payload);
         if (index >= 0) {
-          state.sessions[index] = event.payload;
+          state.sessions[index] = nextSession;
         } else {
-          state.sessions.unshift(event.payload);
+          state.sessions.unshift(nextSession);
         }
         state.currentSessionId ??= event.payload.id;
         return;
@@ -130,7 +137,7 @@ const chatSlice = createSlice({
       }
       if (event.type === "stream.item.added") {
         const session = state.sessions.find((existing) => existing.id === event.sessionId);
-        if (session && !session.items.some((item) => item.id === event.payload.id)) {
+        if (session && !hasMatchingStreamItem(session.items, event.payload)) {
           session.items.push(event.payload);
         }
         return;
@@ -150,6 +157,20 @@ const chatSlice = createSlice({
           state.artifacts[index] = nextArtifact;
         } else {
           state.artifacts.unshift(nextArtifact);
+        }
+        const session = state.sessions.find((existing) => existing.id === event.sessionId);
+        if (session) {
+          const fileItem: StreamItem = {
+            id: `file_${nextArtifact.id}`,
+            kind: "file",
+            artifactId: nextArtifact.id,
+            name: nextArtifact.name,
+            fileKind: nextArtifact.kind,
+            createdAt: nextArtifact.createdAt
+          };
+          if (!hasMatchingStreamItem(session.items, fileItem)) {
+            session.items.push(fileItem);
+          }
         }
       }
     }
@@ -188,4 +209,26 @@ function getSessionArtifactIds(session?: ChatSession): Set<string> {
       .filter((item) => item.kind === "file")
       .map((item) => item.artifactId) ?? []
   );
+}
+
+function hasMatchingStreamItem(items: StreamItem[], item: StreamItem): boolean {
+  if (items.some((existing) => existing.id === item.id)) return true;
+  if (item.kind === "file") {
+    return items.some((existing) => existing.kind === "file" && existing.artifactId === item.artifactId);
+  }
+  return false;
+}
+
+function mergeSessionPreservingFileItems(existing: ChatSession | undefined, incoming: ChatSession): ChatSession {
+  if (!existing) return incoming;
+
+  const preservedFileItems = existing.items.filter(
+    (item) => item.kind === "file" && !incoming.items.some((incomingItem) => incomingItem.kind === "file" && incomingItem.artifactId === item.artifactId)
+  );
+  if (!preservedFileItems.length) return incoming;
+
+  return {
+    ...incoming,
+    items: [...incoming.items, ...preservedFileItems].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+  };
 }

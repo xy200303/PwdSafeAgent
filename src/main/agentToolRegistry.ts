@@ -1,5 +1,5 @@
 import { exec } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { promisify } from "node:util";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import type { ChatCompletionMessageToolCall, ChatCompletionTool } from "openai/resources/chat/completions";
@@ -12,18 +12,16 @@ import {
   writeUtf8File,
   type BuiltinToolName
 } from "./agentTools";
-import { hasDiagramArtifactIntent } from "./artifactIntent";
 import { createBundledPythonEnv, type BundledPythonRuntime } from "./bundledRuntime";
 import { exportDocxToPdf } from "./documentExport";
 import { generateDiagramImage, type DiagramKind } from "./imageGeneration";
 import {
-  validateGeneratedSchemeDocx,
-  validateSchemeDraftCompleteness,
+  createWordDocxFromTemplate,
+  replaceWordSectionContent,
   writeSchemeDocxFromTemplate,
   type SchemeCompletenessResult,
   type SchemeDiagramAsset
 } from "./schemeDocument";
-import { renderSchemeChapterGuide } from "./schemePlan";
 
 const execAsync = promisify(exec);
 
@@ -219,13 +217,9 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
     {
       type: "function",
       function: {
-        name: "write_word",
-        description: [
-          "按照 docs/密码应用方案.docx 模板生成专业密码应用方案 Word 文档，并登记为前端文件卡片。",
-          "content 必须是大模型已经逐章生成的完整方案正文，不要只传摘要或局部章节；如果还缺章节，应继续对话补齐，不要调用本工具。",
-          "最终 Word 会进行完整性检查：不得残留待补充、需确认、XXX、${...}、{...} 等占位符，且必须包含核心章节和核心图示。",
-          renderSchemeChapterGuide()
-        ].join("\n"),
+        name: "create_word",
+        description:
+          "根据内置 docs/密码应用方案.docx 模板创建一个 Word 文件。默认直接复制模板，内容和格式与模板保持一致；可选 template_fields 仅做模板占位符替换。",
         parameters: {
           type: "object",
           properties: {
@@ -233,18 +227,81 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
               type: "string",
               description: "输出 Word 文件名，建议以 .docx 结尾。"
             },
+            fields: {
+              type: "object",
+              description: "可选结构化模板字段覆盖，例如 constructionUnit、subsystems、machineRooms、cryptoProducts。",
+              additionalProperties: true
+            },
+            template_fields: {
+              type: "array",
+              description: "可选模板字段覆盖。未提供时不会改动模板内容，会生成与模板一致的 Word 副本。",
+              items: {
+                type: "object",
+                properties: {
+                  key: {
+                    type: "string",
+                    description: "模板字段名或占位符名，例如 应用系统、${建设单位}、cloudPlatform。"
+                  },
+                  value: {
+                    type: "string",
+                    description: "模板字段值。"
+                  }
+                },
+                required: ["key", "value"],
+                additionalProperties: false
+              }
+            }
+          },
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "write_word",
+        description: [
+          "增量写入 Word 文档，并登记为前端文件卡片。",
+          "推荐流程：先调用 create_word 基于内置模板创建 docx；再传入 path、section 和 content，替换模板中的某章某节正文。",
+          "传入 section 时，只替换该标题下直到下一个同级/上级标题前的内容，保留模板其他章节、页眉页脚、样式和编号。不会因为章节或图示未完成而阻止生成。",
+          "不传 section 时兼容旧流程：基于模板写入 content，可用 render_mode=full_document 重建正文。"
+        ].join("\n"),
+        parameters: {
+          type: "object",
+          properties: {
+            path: {
+              type: "string",
+              description: "要增量更新的 data/output 中已有 .docx 路径。配合 section 使用；不传则从内置模板创建新文件。"
+            },
+            name: {
+              type: "string",
+              description: "输出 Word 文件名，建议以 .docx 结尾。传 path 且不传 name 时默认原地更新该文件。"
+            },
+            section: {
+              type: "string",
+              description: "要替换的章节编号或标题，例如 1.1、2.2.2、密码应用技术框架。"
+            },
+            section_title: {
+              type: "string",
+              description: "section 的别名；可传章节标题。"
+            },
             prompt: {
               type: "string",
               description: "用户需求或系统事实描述。"
             },
             content: {
               type: "string",
-              description: "已经生成的方案正文 Markdown。"
+              description: "要写入的 Markdown 正文。传 section 时可只写该章节内容。"
+            },
+            fields: {
+              type: "object",
+              description: "可选结构化模板字段覆盖，例如 constructionUnit、subsystems、machineRooms、cryptoProducts。",
+              additionalProperties: true
             },
             template_fields: {
               type: "array",
               description:
-                "可选模板字段覆盖。用于把用户已明确提供的信息写入 Word 模板占位符，key 可用应用系统、建设单位、单位省份、单位地址、单位邮编、等保级别、物理机房1、物理机房1地址、物理机房2地址、云平台、密码系统产品等。不涉及的字段也要填“不涉及”，避免模板残留待补充。",
+                "可选模板字段覆盖。用于把用户已明确提供的信息写入 Word 模板占位符，key 可用应用系统、建设单位、单位省份、单位地址、单位邮编、等保级别、物理机房1、物理机房1地址、物理机房2地址、云平台、密码系统产品等。",
               items: {
                 type: "object",
                 properties: {
@@ -264,7 +321,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             diagrams: {
               type: "array",
               description:
-                "已由 image_generate 生成的图示文件，用于嵌入 Word。至少包含网络架构图、网络拓扑图、密码应用技术架构图、典型业务密码应用流程图。",
+                "已由 image_generate 生成的图示文件，用于嵌入 Word。可按需传入，不再强制要求完整图示清单。",
               items: {
                 type: "object",
                 properties: {
@@ -287,8 +344,8 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             },
             render_mode: {
               type: "string",
-              enum: ["full_document"],
-              description: "固定传 full_document：使用模板样式渲染完整方案正文，替换模板中的待补充草稿内容。"
+              enum: ["append", "full_document"],
+              description: "不传 section 时使用。append 表示追加正文，full_document 表示用正文替换文档主体。"
             }
           },
           required: ["content"],
@@ -328,8 +385,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       type: "function",
       function: {
         name: "send_file",
-        description:
-          "把 data/output 中已经存在且已通过完整性检查的文件发送给前端显示为文件卡片。发送 .docx 前会强制检查章节、占位符和图示，半成品会被拒绝。",
+        description: "把 data/output 中已经存在的文件发送给前端显示为文件卡片。不再对 .docx 做章节完整性强制拦截。",
         parameters: {
           type: "object",
           properties: {
@@ -404,7 +460,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
 }
 
 function isFinalArtifactToolName(name: string): boolean {
-  return name === "write_word" || name === "write_pdf" || name === "image_generate" || name === "send_file";
+  return name === "create_word" || name === "write_word" || name === "write_pdf" || name === "image_generate" || name === "send_file";
 }
 
 export async function executeAgentToolCall(
@@ -439,6 +495,8 @@ export async function executeAgentToolCall(
       return executeReadFile(args, context, "read_pdf");
     case "write_file":
       return executeWriteFile(args, context);
+    case "create_word":
+      return executeCreateWord(args, context);
     case "write_word":
       return executeWriteWord(args, context);
     case "image_generate":
@@ -598,33 +656,77 @@ async function executeReadFile(
   };
 }
 
+async function executeCreateWord(
+  args: Record<string, unknown>,
+  context: AgentToolExecutionContext
+): Promise<AgentToolExecutionResult> {
+  const rawName = readStringArg(args, "name") || `${context.sessionTitle}-密码应用方案.docx`;
+  const safeName = sanitizeFileName(rawName.endsWith(".docx") ? rawName : `${rawName}.docx`);
+  const outputPath = join(context.outputDir, `${Date.now().toString(36)}-${safeName}`);
+  const templatePath = join(context.docsDir, "密码应用方案.docx");
+  const result = await createWordDocxFromTemplate(templatePath, outputPath, {
+    fields: readObjectArg(args, "fields"),
+    templateFields: readTemplateFieldsArg(args)
+  });
+
+  return {
+    toolName: "create_word",
+    summary:
+      result.templateReplacementCount > 0
+        ? `已基于模板创建 ${result.fileName}，替换占位符 ${result.templateReplacementCount} 处`
+        : `已基于模板创建 ${result.fileName}`,
+    content: [
+      `create_word completed: ${result.outputPath}`,
+      `模板占位符替换次数：${result.templateReplacementCount}`,
+      `显式字段：${result.filledFields.join("、") || "无"}`
+    ].join("\n"),
+    artifactPath: result.outputPath
+  };
+}
+
 async function executeWriteWord(
   args: Record<string, unknown>,
   context: AgentToolExecutionContext
 ): Promise<AgentToolExecutionResult> {
   const content = readStringArg(args, "content");
   if (!content) {
-    return { toolName: "write_word", summary: "缺少方案正文", content: "write_word failed: missing content" };
+    return { toolName: "write_word", summary: "缺少写入正文", content: "write_word failed: missing content" };
   }
 
   const prompt = readStringArg(args, "prompt");
+  const templatePath = join(context.docsDir, "密码应用方案.docx");
+  const diagrams = readDiagramAssetsArg(args, context);
+  const section = readSectionArg(args);
+
+  if (section) {
+    const sourcePath = readWordSourcePath(args, context, templatePath);
+    const outputPath = resolveWordOutputPath(args, context, sourcePath);
+    const result = await replaceWordSectionContent(sourcePath, outputPath, {
+      section,
+      content,
+      fields: readObjectArg(args, "fields"),
+      templateFields: readTemplateFieldsArg(args),
+      diagrams
+    });
+
+    return {
+      toolName: "write_word",
+      summary: `已更新 ${result.fileName} 的章节：${result.matchedHeading}`,
+      content: [
+        `write_word completed: ${result.outputPath}`,
+        `更新章节：${result.matchedHeading}`,
+        `替换原内容块：${result.replacementCount}`,
+        `模板占位符替换次数：${result.templateReplacementCount}`,
+        `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`
+      ].join("\n"),
+      artifactPath: result.outputPath
+    };
+  }
+
   const rawName = readStringArg(args, "name") || `${context.sessionTitle}-密码应用方案.docx`;
   const safeName = sanitizeFileName(rawName.endsWith(".docx") ? rawName : `${rawName}.docx`);
   const outputPath = join(context.outputDir, `${Date.now().toString(36)}-${safeName}`);
-  const templatePath = join(context.docsDir, "密码应用方案.docx");
-  const diagrams = readDiagramAssetsArg(args, context);
-  const draftValidation = validateSchemeDraftCompleteness(content, diagrams);
-  if (!draftValidation.ok) {
-    return {
-      toolName: "write_word",
-      summary: "方案正文未完整，已阻止生成 Word",
-      content: [
-        "write_word blocked: scheme draft is incomplete",
-        formatSchemeValidationResult(draftValidation),
-        "请继续按章节生成缺失内容；缺图时先调用 image_generate，再把返回路径传入 write_word.diagrams。"
-      ].join("\n")
-    };
-  }
+  const renderMode = readRenderModeArg(args);
 
   const result = await writeSchemeDocxFromTemplate(templatePath, outputPath, {
     prompt: prompt || context.sessionTitle,
@@ -633,29 +735,17 @@ async function executeWriteWord(
     fields: readObjectArg(args, "fields"),
     templateFields: readTemplateFieldsArg(args),
     diagrams,
-    renderMode: "full_document"
+    renderMode
   });
-  const documentValidation = await validateGeneratedSchemeDocx(outputPath);
-  if (!documentValidation.ok) {
-    return {
-      toolName: "write_word",
-      summary: "Word 已生成但未通过完整性检查，未登记为最终文件",
-      content: [
-        `write_word blocked: ${result.outputPath}`,
-        formatSchemeValidationResult(documentValidation),
-        "请补齐模板字段、章节正文和图示后重新调用 write_word。"
-      ].join("\n")
-    };
-  }
 
   return {
     toolName: "write_word",
-    summary: `已生成完整方案 ${result.fileName}，填充 ${result.filledFields.length} 项，嵌入图示 ${result.embeddedDiagrams.length} 项`,
+    summary: `已生成 Word ${result.fileName}，填充 ${result.filledFields.length} 项，嵌入图示 ${result.embeddedDiagrams.length} 项`,
     content: [
       `write_word completed: ${result.outputPath}`,
       `填充字段：${result.filledFields.join("、") || "无"}`,
       `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`,
-      formatSchemeValidationResult(documentValidation)
+      `写入模式：${result.renderMode}`
     ].join("\n"),
     artifactPath: result.outputPath
   };
@@ -690,14 +780,6 @@ async function executeImageGenerate(
       toolName: "image_generate",
       summary: "生图工具已在设置中关闭",
       content: "image_generate skipped: OPENAI_AUTO_IMAGE_GENERATION=false"
-    };
-  }
-
-  if (!hasDiagramArtifactIntent(context.userPrompt || "")) {
-    return {
-      toolName: "image_generate",
-      summary: "未检测到明确生图意图，已跳过",
-      content: "image_generate skipped: user did not explicitly request a diagram or scheme artifact"
     };
   }
 
@@ -743,16 +825,9 @@ async function executeSendFile(
     return { toolName: "send_file", summary: "缺少文件路径", content: "send_file failed: missing path" };
   }
 
-  const filePath = resolveOutputToolPath(inputPath, context);
-  assertPathInside(filePath, [context.outputDir], "send_file");
+  const filePath = resolveExistingOutputToolPath(inputPath, context, "send_file");
   if (!existsSync(filePath)) {
     throw new Error(`send_file 文件不存在：${basename(filePath)}`);
-  }
-  if (extname(filePath).toLowerCase() === ".docx") {
-    const validation = await validateGeneratedSchemeDocx(filePath);
-    if (!validation.ok) {
-      throw new Error(`send_file 已阻止发送未完成 Word：${formatSchemeValidationResult(validation)}`);
-    }
   }
 
   return {
@@ -772,8 +847,7 @@ async function executeWritePdf(
     return { toolName: "write_pdf", summary: "缺少 Word 文件路径", content: "write_pdf failed: missing path" };
   }
 
-  const filePath = resolveOutputToolPath(inputPath, context);
-  assertPathInside(filePath, [context.outputDir], "write_pdf");
+  const filePath = resolveExistingOutputToolPath(inputPath, context, "write_pdf");
   const result = await exportDocxToPdf(filePath, context.outputDir, {
     libreOfficePath: context.settings.document.libreOfficePath,
     timeoutMs: context.settings.openai.requestTimeoutMs
@@ -889,6 +963,38 @@ function resolveOutputToolPath(inputPath: string, context: AgentToolExecutionCon
   return resolve(context.outputDir, inputPath);
 }
 
+function resolveExistingOutputToolPath(inputPath: string, context: AgentToolExecutionContext, toolName: string): string {
+  const exactPath = resolveOutputToolPath(inputPath, context);
+  assertPathInside(exactPath, [context.outputDir], toolName);
+  if (existsSync(exactPath)) return exactPath;
+
+  const generatedPath = findGeneratedOutputFileByRequestedName(inputPath, context.outputDir);
+  if (generatedPath) {
+    assertPathInside(generatedPath, [context.outputDir], toolName);
+    return generatedPath;
+  }
+
+  return exactPath;
+}
+
+function findGeneratedOutputFileByRequestedName(inputPath: string, outputDir: string): string | undefined {
+  const requestedName = sanitizeFileName(basename(inputPath.replace(/\\/g, "/")));
+  if (!requestedName || !existsSync(outputDir)) return undefined;
+
+  const matches = readdirSync(outputDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && (entry.name === requestedName || entry.name.endsWith(`-${requestedName}`)))
+    .map((entry) => {
+      const filePath = join(outputDir, entry.name);
+      return {
+        filePath,
+        mtimeMs: statSync(filePath).mtimeMs
+      };
+    })
+    .sort((left, right) => right.mtimeMs - left.mtimeMs);
+
+  return matches[0]?.filePath;
+}
+
 function assertPathInside(filePath: string, allowedDirs: string[], toolName: string): void {
   if (isPathInside(filePath, allowedDirs)) return;
   throw new Error(`${toolName} 只能访问允许目录内的文件`);
@@ -953,6 +1059,45 @@ function readTemplateFieldsArg(args: Record<string, unknown>): Array<Record<stri
   const value = args.template_fields ?? args.templateFields;
   if (!Array.isArray(value)) return undefined;
   return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+}
+
+function readSectionArg(args: Record<string, unknown>): string {
+  return (
+    readStringArg(args, "section") ||
+    readStringArg(args, "section_title") ||
+    readStringArg(args, "sectionTitle") ||
+    readStringArg(args, "target") ||
+    readStringArg(args, "heading")
+  );
+}
+
+function readWordSourcePath(args: Record<string, unknown>, context: AgentToolExecutionContext, templatePath: string): string {
+  const rawPath =
+    readStringArg(args, "path") || readStringArg(args, "docx_path") || readStringArg(args, "docxPath") || readStringArg(args, "source");
+  if (!rawPath) return templatePath;
+
+  const sourcePath = resolveOutputToolPath(rawPath, context);
+  assertPathInside(sourcePath, [context.outputDir], "write_word.path");
+  if (!existsSync(sourcePath)) {
+    throw new Error(`write_word 源 Word 不存在：${basename(sourcePath)}`);
+  }
+  if (extname(sourcePath).toLowerCase() !== ".docx") {
+    throw new Error("write_word.path 只能更新 .docx 文件");
+  }
+  return sourcePath;
+}
+
+function resolveWordOutputPath(args: Record<string, unknown>, context: AgentToolExecutionContext, sourcePath: string): string {
+  const rawName = readStringArg(args, "name");
+  if (!rawName && isPathInside(sourcePath, [context.outputDir])) return sourcePath;
+
+  const fallbackName = basename(sourcePath) || `${context.sessionTitle}-密码应用方案.docx`;
+  const safeName = sanitizeFileName((rawName || fallbackName).endsWith(".docx") ? rawName || fallbackName : `${rawName || fallbackName}.docx`);
+  return join(context.outputDir, `${Date.now().toString(36)}-${safeName}`);
+}
+
+function readRenderModeArg(args: Record<string, unknown>): "append" | "full_document" {
+  return readStringArg(args, "render_mode") === "append" || readStringArg(args, "renderMode") === "append" ? "append" : "full_document";
 }
 
 function readDiagramAssetsArg(args: Record<string, unknown>, context: AgentToolExecutionContext): SchemeDiagramAsset[] {

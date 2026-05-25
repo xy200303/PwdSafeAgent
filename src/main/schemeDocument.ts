@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, extname } from "node:path";
 import PizZip from "pizzip";
 import { compactText, getCurrentTimeText, sanitizeFileName } from "./agentTools";
@@ -15,7 +15,7 @@ export interface SchemeDocumentInput {
 }
 
 export type SchemeTemplateFieldInput = Record<string, unknown> | Array<Record<string, unknown>>;
-export type SchemeDocumentRenderMode = "append" | "full_document";
+export type SchemeDocumentRenderMode = "append" | "full_document" | "template" | "section";
 
 export interface SchemeDiagramAsset {
   label: string;
@@ -33,6 +33,34 @@ export interface SchemeDocumentResult {
   embeddedDiagrams: string[];
   templateReplacementCount: number;
   renderMode: SchemeDocumentRenderMode;
+}
+
+export interface TemplateWordDocumentInput {
+  fields?: SchemeTemplateFieldInput;
+  templateFields?: SchemeTemplateFieldInput;
+}
+
+export interface TemplateWordDocumentResult {
+  outputPath: string;
+  fileName: string;
+  filledFields: string[];
+  templateReplacementCount: number;
+}
+
+export interface WordSectionReplacementInput extends TemplateWordDocumentInput {
+  section: string;
+  content: string;
+  diagrams?: SchemeDiagramAsset[];
+}
+
+export interface WordSectionReplacementResult {
+  outputPath: string;
+  fileName: string;
+  section: string;
+  matchedHeading: string;
+  replacementCount: number;
+  templateReplacementCount: number;
+  embeddedDiagrams: string[];
 }
 
 export interface SchemeCompletenessResult {
@@ -239,6 +267,83 @@ export function buildSchemeTemplateData(input: SchemeDocumentInput): TemplateDat
   data["结构化事实摘要"] = renderFactSummaryMarkdown(facts);
   data["当前时间"] = getCurrentTimeText();
   return data;
+}
+
+export async function createWordDocxFromTemplate(
+  templatePath: string,
+  outputPath: string,
+  input: TemplateWordDocumentInput = {}
+): Promise<TemplateWordDocumentResult> {
+  await mkdir(dirname(outputPath), { recursive: true });
+  const explicitFields = buildExplicitTemplateFieldOverrides({
+    prompt: "",
+    memory: "",
+    generatedMarkdown: "",
+    fields: input.fields,
+    templateFields: input.templateFields
+  });
+  const filledFields = Object.keys(explicitFields).filter((key) => !key.startsWith("$"));
+
+  if (!filledFields.length) {
+    await copyFile(templatePath, outputPath);
+    return {
+      outputPath,
+      fileName: sanitizeFileName(outputPath.split(/[\\/]/).at(-1) || "密码应用方案.docx"),
+      filledFields,
+      templateReplacementCount: 0
+    };
+  }
+
+  const content = await readFile(templatePath, "binary");
+  const zip = new PizZip(content);
+  const templateReplacementCount = replaceTemplatePlaceholders(zip, explicitFields);
+  const buffer = zip.generate({ type: "nodebuffer", compression: "DEFLATE" });
+  await writeFile(outputPath, buffer);
+
+  return {
+    outputPath,
+    fileName: sanitizeFileName(outputPath.split(/[\\/]/).at(-1) || "密码应用方案.docx"),
+    filledFields,
+    templateReplacementCount
+  };
+}
+
+export async function replaceWordSectionContent(
+  sourcePath: string,
+  outputPath: string,
+  input: WordSectionReplacementInput
+): Promise<WordSectionReplacementResult> {
+  const content = await readFile(sourcePath, "binary");
+  const zip = new PizZip(content);
+  const templateReplacementCount = replaceTemplatePlaceholders(
+    zip,
+    buildExplicitTemplateFieldOverrides({
+      prompt: "",
+      memory: "",
+      generatedMarkdown: "",
+      fields: input.fields,
+      templateFields: input.templateFields
+    })
+  );
+  const replacement = replaceDocumentSectionWithMarkdown(zip, input.section, input.content);
+  if (!replacement) {
+    throw new Error(`未找到 Word 章节：${input.section}`);
+  }
+  const embeddedDiagrams = await appendGeneratedDiagrams(zip, input.diagrams ?? []);
+
+  await mkdir(dirname(outputPath), { recursive: true });
+  const buffer = zip.generate({ type: "nodebuffer", compression: "DEFLATE" });
+  await writeFile(outputPath, buffer);
+
+  return {
+    outputPath,
+    fileName: sanitizeFileName(outputPath.split(/[\\/]/).at(-1) || "密码应用方案.docx"),
+    section: input.section,
+    matchedHeading: replacement.matchedHeading,
+    replacementCount: replacement.replacementCount,
+    templateReplacementCount,
+    embeddedDiagrams
+  };
 }
 
 export async function writeSchemeDocxFromTemplate(
@@ -633,6 +738,452 @@ function findTextTokenAt(tokens: TextNodeToken[], offset: number): TextNodeToken
 function ensureTextNodePreservesSpaces(openTag: string, text: string): string {
   if (!/^\s|\s$/.test(text) || /\sxml:space=/.test(openTag)) return openTag;
   return openTag.replace(/>$/, ' xml:space="preserve">');
+}
+
+interface WordBodyBlock {
+  index: number;
+  start: number;
+  end: number;
+  tagName: string;
+  xml: string;
+  text: string;
+  styleId: string;
+  headingLevel?: number;
+  headingNumber?: string;
+}
+
+interface SectionReplacementSummary {
+  matchedHeading: string;
+  replacementCount: number;
+}
+
+interface MarkdownSectionSegment {
+  number: string;
+  title: string;
+  level: number;
+  body: string;
+  hasChildren: boolean;
+}
+
+function replaceDocumentSectionWithMarkdown(
+  zip: PizZip,
+  section: string,
+  markdown: string
+): SectionReplacementSummary | undefined {
+  const compactedMarkdown = compactText(markdown, 120000);
+  if (!compactedMarkdown.trim()) return undefined;
+
+  const documentFile = zip.file("word/document.xml");
+  const documentXml = documentFile?.asText();
+  if (!documentXml) return undefined;
+
+  const bodyOpen = documentXml.match(/<w:body\b[^>]*>/);
+  const bodyEnd = documentXml.lastIndexOf("</w:body>");
+  if (!bodyOpen || bodyOpen.index === undefined || bodyEnd < 0) return undefined;
+
+  const bodyStart = bodyOpen.index + bodyOpen[0].length;
+  const bodyXml = documentXml.slice(bodyStart, bodyEnd);
+  const preciseReplacements = replaceNumberedMarkdownSections(zip, section, markdown);
+  if (preciseReplacements.length) {
+    return {
+      matchedHeading: preciseReplacements.map((replacement) => replacement.matchedHeading).join("、"),
+      replacementCount: preciseReplacements.reduce((total, replacement) => total + replacement.replacementCount, 0)
+    };
+  }
+
+  const blocks = collectWordBodyBlocks(bodyXml, buildStyleHeadingLevels(zip));
+  const target = findSectionHeadingBlock(blocks, section);
+  if (!target || !target.headingLevel) return undefined;
+
+  const replacementStartIndex = target.index + 1;
+  const replacementEndIndex = findSectionEndBlockIndex(blocks, target.index, target.headingLevel);
+  const insertStart = blocks[replacementStartIndex]?.start ?? target.end;
+  const insertEnd = blocks[replacementEndIndex]?.start ?? bodyXml.length;
+  const markdownBody = stripLeadingMatchingMarkdownHeading(compactedMarkdown, section, target.text);
+  const replacementXml = buildSectionReplacementXml(markdownBody, blocks, target);
+  const nextBodyXml = `${bodyXml.slice(0, insertStart)}${replacementXml}${bodyXml.slice(insertEnd)}`;
+  const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
+  zip.file("word/document.xml", nextXml);
+
+  return {
+    matchedHeading: formatMatchedHeading(target),
+    replacementCount: Math.max(0, replacementEndIndex - replacementStartIndex)
+  };
+}
+
+function replaceNumberedMarkdownSections(
+  zip: PizZip,
+  section: string,
+  markdown: string
+): SectionReplacementSummary[] {
+  const segments = selectPreciseMarkdownSectionSegments(section, extractMarkdownSectionSegments(markdown));
+  const replacements: SectionReplacementSummary[] = [];
+
+  for (const segment of segments.sort(compareSectionNumbersDescending)) {
+    const replacement = replaceSingleDocumentSectionWithMarkdown(zip, segment.number, segment.body);
+    if (replacement) replacements.push(replacement);
+  }
+
+  return replacements.reverse();
+}
+
+function replaceSingleDocumentSectionWithMarkdown(
+  zip: PizZip,
+  section: string,
+  markdown: string
+): SectionReplacementSummary | undefined {
+  const compactedMarkdown = compactText(markdown, 120000);
+  if (!compactedMarkdown.trim()) return undefined;
+
+  const documentFile = zip.file("word/document.xml");
+  const documentXml = documentFile?.asText();
+  if (!documentXml) return undefined;
+
+  const bodyOpen = documentXml.match(/<w:body\b[^>]*>/);
+  const bodyEnd = documentXml.lastIndexOf("</w:body>");
+  if (!bodyOpen || bodyOpen.index === undefined || bodyEnd < 0) return undefined;
+
+  const bodyStart = bodyOpen.index + bodyOpen[0].length;
+  const bodyXml = documentXml.slice(bodyStart, bodyEnd);
+  const blocks = collectWordBodyBlocks(bodyXml, buildStyleHeadingLevels(zip));
+  const target = findSectionHeadingBlock(blocks, section);
+  if (!target || !target.headingLevel) return undefined;
+
+  const replacementStartIndex = target.index + 1;
+  const replacementEndIndex = findSectionEndBlockIndex(blocks, target.index, target.headingLevel);
+  const insertStart = blocks[replacementStartIndex]?.start ?? target.end;
+  const insertEnd = blocks[replacementEndIndex]?.start ?? bodyXml.length;
+  const markdownBody = stripLeadingMatchingMarkdownHeading(compactedMarkdown, section, target.text);
+  const replacementXml = buildSectionReplacementXml(markdownBody, blocks, target);
+  const nextBodyXml = `${bodyXml.slice(0, insertStart)}${replacementXml}${bodyXml.slice(insertEnd)}`;
+  const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
+  zip.file("word/document.xml", nextXml);
+
+  return {
+    matchedHeading: formatMatchedHeading(target),
+    replacementCount: Math.max(0, replacementEndIndex - replacementStartIndex)
+  };
+}
+
+function extractMarkdownSectionSegments(markdown: string): MarkdownSectionSegment[] {
+  const lines = markdown.split(/\r?\n/);
+  const headings = lines
+    .map((line, index) => ({ ...parseMarkdownSectionHeading(line), lineIndex: index }))
+    .filter((heading): heading is ReturnType<typeof parseMarkdownSectionHeading> & { lineIndex: number } =>
+      Boolean(heading.number)
+    );
+  const segments: MarkdownSectionSegment[] = [];
+
+  for (const [index, heading] of headings.entries()) {
+    const nextHeading = headings.slice(index + 1).find((candidate) => candidate.level <= heading.level);
+    const nextAnyHeading = headings[index + 1];
+    const bodyEnd = nextAnyHeading?.lineIndex ?? lines.length;
+    const body = lines.slice(heading.lineIndex + 1, bodyEnd).join("\n").trim();
+    const hasChildren = Boolean(nextHeading ? headings.slice(index + 1).some((candidate) => candidate.lineIndex < nextHeading.lineIndex && isChildSectionNumber(heading.number, candidate.number)) : headings.slice(index + 1).some((candidate) => isChildSectionNumber(heading.number, candidate.number)));
+    segments.push({
+      number: heading.number,
+      title: heading.title,
+      level: heading.level,
+      body,
+      hasChildren
+    });
+  }
+
+  return segments;
+}
+
+function parseMarkdownSectionHeading(line: string): { number: string; title: string; level: number } {
+  const trimmed = line.trim();
+  const atx = trimmed.match(/^(#{1,6})\s+(.+?)\s*$/);
+  const text = cleanMarkdownInline(atx?.[2] ?? trimmed).replace(/^#+\s*/, "");
+  const match = text.match(/^(\d+(?:\.\d+)*)(?:[.．、]|\s+)(.+)$/);
+  if (!match?.[1]) return { number: "", title: "", level: 0 };
+
+  const number = match[1];
+  const title = stripHeadingNumberPrefix(match[0]);
+  const level = atx ? atx[1].length : number.split(".").length;
+  if (!atx && !isLikelyDocumentSectionHeading(number, title)) return { number: "", title: "", level: 0 };
+  return { number, title, level };
+}
+
+function isLikelyDocumentSectionHeading(number: string, title: string): boolean {
+  if (number.includes(".")) return true;
+  return new Set(["背景", "系统概述", "密码应用需求分析", "安全目标及设计原则", "密码应用设计", "安全管理方案", "安全与合规性分析", "实施保障方案"]).has(
+    normalizeHeadingLookup(title)
+  );
+}
+
+function selectPreciseMarkdownSectionSegments(
+  section: string,
+  segments: MarkdownSectionSegment[]
+): MarkdownSectionSegment[] {
+  const targetNumber = parseSectionNumber(section);
+  if (!targetNumber) return [];
+
+  const exact = segments.find((segment) => segment.number === targetNumber);
+  const scopedSegments = segments.filter(
+    (segment) =>
+      segment.body.trim() &&
+      !segment.hasChildren &&
+      (segment.number === targetNumber || isChildSectionNumber(targetNumber, segment.number))
+  );
+
+  if (exact?.body.trim() && !exact.hasChildren) return [exact];
+  return scopedSegments;
+}
+
+function isChildSectionNumber(parent: string, child: string): boolean {
+  return child.startsWith(`${parent}.`) && child.length > parent.length + 1;
+}
+
+function compareSectionNumbersDescending(left: MarkdownSectionSegment, right: MarkdownSectionSegment): number {
+  const leftParts = left.number.split(".").map(Number);
+  const rightParts = right.number.split(".").map(Number);
+  const length = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < length; index += 1) {
+    const diff = (rightParts[index] ?? -1) - (leftParts[index] ?? -1);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function collectWordBodyBlocks(bodyXml: string, headingLevels: Map<string, number>): WordBodyBlock[] {
+  const blocks: WordBodyBlock[] = [];
+  const pattern = /<w:(p|tbl|sdt)\b[\s\S]*?<\/w:\1>|<w:sectPr\b[\s\S]*?<\/w:sectPr>/g;
+  const counters: number[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(bodyXml))) {
+    const xml = match[0];
+    const tagName = match[1] ?? "sectPr";
+    const styleId = tagName === "p" ? extractParagraphStyleId(xml) : "";
+    const headingLevel = tagName === "p" ? extractParagraphHeadingLevel(xml, styleId, headingLevels) : undefined;
+    const block: WordBodyBlock = {
+      index: blocks.length,
+      start: match.index,
+      end: match.index + xml.length,
+      tagName,
+      xml,
+      text: extractVisibleWordText(xml),
+      styleId,
+      headingLevel
+    };
+
+    if (headingLevel) {
+      counters[headingLevel - 1] = (counters[headingLevel - 1] ?? 0) + 1;
+      counters.length = headingLevel;
+      block.headingNumber = counters.slice(0, headingLevel).join(".");
+    }
+
+    blocks.push(block);
+  }
+
+  return blocks;
+}
+
+function buildStyleHeadingLevels(zip: PizZip): Map<string, number> {
+  const levels = new Map<string, number>();
+  const stylesXml = zip.file("word/styles.xml")?.asText() ?? "";
+  const pattern = /<w:style\b[\s\S]*?<\/w:style>/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(stylesXml))) {
+    const styleXml = match[0];
+    const styleId = styleXml.match(/\bw:styleId="([^"]+)"/)?.[1] ?? "";
+    if (!styleId) continue;
+
+    const outlineLevel = Number(styleXml.match(/<w:outlineLvl\b[^>]*\bw:val="(\d+)"/)?.[1]);
+    if (Number.isFinite(outlineLevel) && outlineLevel >= 0 && outlineLevel <= 8) {
+      levels.set(styleId, outlineLevel + 1);
+      continue;
+    }
+
+    const styleName = styleXml.match(/<w:name\b[^>]*\bw:val="([^"]+)"/)?.[1] ?? "";
+    const headingMatch = styleName.match(/heading\s*([1-9])/i);
+    if (headingMatch?.[1]) levels.set(styleId, Number(headingMatch[1]));
+  }
+
+  return levels;
+}
+
+function extractParagraphStyleId(paragraphXml: string): string {
+  return paragraphXml.match(/<w:pStyle\b[^>]*\bw:val="([^"]+)"/)?.[1] ?? "";
+}
+
+function extractParagraphHeadingLevel(
+  paragraphXml: string,
+  styleId: string,
+  headingLevels: Map<string, number>
+): number | undefined {
+  const directOutlineLevel = Number(paragraphXml.match(/<w:outlineLvl\b[^>]*\bw:val="(\d+)"/)?.[1]);
+  if (Number.isFinite(directOutlineLevel) && directOutlineLevel >= 0 && directOutlineLevel <= 8) {
+    return directOutlineLevel + 1;
+  }
+  return headingLevels.get(styleId);
+}
+
+function extractVisibleWordText(xml: string): string {
+  return Array.from(xml.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g))
+    .map((match) => decodeXmlText(match[1]))
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function findSectionHeadingBlock(blocks: WordBodyBlock[], section: string): WordBodyBlock | undefined {
+  const targetNumber = parseSectionNumber(section);
+  const targetTitle = normalizeHeadingLookup(section);
+  return blocks.find((block) => {
+    if (!block.headingLevel || !block.text.trim()) return false;
+    if (targetNumber && block.headingNumber === targetNumber) return true;
+
+    const blockTitle = normalizeHeadingLookup(block.text);
+    const combined = normalizeHeadingLookup(formatMatchedHeading(block));
+    return Boolean(targetTitle && (blockTitle === targetTitle || combined === targetTitle || blockTitle.includes(targetTitle)));
+  });
+}
+
+function parseSectionNumber(section: string): string {
+  return section.trim().match(/^(\d+(?:\.\d+)*)(?:[.．、\s]|$)/)?.[1] ?? "";
+}
+
+function normalizeHeadingLookup(value: string): string {
+  return value
+    .replace(/^#{1,6}\s*/, "")
+    .replace(/^\d+(?:\.\d+)*[.．、]?\s*/, "")
+    .replace(/[\s\t　:：,，.。;；、\-—_]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function findSectionEndBlockIndex(blocks: WordBodyBlock[], headingIndex: number, headingLevel: number): number {
+  const nextHeadingIndex = blocks.findIndex(
+    (block, index) => index > headingIndex && Boolean(block.headingLevel && block.headingLevel <= headingLevel)
+  );
+  if (nextHeadingIndex >= 0) return nextHeadingIndex;
+
+  const sectionPropertiesIndex = blocks.findIndex((block, index) => index > headingIndex && block.tagName === "sectPr");
+  return sectionPropertiesIndex >= 0 ? sectionPropertiesIndex : blocks.length;
+}
+
+function stripLeadingMatchingMarkdownHeading(markdown: string, section: string, matchedHeading: string): string {
+  const lines = markdown.split(/\r?\n/);
+  const firstContentIndex = lines.findIndex((line) => line.trim());
+  if (firstContentIndex < 0) return "";
+
+  const firstLine = lines[firstContentIndex].trim();
+  if (!/^#{1,6}\s+/.test(firstLine)) return markdown;
+
+  const headingText = firstLine.replace(/^#{1,6}\s+/, "");
+  const firstNumber = parseSectionNumber(headingText);
+  const sectionNumber = parseSectionNumber(section);
+  const firstTitle = normalizeHeadingLookup(headingText);
+  const sectionTitle = normalizeHeadingLookup(section);
+  const matchedTitle = normalizeHeadingLookup(matchedHeading);
+  if (
+    (firstNumber && sectionNumber && firstNumber === sectionNumber) ||
+    firstTitle === sectionTitle ||
+    firstTitle === matchedTitle
+  ) {
+    return [...lines.slice(0, firstContentIndex), ...lines.slice(firstContentIndex + 1)].join("\n").trim();
+  }
+
+  return markdown;
+}
+
+function buildSectionReplacementXml(markdown: string, blocks: WordBodyBlock[], target: WordBodyBlock): string {
+  const paragraphTemplate = findBodyParagraphTemplate(blocks, target.index) ?? target.xml;
+  const headingTemplates = buildHeadingTemplates(blocks);
+  const paragraphs: string[] = [];
+  let inCodeBlock = false;
+
+  for (const rawLine of markdown.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (/^```/.test(line)) {
+      inCodeBlock = !inCodeBlock;
+      continue;
+    }
+    if (!line) continue;
+
+    if (!inCodeBlock && /^#{1,6}\s+/.test(line)) {
+      const headingText = line.replace(/^#{1,6}\s+/, "");
+      const explicitLevel = parseSectionNumber(headingText).split(".").filter(Boolean).length;
+      const fallbackLevel = Math.min((target.headingLevel ?? 1) + line.match(/^#+/)![0].length, 9);
+      const headingLevel = explicitLevel || fallbackLevel;
+      const template = headingTemplates.get(headingLevel) ?? headingTemplates.get(target.headingLevel ?? 1) ?? target.xml;
+      paragraphs.push(buildWordParagraphFromTemplate(template, stripHeadingNumberPrefix(cleanMarkdownInline(headingText))));
+      continue;
+    }
+
+    if (!inCodeBlock && /^\|.*\|$/.test(line)) {
+      const cells = line
+        .split("|")
+        .map((cell) => cell.trim())
+        .filter(Boolean);
+      if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) continue;
+      paragraphs.push(buildWordParagraphFromTemplate(paragraphTemplate, cells.join("    ")));
+      continue;
+    }
+
+    paragraphs.push(buildWordParagraphFromTemplate(paragraphTemplate, cleanMarkdownInline(line)));
+  }
+
+  return paragraphs.join("");
+}
+
+function findBodyParagraphTemplate(blocks: WordBodyBlock[], headingIndex: number): string | undefined {
+  const sameSectionBody = blocks.find(
+    (block, index) =>
+      index > headingIndex &&
+      block.tagName === "p" &&
+      !block.headingLevel &&
+      block.text.trim() &&
+      !/^\d+$/.test(block.text.trim())
+  );
+  if (sameSectionBody) return sameSectionBody.xml;
+
+  return blocks.find((block) => block.tagName === "p" && !block.headingLevel && block.text.trim())?.xml;
+}
+
+function buildHeadingTemplates(blocks: WordBodyBlock[]): Map<number, string> {
+  const templates = new Map<number, string>();
+  for (const block of blocks) {
+    if (!block.headingLevel || templates.has(block.headingLevel)) continue;
+    templates.set(block.headingLevel, block.xml);
+  }
+  return templates;
+}
+
+function buildWordParagraphFromTemplate(templateXml: string, text: string): string {
+  const paragraphProperties = templateXml.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/)?.[0] ?? "";
+  const firstRun = templateXml.match(/<w:r\b[\s\S]*?<\/w:r>/)?.[0] ?? "";
+  const runProperties = firstRun.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/)?.[0] ?? "";
+  return [
+    "<w:p>",
+    paragraphProperties,
+    "<w:r>",
+    runProperties,
+    `<w:t xml:space="preserve">${escapeXml(text)}</w:t>`,
+    "</w:r>",
+    "</w:p>"
+  ].join("");
+}
+
+function cleanMarkdownInline(value: string): string {
+  return value
+    .replace(/^[-*+]\s+/, "· ")
+    .replace(/^>\s*/, "引用：")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .trim();
+}
+
+function stripHeadingNumberPrefix(value: string): string {
+  return value.replace(/^\d+(?:\.\d+)*[.．、]?\s*/, "").trim();
+}
+
+function formatMatchedHeading(block: WordBodyBlock): string {
+  return [block.headingNumber ? `${block.headingNumber}.` : "", block.text].filter(Boolean).join(" ").trim();
 }
 
 function replaceDocumentBodyWithGeneratedMarkdown(zip: PizZip, markdown: string, facts: SchemeFactModel): boolean {

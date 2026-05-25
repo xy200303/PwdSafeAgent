@@ -10,6 +10,7 @@ export type BuiltinToolName =
   | "read_word"
   | "read_pdf"
   | "write_file"
+  | "create_word"
   | "write_word"
   | "write_pdf"
   | "image_generate"

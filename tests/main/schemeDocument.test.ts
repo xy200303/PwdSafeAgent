@@ -6,13 +6,92 @@ import PizZip from "pizzip";
 import { describe, expect, it } from "vitest";
 import {
   buildSchemeTemplateData,
+  createWordDocxFromTemplate,
   extractSchemeFacts,
   replaceTemplatePlaceholders,
+  replaceWordSectionContent,
   renderFactSummaryMarkdown,
   writeSchemeDocxFromTemplate
 } from "../../src/main/schemeDocument";
 
 describe("schemeDocument", () => {
+  it("copies the official template byte-for-byte when creating a Word file without fields", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-create-"));
+    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const outputPath = join(dir, "模板副本.docx");
+
+    try {
+      const result = await createWordDocxFromTemplate(templatePath, outputPath);
+      const templateContent = await readFile(templatePath);
+      const outputContent = await readFile(outputPath);
+
+      expect(result.fileName).toBe("模板副本.docx");
+      expect(result.templateReplacementCount).toBe(0);
+      expect(outputContent.equals(templateContent)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces one template section while keeping the surrounding document", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-section-"));
+    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const draftPath = join(dir, "增量方案.docx");
+
+    try {
+      await createWordDocxFromTemplate(templatePath, draftPath);
+      const result = await replaceWordSectionContent(draftPath, draftPath, {
+        section: "1.1",
+        content: [
+          "统一身份认证系统按照商用密码应用要求开展建设。",
+          "本节内容由增量写入工具替换，模板中的其他章节保持不变。"
+        ].join("\n")
+      });
+      const extracted = await mammoth.extractRawText({ path: result.outputPath });
+
+      expect(result.matchedHeading).toContain("1.1");
+      expect(result.matchedHeading).toContain("系统建设规划");
+      expect(result.replacementCount).toBeGreaterThan(0);
+      expect(extracted.value).toContain("本节内容由增量写入工具替换");
+      expect(extracted.value).toContain("法律法规要求");
+      expect(extracted.value).not.toContain("密码是保障网络与信息安全的核心技术和基础支撑");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("splits numbered markdown and replaces only matching template sections", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-precise-section-"));
+    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const draftPath = join(dir, "精准增量方案.docx");
+
+    try {
+      await createWordDocxFromTemplate(templatePath, draftPath);
+      await replaceWordSectionContent(draftPath, draftPath, {
+        section: "1",
+        content: [
+          "# 1. 背景",
+          "## 1.1. 项目背景",
+          "这是精准写入的项目背景正文。",
+          "## 1.2. 编制依据",
+          "这是精准写入的编制依据正文。",
+          "# 2. 系统概述",
+          "## 2.1. 业务场景描述",
+          "这段第二章内容不应写入第一章替换结果。"
+        ].join("\n")
+      });
+      const extracted = await mammoth.extractRawText({ path: draftPath });
+
+      expect(extracted.value).toContain("这是精准写入的项目背景正文。");
+      expect(extracted.value).toContain("这是精准写入的编制依据正文。");
+      expect(extracted.value).toContain("系统概述");
+      expect(extracted.value).not.toContain("这段第二章内容不应写入第一章替换结果。");
+      expect(extracted.value).not.toContain("项目背景\n这是精准写入的项目背景正文。");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("builds template data from prompt and generated content", () => {
     const data = buildSchemeTemplateData({
       prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心\n单位省份：广东省\n等保级别：三级",

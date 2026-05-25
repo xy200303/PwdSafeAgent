@@ -370,6 +370,8 @@ function getArtifactKind(filePath: string): ArtifactKind {
 function createArtifact(sessionId: string, filePath: string, name = basename(filePath)): ArtifactSummary {
   const existing = findSessionArtifactByPath(sessionId, filePath);
   if (existing) {
+    ensureArtifactStreamItem(sessionId, existing);
+    sendEvent({ id: createId("event"), type: "artifact.created", sessionId, payload: existing });
     return existing;
   }
 
@@ -383,6 +385,20 @@ function createArtifact(sessionId: string, filePath: string, name = basename(fil
     createdAt: now()
   };
   artifacts.set(artifact.id, artifact);
+  ensureArtifactStreamItem(sessionId, artifact);
+  sendEvent({ id: createId("event"), type: "artifact.created", sessionId, payload: artifact });
+  schedulePersistState();
+  return artifact;
+}
+
+function ensureArtifactStreamItem(sessionId: string, artifact: ArtifactSummary): void {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    throw new Error(`Session not found: ${sessionId}`);
+  }
+  if (session.items.some((item) => item.kind === "file" && item.artifactId === artifact.id)) {
+    return;
+  }
   addItem(sessionId, {
     id: createId("file"),
     kind: "file",
@@ -391,9 +407,6 @@ function createArtifact(sessionId: string, filePath: string, name = basename(fil
     fileKind: artifact.kind,
     createdAt: now()
   });
-  sendEvent({ id: createId("event"), type: "artifact.created", sessionId, payload: artifact });
-  schedulePersistState();
-  return artifact;
 }
 
 function findSessionArtifactByPath(sessionId: string, filePath: string): ArtifactSummary | undefined {
@@ -424,15 +437,15 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
     "你的核心工作流是：先通过多轮对话收集项目事实，持续总结项目档案；中途按需读取附件、检索资料或做中间分析；当信息基本充分或用户明确要求交付时，再生成最终方案文件。",
     "不要在第一轮或资料明显不足时直接生成 Word、PDF、图片或发送文件；此时应先总结已知信息、指出缺口，并继续澄清关键事实。",
     "每当用户补充了项目关键信息，优先调用 remember_project 沉淀已确认事实和待补充信息。项目档案应覆盖：应用系统、建设单位、单位省份、单位地址、邮编、等保级别、系统边界、业务场景、部署架构、应用子系统、关键数据、用户角色、密码产品、机房/云平台、外部接口和交付要求。",
-    "只有当用户明确说“生成/导出/输出/形成方案/出 Word/PDF/画图”等交付意图，或项目档案已经标记为生成就绪时，才调用 write_word、write_pdf、image_generate、send_file 等最终交付工具。",
-    "最终生成时需要严格参考用户给出的 Word 模板结构，由大模型逐章生成所有正文内容，不要依赖模板中的“待补充/XXX”文本。",
-    "不要一次性粗糙生成：若信息不足，应引导用户按章节补齐；可以先生成第 1-2 章，再生成第 3-4 章，再生成第 5 章和图示，最后生成第 6-8 章与完整 Word。",
-    "方案图示也必须由工具真实生成：最终 Word 至少需要网络架构图、网络拓扑图、密码应用技术架构图、典型业务密码应用流程图。先调用 image_generate，再调用 write_word 并传入 diagrams。",
+    "只有当用户明确说“生成/导出/输出/形成方案/出 Word/PDF/画图”等交付意图，或项目档案已经标记为生成就绪时，才调用 create_word、write_word、write_pdf、image_generate、send_file 等交付工具。",
+    "Word 交付优先使用模板增量流程：先调用 create_word 复制内置 Word 模板，得到 docx 路径；再调用 write_word，传入 path、section 和该章节 content，逐章逐节替换模板内容。",
+    "write_word 不要求一次性完成所有章节；资料不足时可以先写已确认章节，后续继续增量替换。不要为了通过完整性检查而编造用户未提供的关键事实。",
+    "需要方案图示时由工具真实生成：先调用 image_generate，再调用 write_word 并按需传入 diagrams。",
     renderSchemeChapterGuide(),
     "回复使用中文 Markdown，必要时给出缺失资料清单。",
-    "不要编造用户未提供的关键事实；对话阶段资料不足时可以说明“待补充/需确认”，但最终 Word 正文和图示不得残留这些标识。",
+    "不要编造用户未提供的关键事实；资料不足时可以说明“待补充/需确认”，并在后续获得信息后继续替换对应章节。",
     "工具调用由你按任务需要自主决策：寒暄、普通问答和资料澄清阶段不要默认读取模板或附件；只有分析附件、查询最新资料、沉淀项目档案或交付文件确有需要时，才调用对应工具。",
-    "当进入最终交付阶段并需要 Word、PDF、Markdown 或图片文件时，必须通过 write_word/write_pdf/write_file/image_generate 等工具真实生成文件；不要只在文本回复中声称已经生成。",
+    "当进入交付阶段并需要 Word、PDF、Markdown 或图片文件时，必须通过 create_word/write_word/write_pdf/write_file/image_generate 等工具真实生成文件；不要只在文本回复中声称已经生成。",
     "最终文件生成后，如果工具结果没有自动展示文件卡片，再调用 send_file 将 data/output 中的产物发送给前端。",
     `当前时间：${getCurrentTimeText()}`
   ].join("\n");

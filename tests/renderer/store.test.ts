@@ -62,6 +62,7 @@ describe("renderer store", () => {
   });
 
   it("records created artifacts with their owning session", () => {
+    const session = makeSession("session_a", "A");
     const event: RendererEvent = {
       id: "event_2",
       type: "artifact.created",
@@ -76,9 +77,107 @@ describe("renderer store", () => {
       }
     };
 
+    store.dispatch(setSessions([session]));
     store.dispatch(applyRendererEvent(event));
 
     expect(store.getState().chat.artifacts).toEqual([{ ...event.payload, sessionId: "session_a" }]);
+    expect(store.getState().chat.sessions[0]?.items).toEqual([
+      {
+        id: "file_artifact_1",
+        kind: "file",
+        artifactId: "artifact_1",
+        name: "方案.docx",
+        fileKind: "docx",
+        createdAt: "2026-05-23T00:01:00.000Z"
+      }
+    ]);
+  });
+
+  it("deduplicates file stream items when artifact and stream events arrive out of order", () => {
+    const session = makeSession("session_a", "A");
+    const artifactEvent: RendererEvent = {
+      id: "event_2",
+      type: "artifact.created",
+      sessionId: session.id,
+      payload: {
+        id: "artifact_1",
+        name: "方案.docx",
+        kind: "docx",
+        path: "C:/tmp/方案.docx",
+        size: 2048,
+        createdAt: "2026-05-23T00:01:00.000Z"
+      }
+    };
+    const streamEvent: RendererEvent = {
+      id: "event_3",
+      type: "stream.item.added",
+      sessionId: session.id,
+      payload: {
+        id: "file_1",
+        kind: "file",
+        artifactId: "artifact_1",
+        name: "方案.docx",
+        fileKind: "docx",
+        createdAt: "2026-05-23T00:01:01.000Z"
+      }
+    };
+
+    store.dispatch(setSessions([session]));
+    store.dispatch(applyRendererEvent(artifactEvent));
+    store.dispatch(applyRendererEvent(streamEvent));
+
+    expect(store.getState().chat.sessions[0]?.items.filter((item) => item.kind === "file")).toHaveLength(1);
+  });
+
+  it("keeps file cards when a later session update is missing them", () => {
+    const session = makeSession("session_a", "A");
+    const artifactEvent: RendererEvent = {
+      id: "event_2",
+      type: "artifact.created",
+      sessionId: session.id,
+      payload: {
+        id: "artifact_1",
+        name: "方案.docx",
+        kind: "docx",
+        path: "C:/tmp/方案.docx",
+        size: 2048,
+        createdAt: "2026-05-23T00:01:00.000Z"
+      }
+    };
+    const staleSessionUpdate: RendererEvent = {
+      id: "event_4",
+      type: "session.updated",
+      payload: {
+        ...session,
+        items: [
+          {
+            id: "tool_1",
+            kind: "tool",
+            toolCallId: "call_1",
+            toolName: "send_file",
+            status: "success",
+            summary: "已发送 方案.docx",
+            createdAt: "2026-05-23T00:00:59.000Z"
+          }
+        ]
+      }
+    };
+
+    store.dispatch(setSessions([session]));
+    store.dispatch(applyRendererEvent(artifactEvent));
+    store.dispatch(applyRendererEvent(staleSessionUpdate));
+
+    expect(store.getState().chat.sessions[0]?.items).toEqual([
+      staleSessionUpdate.payload.items[0],
+      {
+        id: "file_artifact_1",
+        kind: "file",
+        artifactId: "artifact_1",
+        name: "方案.docx",
+        fileKind: "docx",
+        createdAt: "2026-05-23T00:01:00.000Z"
+      }
+    ]);
   });
 
   it("preserves tool detail previews from stream events", () => {

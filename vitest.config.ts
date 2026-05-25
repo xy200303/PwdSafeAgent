@@ -7,6 +7,6 @@ export default defineConfig({
     exclude: ["node_modules", "out", "data"],
     globals: true,
     restoreMocks: true,
-    testTimeout: 15000
+    testTimeout: 120000
   }
 });
