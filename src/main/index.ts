@@ -16,8 +16,19 @@ import {
   getBundledPythonRuntimeStatus
 } from "./runtimeDiagnostics";
 import { registerContentSecurityPolicy } from "./securityHeaders";
+import {
+  applySchemeProgressUpdate,
+  createSchemeProgressItem,
+  settleSchemeProgressItem,
+  type SchemeProgressUpdateInput
+} from "./schemeProgress";
 import { renderSchemeChapterGuide } from "./schemePlan";
 import { loadPersistedState, savePersistedState, type PersistedStateSnapshot, type SessionMemoryEntry } from "./sessionPersistence";
+import {
+  IMAGE_GENERATION_REQUEST_TIMEOUT_DEFAULT_MS,
+  clampDraftSectionParallelism,
+  clampImageGenerationParallelism
+} from "../shared/types";
 import type {
   AppSettings,
   ArtifactKind,
@@ -30,6 +41,7 @@ import type {
   PickAttachmentInput,
   RenameSessionInput,
   RendererEvent,
+  SchemeProgressItem,
   StreamItem,
   UpdateAppSettingsInput
 } from "../shared/types";
@@ -156,6 +168,9 @@ function loadEnv(): AppSettings {
       thinkingEnabled: parseBooleanEnv(process.env.OPENAI_THINKING_ENABLED, true),
       reasoningEffort: process.env.OPENAI_REASONING_EFFORT || "",
       requestTimeoutMs: Number(process.env.OPENAI_REQUEST_TIMEOUT_MS || 120000),
+      imageRequestTimeoutMs: Number(
+        process.env.OPENAI_IMAGE_REQUEST_TIMEOUT_MS || IMAGE_GENERATION_REQUEST_TIMEOUT_DEFAULT_MS
+      ),
       maxOutputTokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS || 16000),
       apiKeyConfigured: Boolean(process.env.OPENAI_API_KEY),
       imageApiKeyConfigured: Boolean(process.env.OPENAI_IMAGE_API_KEY)
@@ -165,7 +180,9 @@ function loadEnv(): AppSettings {
       libreOfficePath: process.env.LIBREOFFICE_PATH || ""
     },
     agent: {
-      execBashEnabled: parseBooleanEnv(process.env.AGENT_EXEC_BASH_ENABLED, true)
+      execBashEnabled: parseBooleanEnv(process.env.AGENT_EXEC_BASH_ENABLED, true),
+      draftSectionParallelism: clampDraftSectionParallelism(process.env.AGENT_DRAFT_SECTION_PARALLELISM),
+      imageGenerationParallelism: clampImageGenerationParallelism(process.env.AGENT_IMAGE_GENERATION_PARALLELISM)
     }
   };
 }
@@ -186,8 +203,11 @@ function saveEnv(input: UpdateAppSettingsInput): AppSettings {
     { key: "OPENAI_THINKING_ENABLED", value: input.openai.thinkingEnabled },
     { key: "OPENAI_REASONING_EFFORT", value: input.openai.reasoningEffort },
     { key: "OPENAI_REQUEST_TIMEOUT_MS", value: input.openai.requestTimeoutMs },
+    { key: "OPENAI_IMAGE_REQUEST_TIMEOUT_MS", value: input.openai.imageRequestTimeoutMs },
     { key: "OPENAI_MAX_OUTPUT_TOKENS", value: input.openai.maxOutputTokens },
     { key: "AGENT_EXEC_BASH_ENABLED", value: input.agent.execBashEnabled },
+    { key: "AGENT_DRAFT_SECTION_PARALLELISM", value: clampDraftSectionParallelism(input.agent.draftSectionParallelism) },
+    { key: "AGENT_IMAGE_GENERATION_PARALLELISM", value: clampImageGenerationParallelism(input.agent.imageGenerationParallelism) },
     { key: "AGENT_AUTO_PDF_EXPORT", value: input.document.autoPdfExport },
     { key: "LIBREOFFICE_PATH", value: input.document.libreOfficePath }
   ]);
@@ -301,6 +321,10 @@ function setSessionStatus(sessionId: string, status: ChatSession["status"]): voi
   sessions.set(sessionId, session);
   schedulePersistState();
   sendEvent({ id: createId("event"), type: "session.updated", payload: session });
+
+  if (status === "completed" || status === "failed") {
+    settleSchemeProgress(sessionId, status);
+  }
 }
 
 function startToolCall(sessionId: string, toolName: string, summary: string): StreamItem {
@@ -330,6 +354,70 @@ function addStage(sessionId: string, title: string, detail?: string): void {
     detail,
     createdAt: now()
   });
+}
+
+function getLatestSchemeProgressItem(sessionId: string): SchemeProgressItem | undefined {
+  const session = sessions.get(sessionId);
+  if (!session) return undefined;
+  for (let index = session.items.length - 1; index >= 0; index -= 1) {
+    const item = session.items[index];
+    if (item.kind === "scheme_progress") return item;
+  }
+  return undefined;
+}
+
+function ensureSchemeProgress(sessionId: string, detail?: string, artifactName?: string): void {
+  const existing = getLatestSchemeProgressItem(sessionId);
+  const timestamp = now();
+  if (!existing) {
+    const item = createSchemeProgressItem({
+      id: createId("scheme_progress"),
+      docsDir,
+      createdAt: timestamp
+    });
+    addItem(sessionId, {
+      ...item,
+      status: "running",
+      detail,
+      artifactName,
+      updatedAt: timestamp
+    });
+    return;
+  }
+
+  if (!detail && !artifactName && existing.status === "running") return;
+  updateItem(sessionId, {
+    ...existing,
+    status: "running",
+    detail: detail ?? existing.detail,
+    artifactName: artifactName ?? existing.artifactName,
+    updatedAt: timestamp
+  });
+}
+
+function updateSchemeSectionProgress(sessionId: string, update: SchemeProgressUpdateInput): void {
+  ensureSchemeProgress(sessionId, update.detail, update.artifactName);
+  const existing = getLatestSchemeProgressItem(sessionId);
+  if (!existing) return;
+  updateItem(sessionId, applySchemeProgressUpdate(existing, update, now()));
+}
+
+function settleSchemeProgress(sessionId: string, status: "completed" | "failed"): void {
+  const existing = getLatestSchemeProgressItem(sessionId);
+  if (!existing) return;
+  let nextStatus: SchemeProgressItem["status"] = status;
+  if (status === "completed") {
+    if (existing.failed > 0) {
+      nextStatus = "failed";
+    } else if (existing.total > 0 && existing.completed === existing.total) {
+      nextStatus = "completed";
+    } else if (existing.completed > 0 || (existing.drafted ?? 0) > 0) {
+      nextStatus = "partial";
+    } else {
+      nextStatus = "pending";
+    }
+  }
+  updateItem(sessionId, settleSchemeProgressItem(existing, nextStatus, now()));
 }
 
 function appendSessionMemory(sessionId: string, source: string, content: string): void {
@@ -438,9 +526,16 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
     "不要在第一轮或资料明显不足时直接生成 Word、PDF、图片或发送文件；此时应先总结已知信息、指出缺口，并继续澄清关键事实。",
     "每当用户补充了项目关键信息，优先调用 remember_project 沉淀已确认事实和待补充信息。项目档案应覆盖：应用系统、建设单位、单位省份、单位地址、邮编、等保级别、系统边界、业务场景、部署架构、应用子系统、关键数据、用户角色、密码产品、机房/云平台、外部接口和交付要求。",
     "只有当用户明确说“生成/导出/输出/形成方案/出 Word/PDF/画图”等交付意图，或项目档案已经标记为生成就绪时，才调用 create_word、write_word、write_pdf、image_generate、send_file 等交付工具。",
-    "Word 交付优先使用模板增量流程：先调用 create_word 复制内置 Word 模板，得到 docx 路径；再调用 write_word，传入 path、section 和该章节 content，逐章逐节替换模板内容。",
+    "Word 交付只使用 Word 模板和模板标注 JSON：先按 docs/密码应用方案.template.json 的章节写作提示、不可见 SDT 锚、表格锚点和图片锚点组织内容，再用 docs/密码应用方案.docx 作为最终 Word 样式模板。",
+    "整篇交付必须按节推进：先 read_file 读取 docs/密码应用方案.template.json，再调用 create_word 复制内置 Word 模板。正文生成可分批调用 draft_scheme_sections 按设置并行起草多个章节，再把返回草稿按 JSON sections 顺序合并为 write_word.sections，一次批量写入同一个 path。section 优先传模板 JSON 的 id（如 sec_1_2_1），也可传章节编号和标题。不要把整篇方案合成一段长 Markdown 后一次性写入。",
+    "章节写入必须按 docs/密码应用方案.template.json 中 sections 数组顺序推进；除非用户明确要求局部更新，不要跳章、不要抽样式填充多个章节。",
+    "draft_scheme_sections 只用于并行起草正文，不写 Word、不生成表格、不生成图片；正文草稿完成后优先用 write_word.sections 批量写入，避免反复打开和保存同一个 docx。",
+    "draft_scheme_sections 应一次传入同一批待生成章节，优先接近设置中的章节并行数；每个数组项只对应一个模板章节或小节，并使用 JSON 中该节的 writingHint、placeholders、relatedTables、relatedFigures。正文全部写入后，再统一用 template_cells 精确写入表格，并按 relatedFigures 的题注生成或嵌入图示。",
+    "局部更新同样使用 create_word 或已有 docx 路径；多章节更新优先传 write_word.sections，单章节更新才传 path、section 和该章节 content。",
     "write_word 不要求一次性完成所有章节；资料不足时可以先写已确认章节，后续继续增量替换。不要为了通过完整性检查而编造用户未提供的关键事实。",
-    "需要方案图示时由工具真实生成：先调用 image_generate，再调用 write_word 并按需传入 diagrams。",
+    "只要章节进度未达到全部完成，或存在失败章节，最终回复必须称为阶段性文件/部分完成，不得说完整方案已生成、全部完成或已生成完整方案。",
+    "降低 AI 味：每一节只写与该节相关的项目事实、现状、风险、控制措施、算法/产品/部署位置/调用路径；避免泛泛而谈、套话开头、重复政策背景和空洞排比。没有事实就明确写“待补充/需确认”。",
+    "需要方案图示时由工具真实生成：正文章节写完后可并行调用多个 image_generate 生成架构图、拓扑图、流程图；全部图片生成完成后，再调用 write_word 并按需传入 diagrams。",
     renderSchemeChapterGuide(),
     "回复使用中文 Markdown，必要时给出缺失资料清单。",
     "不要编造用户未提供的关键事实；资料不足时可以说明“待补充/需确认”，并在后续获得信息后继续替换对应章节。",
@@ -467,6 +562,14 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
     });
   }
 
+  const schemeProgressContext = renderSchemeProgressRuntimeContext(session.id);
+  if (schemeProgressContext) {
+    messages.push({
+      role: "system",
+      content: schemeProgressContext
+    });
+  }
+
   for (const item of session.items) {
     if (item.kind !== "message") continue;
     if (!item.content.trim()) continue;
@@ -481,7 +584,8 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
 function buildAvailableResourceContext(session: ChatSession): string {
   const lines = [
     "以下是本会话可按需读取的文件资源。注意：这些文件尚未读取；只有在用户任务需要时才调用 read_word/read_pdf/read_file。",
-    "Word 方案模板：docs/密码应用方案.docx"
+    "Word 样式模板：docs/密码应用方案.docx",
+    "Word 模板标注 JSON：docs/密码应用方案.template.json"
   ];
   const sessionAttachments = getSessionAttachments(session.id);
   if (sessionAttachments.length) {
@@ -492,6 +596,43 @@ function buildAvailableResourceContext(session: ChatSession): string {
   }
 
   return lines.join("\n");
+}
+
+function renderSchemeProgressRuntimeContext(sessionId: string): string {
+  const progress = getLatestSchemeProgressItem(sessionId);
+  if (!progress || progress.total === 0) return "";
+
+  const failedSections = progress.sections.filter((section) => section.status === "failed");
+  const draftedSections = progress.sections.filter((section) => section.status === "drafted");
+  const nextFailed = failedSections[0];
+  const nextDrafted = draftedSections[0];
+  const nextPending = progress.sections.find((section) => section.status === "pending");
+  const nextSection = nextFailed ?? nextDrafted ?? nextPending;
+  const recentCompleted = progress.sections
+    .filter((section) => section.status === "completed")
+    .slice(-5)
+    .map((section) => `${section.number} ${section.title}`);
+
+  return [
+    "当前 Word 章节生成进度（必须遵守）：",
+    `- 当前文件：${progress.artifactName || "已创建的模板副本，路径见最近一次 create_word/write_word 工具结果"}`,
+    `- 已起草待写入：${progress.drafted ?? draftedSections.length}`,
+    `- 已完成：${progress.completed}/${progress.total}`,
+    `- 失败：${progress.failed}`,
+    nextSection
+      ? `- 下一步优先处理：${nextSection.number} ${nextSection.title}（${
+          nextSection.status === "failed" ? "失败重试" : nextSection.status === "drafted" ? "草稿待写入 Word" : "下一待起草"
+        }）`
+      : "- 下一步优先处理：无",
+    recentCompleted.length ? `- 最近完成：${recentCompleted.join("、")}` : "",
+    draftedSections.length
+      ? "继续生成时，先把已起草章节按模板 JSON 顺序合并到 write_word.sections 批量写入 Word，再起草新章节。"
+      : "继续生成时，可先用 draft_scheme_sections 按设置并行起草下一批待生成章节，再按模板 JSON 顺序合并到 write_word.sections 批量写入 Word。",
+    "表格 template_cells 和配图 image_generate/diagrams 放在所有正文章节完成后统一处理。",
+    "不得跳到后续章节抽样填充。若本轮没有把 completed 写到 total，最终回复只能说阶段性文件/部分完成。"
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function getSessionAttachments(sessionId: string): AttachmentRef[] {
@@ -550,6 +691,9 @@ function createAgentRuntimeHost(): AgentRuntimeHost {
     startToolCall,
     finishToolCall,
     addStage,
+    ensureSchemeProgress,
+    updateSchemeSectionProgress,
+    settleSchemeProgress,
     appendSessionMemory,
     formatSessionMemory,
     getSessionReadableFiles,
@@ -573,6 +717,25 @@ async function runAgentResponse(
     controller,
     onAssistantCreated
   });
+}
+
+function applySchemeCompletionNotice(sessionId: string, assistantItem: MessageStreamItem): void {
+  const progress = getLatestSchemeProgressItem(sessionId);
+  if (!progress || progress.total === 0 || progress.status === "completed") return;
+  if (progress.completed === progress.total && progress.failed === 0) return;
+  if (assistantItem.content.includes("章节生成未完成：当前")) return;
+
+  const nextFailed = progress.sections.find((section) => section.status === "failed");
+  const nextPending = progress.sections.find((section) => section.status === "pending");
+  const nextSection = nextFailed ?? nextPending;
+  const nextText = nextSection ? `下一步应继续处理 ${nextSection.number} ${nextSection.title}。` : "下一步应继续补齐未完成章节。";
+  const notice = [
+    `> 章节生成未完成：当前 ${progress.completed}/${progress.total}${progress.failed ? `，失败 ${progress.failed}` : ""}。`,
+    "> 当前 Word 只能视为阶段性文件，不是完整方案。",
+    `> ${nextText}`
+  ].join("\n");
+
+  assistantItem.content = [notice, assistantItem.content.trim()].filter(Boolean).join("\n\n");
 }
 
 async function handlePrompt(input: ChatPromptInput): Promise<{ accepted: true }> {
@@ -606,6 +769,7 @@ async function handlePrompt(input: ChatPromptInput): Promise<{ accepted: true }>
       assistantItem = await runAgentResponse(input.sessionId, controller, input.message, (createdItem) => {
         assistantItem = createdItem;
       });
+      applySchemeCompletionNotice(input.sessionId, assistantItem);
       assistantItem.isFinished = true;
       updateItem(input.sessionId, assistantItem);
     })

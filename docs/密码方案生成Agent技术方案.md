@@ -108,8 +108,11 @@ OPENAI_IMAGE_MODEL=gpt-image-2
 OPENAI_IMAGE_SIZE=1536x1024
 OPENAI_IMAGE_QUALITY=high
 OPENAI_REQUEST_TIMEOUT_MS=120000
+OPENAI_IMAGE_REQUEST_TIMEOUT_MS=300000
 OPENAI_MAX_OUTPUT_TOKENS=16000
 AGENT_EXEC_BASH_ENABLED=true
+AGENT_DRAFT_SECTION_PARALLELISM=20
+AGENT_IMAGE_GENERATION_PARALLELISM=10
 ```
 
 设计约束：
@@ -117,11 +120,13 @@ AGENT_EXEC_BASH_ENABLED=true
 1. Renderer 进程不直接读取 API Key。
 2. `OPENAI_IMAGE_BASE_URL` 可单独配置生图服务地址；留空时生图沿用 `OPENAI_BASE_URL`。
 3. `OPENAI_IMAGE_API_KEY` 可单独配置生图密钥；留空时生图沿用 `OPENAI_API_KEY`。
-4. Pi Agent 作为后端内置依赖直接调用，不再通过环境变量动态加载插件包，也不回退到自实现 OpenAI Chat Runtime。
-5. 不使用 `VITE_` 前缀暴露密钥到前端。
-6. Main 进程负责读取 `.env` 并向前端下发脱敏后的配置摘要。
-7. 设置页如果允许修改配置，应由 Main 进程写回 `.env.local` 并触发重载。
-8. 打包时项目根目录 `.env` 会作为只读资源复制到 `resources/.env`，用于给终端用户提供默认模型配置；用户本机 `.env.local` 仍然拥有更高优先级。
+4. `OPENAI_IMAGE_REQUEST_TIMEOUT_MS` 仅控制 `image_generate` 的单次请求超时，默认 300000 ms（5 分钟）；`OPENAI_REQUEST_TIMEOUT_MS` 不因此被整体延长。
+5. `AGENT_IMAGE_GENERATION_PARALLELISM` 控制同时运行的生图任务数，默认 10，可由设置页调低。
+6. Pi Agent 作为后端内置依赖直接调用，不再通过环境变量动态加载插件包，也不回退到自实现 OpenAI Chat Runtime。
+7. 不使用 `VITE_` 前缀暴露密钥到前端。
+8. Main 进程负责读取 `.env` 并向前端下发脱敏后的配置摘要。
+9. 设置页如果允许修改配置，应由 Main 进程写回 `.env.local` 并触发重载。
+10. 打包时项目根目录 `.env` 会作为只读资源复制到 `resources/.env`，用于给终端用户提供默认模型配置；用户本机 `.env.local` 仍然拥有更高优先级。
 
 ## 4. 总体架构
 
@@ -342,7 +347,7 @@ stateDiagram-v2
 推荐实现：
 
 1. Word 读取：Open XML 解析或 `mammoth` 做文本抽取。
-2. Word 输出：模板归一化后走 Open XML / `docxtemplater` 风格渲染。
+2. Word 输出：模板归一化后走 Open XML / `docx-templates` 模板渲染。
 3. PDF 读取：`pdfjs-dist` 或同类解析方案。
 4. PDF 导出：优先通过本地 LibreOffice / Office 自动化受控导出。
 

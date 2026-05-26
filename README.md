@@ -19,7 +19,7 @@ PwdSafeAgent 是一个基于 Electron、React、Redux Toolkit、Radix UI、Incre
 - 前端：React 19、TypeScript、Redux Toolkit、React Redux
 - UI：Radix UI、lucide-react、Incremark
 - 模型与生图：OpenAI JavaScript SDK
-- 文档与预览：docxtemplater、PizZip、mammoth、pdf-parse、PDF.js、docx-preview
+- 文档与预览：docx-templates、PizZip、mammoth、pdf-parse、PDF.js、docx-preview
 - 测试：Vitest
 
 ## 目录结构
@@ -72,8 +72,11 @@ OPENAI_IMAGE_SIZE=1536x1024
 OPENAI_IMAGE_QUALITY=high
 OPENAI_AUTO_IMAGE_GENERATION=true
 OPENAI_REQUEST_TIMEOUT_MS=120000
+OPENAI_IMAGE_REQUEST_TIMEOUT_MS=300000
 OPENAI_MAX_OUTPUT_TOKENS=16000
 AGENT_EXEC_BASH_ENABLED=true
+AGENT_DRAFT_SECTION_PARALLELISM=20
+AGENT_IMAGE_GENERATION_PARALLELISM=10
 AGENT_AUTO_PDF_EXPORT=false
 LIBREOFFICE_PATH=
 ```
@@ -84,6 +87,9 @@ LIBREOFFICE_PATH=
 - `OPENAI_BASE_URL`：OpenAI 兼容接口地址。
 - `OPENAI_IMAGE_API_KEY`：生图 API Key；留空时沿用 `OPENAI_API_KEY`。
 - `OPENAI_IMAGE_BASE_URL`：生图接口地址；留空时沿用 `OPENAI_BASE_URL`。
+- `OPENAI_IMAGE_REQUEST_TIMEOUT_MS`：单次生图请求超时，默认 `300000` ms（5 分钟）。
+- `AGENT_DRAFT_SECTION_PARALLELISM`：同时起草的方案章节数，默认 `20`。
+- `AGENT_IMAGE_GENERATION_PARALLELISM`：同时运行的生图任务数，默认 `10`，可在设置页调低。
 - `AGENT_EXEC_BASH_ENABLED`：是否允许 Agent 使用命令执行工具，默认启用。
 - `AGENT_AUTO_PDF_EXPORT`：生成 Word 后是否自动尝试导出 PDF。
 - `LIBREOFFICE_PATH`：LibreOffice 可执行文件路径；留空时自动查找。

@@ -4,6 +4,34 @@ export type SessionStatus = "idle" | "running" | "completed" | "failed";
 
 export type BundledPythonRuntimeSource = "resources" | "project";
 
+export const DRAFT_SECTION_PARALLELISM_MIN = 1;
+export const DRAFT_SECTION_PARALLELISM_MAX = 20;
+export const DRAFT_SECTION_PARALLELISM_DEFAULT = 20;
+export const IMAGE_GENERATION_REQUEST_TIMEOUT_DEFAULT_MS = 300000;
+export const IMAGE_GENERATION_PARALLELISM_MIN = 1;
+export const IMAGE_GENERATION_PARALLELISM_MAX = 10;
+export const IMAGE_GENERATION_PARALLELISM_DEFAULT = 10;
+
+export function clampDraftSectionParallelism(value: unknown): number {
+  const numericValue =
+    typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value.trim()) : Number.NaN;
+  if (!Number.isFinite(numericValue)) return DRAFT_SECTION_PARALLELISM_DEFAULT;
+  return Math.min(
+    Math.max(Math.trunc(numericValue), DRAFT_SECTION_PARALLELISM_MIN),
+    DRAFT_SECTION_PARALLELISM_MAX
+  );
+}
+
+export function clampImageGenerationParallelism(value: unknown): number {
+  const numericValue =
+    typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value.trim()) : Number.NaN;
+  if (!Number.isFinite(numericValue)) return IMAGE_GENERATION_PARALLELISM_DEFAULT;
+  return Math.min(
+    Math.max(Math.trunc(numericValue), IMAGE_GENERATION_PARALLELISM_MIN),
+    IMAGE_GENERATION_PARALLELISM_MAX
+  );
+}
+
 export interface BundledPythonRuntimeStatus {
   available: boolean;
   source?: BundledPythonRuntimeSource;
@@ -26,6 +54,38 @@ export interface RuntimeCheckResult {
   bundledPython: BundledPythonRuntimeStatus;
   python: RuntimeCommandCheck;
   pip: RuntimeCommandCheck;
+}
+
+export type SchemeSectionStatus = "pending" | "drafting" | "drafted" | "running" | "completed" | "failed" | "skipped";
+
+export interface SchemeProgressSection {
+  id: string;
+  number: string;
+  title: string;
+  headingLevel: number;
+  status: SchemeSectionStatus;
+  writingHint?: string;
+  detail?: string;
+  relatedTables?: string[];
+  relatedFigures?: string[];
+  updatedAt?: string;
+}
+
+export interface SchemeProgressItem {
+  id: string;
+  kind: "scheme_progress";
+  title: string;
+  status: "pending" | "running" | "partial" | "completed" | "failed";
+  total: number;
+  drafted: number;
+  completed: number;
+  failed: number;
+  activeSectionId?: string;
+  artifactName?: string;
+  detail?: string;
+  sections: SchemeProgressSection[];
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export type StreamItem =
@@ -64,7 +124,8 @@ export type StreamItem =
       title: string;
       detail?: string;
       createdAt: string;
-    };
+    }
+  | SchemeProgressItem;
 
 export interface ChatSession {
   id: string;
@@ -157,6 +218,7 @@ export interface AppSettings {
     thinkingEnabled: boolean;
     reasoningEffort: string;
     requestTimeoutMs: number;
+    imageRequestTimeoutMs: number;
     maxOutputTokens: number;
     apiKeyConfigured: boolean;
     imageApiKeyConfigured: boolean;
@@ -167,6 +229,8 @@ export interface AppSettings {
   };
   agent: {
     execBashEnabled: boolean;
+    draftSectionParallelism: number;
+    imageGenerationParallelism: number;
   };
 }
 
@@ -182,6 +246,7 @@ export interface UpdateAppSettingsInput {
     thinkingEnabled: boolean;
     reasoningEffort: string;
     requestTimeoutMs: number;
+    imageRequestTimeoutMs: number;
     maxOutputTokens: number;
     apiKey?: string;
     imageApiKey?: string;
@@ -192,6 +257,8 @@ export interface UpdateAppSettingsInput {
   };
   agent: {
     execBashEnabled: boolean;
+    draftSectionParallelism: number;
+    imageGenerationParallelism: number;
   };
 }
 

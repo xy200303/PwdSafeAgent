@@ -98,6 +98,9 @@ function createHost(items: StreamItem[], settings: AppSettings = createSettings(
         createdAt: "2026-05-23T00:00:01.000Z"
       });
     },
+    ensureSchemeProgress: () => {},
+    updateSchemeSectionProgress: () => {},
+    settleSchemeProgress: () => {},
     appendSessionMemory: () => {},
     formatSessionMemory: () => "",
     getSessionReadableFiles: () => [],
@@ -126,6 +129,7 @@ function createSettings(): AppSettings {
       thinkingEnabled: true,
       reasoningEffort: "",
       requestTimeoutMs: 120000,
+      imageRequestTimeoutMs: 300000,
       maxOutputTokens: 16000,
       apiKeyConfigured: false,
       imageApiKeyConfigured: false
@@ -135,7 +139,9 @@ function createSettings(): AppSettings {
       libreOfficePath: ""
     },
     agent: {
-      execBashEnabled: false
+      execBashEnabled: false,
+      draftSectionParallelism: 20,
+      imageGenerationParallelism: 10
     }
   };
 }

@@ -83,11 +83,13 @@ export const REQUIRED_SCHEME_DIAGRAMS: SchemeDiagramRequirement[] = [
 
 export function renderSchemeChapterGuide(): string {
   return [
-    "模板章节参考（可按章节增量写入 Word，不要求一次性全部完成）：",
+    "Word 模板章节参考（整篇生成时使用模板 JSON 的真实 sections，write_word 会按不可见 SDT 锚写入 Word 样式模板）：",
     ...REQUIRED_SCHEME_SECTIONS.map((section) => `- ${section.title}`),
     "常用图示清单（需要图片时先调用 image_generate 生成，再按需传给 write_word）：",
     ...REQUIRED_SCHEME_DIAGRAMS.map((diagram) => `- ${diagram.label}`),
-    "推荐节奏：先调用 create_word 创建模板副本；然后按 1-2、3-4、5、6-8 分批生成章节，并用 write_word 的 section 参数逐节替换。"
+    "模板精确标注：docs/密码应用方案.template.json 包含不可见 SDT 锚、表格单元格、图片和题注锚点。",
+    "推荐节奏：整篇交付时先读取 docs/密码应用方案.template.json，create_word 创建模板副本，再分批调用 draft_scheme_sections 按设置并行起草正文，随后按 sections 顺序合并到 write_word.sections 批量写入；不要一次性生成整篇长文。",
+    "写作要求：每节只处理对应模板节的事实，资料不足处标注待补充，避免通用套话；表格和图示放到正文写完后统一生成和嵌入。"
   ].join("\n");
 }
 

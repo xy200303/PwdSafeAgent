@@ -1,5 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import type { ChatCompletionMessageParam, ChatCompletionMessageToolCall } from "openai/resources/chat/completions";
 import {
   AuthStorage,
@@ -16,6 +16,7 @@ import type { Api, AssistantMessage, Model, TextContent } from "@mariozechner/pi
 import { compactText } from "./agentTools";
 import { buildAgentChatTools, executeAgentToolCall, type AgentToolExecutionResult } from "./agentToolRegistry";
 import type { AgentRuntime, AgentRuntimeHost, AgentRuntimeTurnInput, MessageStreamItem } from "./agentRuntime";
+import { extractTemplateAnchorIds } from "./schemeProgress";
 import type { AppSettings, StreamItem } from "../shared/types";
 
 const PWD_SAFE_PROVIDER = "pwdsafe-openai";
@@ -177,6 +178,7 @@ async function runPiPrompt(
 ): Promise<MessageStreamItem> {
   let assistantItem: MessageStreamItem | undefined;
   const toolItems = new Map<string, StreamItem>();
+  const toolArgs = new Map<string, unknown>();
   const abort = () => {
     void state.session.abort();
   };
@@ -188,6 +190,7 @@ async function runPiPrompt(
       input,
       state,
       toolItems,
+      toolArgs,
       getAssistantItem: () => assistantItem,
       setAssistantItem: (item) => {
         assistantItem = item;
@@ -226,6 +229,7 @@ function handlePiSessionEvent(
     input: AgentRuntimeTurnInput;
     state: PiSessionState;
     toolItems: Map<string, StreamItem>;
+    toolArgs: Map<string, unknown>;
     getAssistantItem: () => MessageStreamItem | undefined;
     setAssistantItem: (item: MessageStreamItem) => void;
   }
@@ -260,6 +264,8 @@ function handlePiSessionEvent(
         context.host.updateItem(context.input.sessionId, item);
       }
       context.toolItems.set(event.toolCallId, item);
+      context.toolArgs.set(event.toolCallId, event.args);
+      trackSchemeToolStart(event.toolName, event.args, context);
       return;
     }
     case "tool_execution_update": {
@@ -281,11 +287,146 @@ function handlePiSessionEvent(
         item.outputPreview = compactText(output, 6000);
       }
       context.host.finishToolCall(context.input.sessionId, item, event.isError ? "failed" : "success", summary);
+      trackSchemeToolEnd(event.toolName, context.toolArgs.get(event.toolCallId), details, event.isError, context);
+      context.toolArgs.delete(event.toolCallId);
       return;
     }
     default:
       return;
   }
+}
+
+function trackSchemeToolStart(
+  toolName: string,
+  args: unknown,
+  context: { host: AgentRuntimeHost; input: AgentRuntimeTurnInput }
+): void {
+  if (toolName === "draft_scheme_sections") {
+    const sections = readDraftToolSections(args);
+    if (sections.length) {
+      for (const section of sections) {
+        context.host.updateSchemeSectionProgress(context.input.sessionId, {
+          section,
+          status: "drafting",
+          detail: `${section} 正在并行起草正文`
+        });
+      }
+    } else {
+      context.host.ensureSchemeProgress(context.input.sessionId, "正在并行起草章节正文");
+    }
+    return;
+  }
+
+  if (toolName === "create_word") {
+    context.host.ensureSchemeProgress(
+      context.input.sessionId,
+      "已进入 Word 模板生成流程，等待批量写入章节内容",
+      readToolStringArg(args, "name")
+    );
+    return;
+  }
+
+  if (toolName !== "write_word") return;
+  const section = readSchemeToolSection(args);
+  if (section) {
+    context.host.updateSchemeSectionProgress(context.input.sessionId, {
+      section,
+      status: "running",
+      detail: `正在生成 ${section}`
+    });
+    return;
+  }
+
+  context.host.ensureSchemeProgress(context.input.sessionId, "正在按模板写入 Word 内容");
+}
+
+function trackSchemeToolEnd(
+  toolName: string,
+  args: unknown,
+  details: AgentToolExecutionResult | undefined,
+  isError: boolean,
+  context: { host: AgentRuntimeHost; input: AgentRuntimeTurnInput }
+): void {
+  if (toolName === "draft_scheme_sections") {
+    if (isError) {
+      for (const section of readDraftToolSections(args)) {
+        context.host.updateSchemeSectionProgress(context.input.sessionId, {
+          section,
+          status: "failed",
+          detail: `${section} 起草失败`
+        });
+      }
+      return;
+    }
+    for (const update of details?.schemeProgressUpdates ?? []) {
+      context.host.updateSchemeSectionProgress(context.input.sessionId, update);
+    }
+    return;
+  }
+
+  if (toolName === "create_word") {
+    if (isError) {
+      context.host.settleSchemeProgress(context.input.sessionId, "failed");
+      return;
+    }
+    context.host.ensureSchemeProgress(
+      context.input.sessionId,
+      "Word 模板副本已创建，后续将按章节增量写入",
+      details?.artifactPath ? basename(details.artifactPath) : readToolStringArg(args, "name")
+    );
+    return;
+  }
+
+  if (toolName !== "write_word") return;
+  const section = readSchemeToolSection(args);
+  const anchorIds = extractTemplateAnchorIds(details?.content ?? "");
+  const artifactName = details?.artifactPath ? basename(details.artifactPath) : undefined;
+  if (isError) {
+    if (section || anchorIds.length) {
+      context.host.updateSchemeSectionProgress(context.input.sessionId, {
+        section,
+        anchorIds,
+        status: "failed",
+        detail: section ? `${section} 生成失败` : "Word 写入失败",
+        artifactName
+      });
+      return;
+    }
+    context.host.settleSchemeProgress(context.input.sessionId, "failed");
+    return;
+  }
+
+  context.host.updateSchemeSectionProgress(context.input.sessionId, {
+    section,
+    anchorIds,
+    status: "completed",
+    detail: section ? `${section} 已写入模板` : "已按模板写入 Word",
+    artifactName
+  });
+}
+
+function readSchemeToolSection(args: unknown): string | undefined {
+  return readToolStringArg(args, "section") || readToolStringArg(args, "section_title");
+}
+
+function readDraftToolSections(args: unknown): string[] {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return [];
+  const value = (args as Record<string, unknown>).sections;
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (!item || typeof item !== "object" || Array.isArray(item)) return "";
+      const section = (item as Record<string, unknown>).section;
+      return typeof section === "string" ? section.trim() : "";
+    })
+    .filter(Boolean);
+}
+
+function readToolStringArg(args: unknown, key: string): string | undefined {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+  const value = (args as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function ensureAssistantItem(context: {
@@ -321,7 +462,7 @@ function createPwdSafePiTools(
         description: definition.description || definition.name,
         promptSnippet: `${definition.name}: ${firstLine(definition.description || definition.name)}`,
         parameters: definition.parameters as ToolDefinition["parameters"],
-        executionMode: "sequential",
+        executionMode: resolvePwdSafeToolExecutionMode(definition.name),
         execute: async (toolCallId, params, signal) => {
           const activeSettings = host.loadSettings();
           const toolCall: ChatCompletionMessageToolCall = {
@@ -359,6 +500,21 @@ function createPwdSafePiTools(
         }
       });
     });
+}
+
+function resolvePwdSafeToolExecutionMode(toolName: string): "parallel" | "sequential" {
+  if (
+    toolName === "time" ||
+    toolName === "web_search" ||
+    toolName === "read_file" ||
+    toolName === "read_word" ||
+    toolName === "read_pdf" ||
+    toolName === "draft_scheme_sections" ||
+    toolName === "image_generate"
+  ) {
+    return "parallel";
+  }
+  return "sequential";
 }
 
 function registerPwdSafeOpenAiModel(modelRegistry: ModelRegistry, settings: AppSettings): Model<Api> {
@@ -417,7 +573,9 @@ function buildConfigSignature(settings: AppSettings): string {
     thinkingEnabled: settings.openai.thinkingEnabled,
     reasoningEffort: settings.openai.reasoningEffort,
     maxOutputTokens: settings.openai.maxOutputTokens,
-    execBashEnabled: settings.agent.execBashEnabled
+    execBashEnabled: settings.agent.execBashEnabled,
+    draftSectionParallelism: settings.agent.draftSectionParallelism,
+    imageGenerationParallelism: settings.agent.imageGenerationParallelism
   });
 }
 

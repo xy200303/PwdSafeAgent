@@ -241,6 +241,7 @@ export interface AppSettings {
     imageQuality: string;
     autoImageGeneration: boolean;
     requestTimeoutMs: number;
+    imageRequestTimeoutMs: number;
     maxOutputTokens: number;
     apiKeyConfigured: boolean;
     imageApiKeyConfigured: boolean;
@@ -251,6 +252,8 @@ export interface AppSettings {
   };
   agent: {
     execBashEnabled: boolean;
+    draftSectionParallelism: number;
+    imageGenerationParallelism: number;
   };
 }
 
@@ -264,6 +267,7 @@ export interface UpdateAppSettingsInput {
     imageQuality: string;
     autoImageGeneration: boolean;
     requestTimeoutMs: number;
+    imageRequestTimeoutMs: number;
     maxOutputTokens: number;
     apiKey?: string;
     imageApiKey?: string;
@@ -274,6 +278,8 @@ export interface UpdateAppSettingsInput {
   };
   agent: {
     execBashEnabled: boolean;
+    draftSectionParallelism: number;
+    imageGenerationParallelism: number;
   };
 }
 
@@ -1011,9 +1017,12 @@ await imageClient.images.generate({
 - `session.deleted` 用于前端同步移除会话，并保持侧边栏当前选择始终有效。
 - 后端内置直接调用 `@mariozechner/pi-coding-agent`，不再通过环境变量动态加载插件包，也不回退到自实现 OpenAI Chat Runtime。
 - `AGENT_EXEC_BASH_ENABLED` 已作为设置项暴露，当前默认启用；设置为 `false` 后 Agent 不再注册和执行 `exec_bash` 工具。
+- `AGENT_DRAFT_SECTION_PARALLELISM` 已作为设置项暴露，控制 `draft_scheme_sections` 默认并行起草章节数，默认值为 `20`；工具参数 `max_parallel` 仅覆盖单次调用。
+- `AGENT_IMAGE_GENERATION_PARALLELISM` 已作为设置项暴露，控制 `image_generate` 同时执行数量，默认值为 `10`。
 - `exec_bash` 已支持 Windows 内置 Python runtime：优先使用随安装包复制到 `resources/runtime/win/python` 或 `resources/runtime/win/pyhton` 的运行时，保障无系统 Python 环境也能执行 Python 命令。
 - `settings:get` 的 `runtime.bundledPython` 会返回内置 Python 探测状态，设置面板据此展示当前来源和 `python.exe` 路径。
 - `settings:check-runtime` 会实际执行 Python 与 pip 版本检测，设置面板可显示自检结果，便于定位运行时缺 DLL、权限或杀软拦截问题。
 - 打包态内置 `.env` 读取自 `resources/.env`，`.env.local`、`data/state.json`、附件缓存和生成产物保存到 Electron `userData` 目录；开发态仍使用项目根目录，便于调试。
 - `OPENAI_IMAGE_BASE_URL` 已作为设置项暴露；填写后仅生图请求使用该地址，留空时沿用 `OPENAI_BASE_URL`。
 - `OPENAI_IMAGE_API_KEY` 已作为设置项暴露；填写后仅生图请求使用该密钥，留空时沿用 `OPENAI_API_KEY`。
+- `OPENAI_IMAGE_REQUEST_TIMEOUT_MS` 已作为设置项暴露；仅用于生图调用，默认 `300000` ms（5 分钟）。

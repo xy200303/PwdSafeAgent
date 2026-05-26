@@ -1,5 +1,7 @@
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, dirname, extname } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
+import { createCanvas, loadImage } from "@napi-rs/canvas";
+import { createReport } from "docx-templates";
 import PizZip from "pizzip";
 import { compactText, getCurrentTimeText, sanitizeFileName } from "./agentTools";
 import { findMissingSchemeDiagrams, findMissingSchemeSections, REQUIRED_SCHEME_DIAGRAMS } from "./schemePlan";
@@ -12,10 +14,12 @@ export interface SchemeDocumentInput {
   templateFields?: SchemeTemplateFieldInput;
   diagrams?: SchemeDiagramAsset[];
   renderMode?: SchemeDocumentRenderMode;
+  templateJsonPath?: string;
+  templateCells?: TemplateCellReplacementInput[];
 }
 
 export type SchemeTemplateFieldInput = Record<string, unknown> | Array<Record<string, unknown>>;
-export type SchemeDocumentRenderMode = "append" | "full_document" | "template" | "section";
+export type SchemeDocumentRenderMode = "append" | "full_document" | "template_sections" | "template" | "section";
 
 export interface SchemeDiagramAsset {
   label: string;
@@ -32,12 +36,16 @@ export interface SchemeDocumentResult {
   appendedMarkdown: boolean;
   embeddedDiagrams: string[];
   templateReplacementCount: number;
+  templateCellReplacementCount: number;
   renderMode: SchemeDocumentRenderMode;
+  templateAnchorsUsed: string[];
 }
 
 export interface TemplateWordDocumentInput {
   fields?: SchemeTemplateFieldInput;
   templateFields?: SchemeTemplateFieldInput;
+  templateJsonPath?: string;
+  templateCells?: TemplateCellReplacementInput[];
 }
 
 export interface TemplateWordDocumentResult {
@@ -45,12 +53,25 @@ export interface TemplateWordDocumentResult {
   fileName: string;
   filledFields: string[];
   templateReplacementCount: number;
+  templateCellReplacementCount: number;
 }
 
 export interface WordSectionReplacementInput extends TemplateWordDocumentInput {
   section: string;
   content: string;
   diagrams?: SchemeDiagramAsset[];
+  templateJsonPath?: string;
+}
+
+export interface WordSectionBatchReplacementInput extends TemplateWordDocumentInput {
+  sections: WordSectionContentInput[];
+  diagrams?: SchemeDiagramAsset[];
+  templateJsonPath?: string;
+}
+
+export interface WordSectionContentInput {
+  section: string;
+  content: string;
 }
 
 export interface WordSectionReplacementResult {
@@ -60,7 +81,32 @@ export interface WordSectionReplacementResult {
   matchedHeading: string;
   replacementCount: number;
   templateReplacementCount: number;
+  templateCellReplacementCount: number;
   embeddedDiagrams: string[];
+  templateAnchorId?: string;
+}
+
+export interface WordSectionBatchReplacementResult {
+  outputPath: string;
+  fileName: string;
+  sections: Array<{
+    section: string;
+    matchedHeading: string;
+    replacementCount: number;
+    templateAnchorId?: string;
+  }>;
+  templateReplacementCount: number;
+  templateCellReplacementCount: number;
+  embeddedDiagrams: string[];
+}
+
+export interface TemplateCellReplacementInput {
+  tableId?: string;
+  caption?: string;
+  rowIndex: number;
+  cellIndex?: number;
+  columnIndex?: number;
+  value: string;
 }
 
 export interface SchemeCompletenessResult {
@@ -92,6 +138,63 @@ export interface SchemeFactModel {
   databases: string[];
   cryptoProducts: string[];
   missingFields: string[];
+}
+
+interface WordTemplateJson {
+  sections?: WordTemplateSection[];
+  tables?: WordTemplateTable[];
+  figures?: WordTemplateFigure[];
+}
+
+interface WordTemplateSection {
+  id: string;
+  number: string;
+  title: string;
+  headingBlock: number;
+  bodyRange: [number, number];
+  directBodyRange?: [number, number];
+  headingLevel?: number;
+  childSections?: string[];
+  anchors?: {
+    body?: WordTemplateAnchor;
+  };
+}
+
+interface WordTemplateTable {
+  id: string;
+  block: number;
+  caption?: string;
+  captionBlock?: number;
+  anchors?: {
+    table?: WordTemplateAnchor;
+    caption?: WordTemplateAnchor;
+  };
+  rows?: Array<{
+    index: number;
+    cells: Array<{
+      cellIndex: number;
+      columnIndex: number;
+    }>;
+  }>;
+}
+
+interface WordTemplateFigure {
+  id: string;
+  sectionNumber?: string;
+  imageBlock?: number;
+  captionBlock: number;
+  caption: string;
+  anchorKind?: string;
+  mode?: string;
+  anchors?: {
+    image?: WordTemplateAnchor;
+    caption?: WordTemplateAnchor;
+  };
+}
+
+interface WordTemplateAnchor {
+  tag: string;
+  alias?: string;
 }
 
 const PLACEHOLDER_KEYS = [
@@ -269,12 +372,36 @@ export function buildSchemeTemplateData(input: SchemeDocumentInput): TemplateDat
   return data;
 }
 
+async function loadWordTemplateJson(templateJsonPath?: string): Promise<WordTemplateJson | undefined> {
+  const candidatePaths = unique(
+    [templateJsonPath, join(process.cwd(), "docs", "密码应用方案.template.json")].filter((path): path is string =>
+      Boolean(path)
+    )
+  );
+
+  for (const candidatePath of candidatePaths) {
+    try {
+      const parsed = JSON.parse(await readFile(candidatePath, "utf-8")) as WordTemplateJson;
+      if (Array.isArray(parsed.sections)) return parsed;
+    } catch {
+      // Missing or malformed template JSON only disables anchor-based template operations.
+    }
+  }
+
+  return undefined;
+}
+
+function inferTemplateJsonPath(templatePath: string): string {
+  return join(dirname(templatePath), `${basename(templatePath, extname(templatePath))}.template.json`);
+}
+
 export async function createWordDocxFromTemplate(
   templatePath: string,
   outputPath: string,
   input: TemplateWordDocumentInput = {}
 ): Promise<TemplateWordDocumentResult> {
   await mkdir(dirname(outputPath), { recursive: true });
+  const templateCells = input.templateCells ?? [];
   const explicitFields = buildExplicitTemplateFieldOverrides({
     prompt: "",
     memory: "",
@@ -284,19 +411,22 @@ export async function createWordDocxFromTemplate(
   });
   const filledFields = Object.keys(explicitFields).filter((key) => !key.startsWith("$"));
 
-  if (!filledFields.length) {
+  if (!filledFields.length && !templateCells.length) {
     await copyFile(templatePath, outputPath);
     return {
       outputPath,
       fileName: sanitizeFileName(outputPath.split(/[\\/]/).at(-1) || "密码应用方案.docx"),
       filledFields,
-      templateReplacementCount: 0
+      templateReplacementCount: 0,
+      templateCellReplacementCount: 0
     };
   }
 
   const content = await readFile(templatePath, "binary");
   const zip = new PizZip(content);
-  const templateReplacementCount = replaceTemplatePlaceholders(zip, explicitFields);
+  const templateJson = await loadWordTemplateJson(input.templateJsonPath ?? inferTemplateJsonPath(templatePath));
+  const templateReplacementCount = await replaceTemplatePlaceholders(zip, explicitFields);
+  const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, templateCells);
   const buffer = zip.generate({ type: "nodebuffer", compression: "DEFLATE" });
   await writeFile(outputPath, buffer);
 
@@ -304,7 +434,8 @@ export async function createWordDocxFromTemplate(
     outputPath,
     fileName: sanitizeFileName(outputPath.split(/[\\/]/).at(-1) || "密码应用方案.docx"),
     filledFields,
-    templateReplacementCount
+    templateReplacementCount,
+    templateCellReplacementCount
   };
 }
 
@@ -315,7 +446,8 @@ export async function replaceWordSectionContent(
 ): Promise<WordSectionReplacementResult> {
   const content = await readFile(sourcePath, "binary");
   const zip = new PizZip(content);
-  const templateReplacementCount = replaceTemplatePlaceholders(
+  const templateJson = await loadWordTemplateJson(input.templateJsonPath);
+  const templateReplacementCount = await replaceTemplatePlaceholders(
     zip,
     buildExplicitTemplateFieldOverrides({
       prompt: "",
@@ -325,11 +457,12 @@ export async function replaceWordSectionContent(
       templateFields: input.templateFields
     })
   );
-  const replacement = replaceDocumentSectionWithMarkdown(zip, input.section, input.content);
+  const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, input.templateCells ?? []);
+  const replacement = replaceDocumentSectionWithMarkdown(zip, input.section, input.content, templateJson);
   if (!replacement) {
     throw new Error(`未找到 Word 章节：${input.section}`);
   }
-  const embeddedDiagrams = await appendGeneratedDiagrams(zip, input.diagrams ?? []);
+  const embeddedDiagrams = await appendGeneratedDiagrams(zip, input.diagrams ?? [], templateJson);
 
   await mkdir(dirname(outputPath), { recursive: true });
   const buffer = zip.generate({ type: "nodebuffer", compression: "DEFLATE" });
@@ -342,6 +475,52 @@ export async function replaceWordSectionContent(
     matchedHeading: replacement.matchedHeading,
     replacementCount: replacement.replacementCount,
     templateReplacementCount,
+    templateCellReplacementCount,
+    embeddedDiagrams,
+    templateAnchorId: replacement.templateAnchorId
+  };
+}
+
+export async function replaceWordSectionsContent(
+  sourcePath: string,
+  outputPath: string,
+  input: WordSectionBatchReplacementInput
+): Promise<WordSectionBatchReplacementResult> {
+  const sections = input.sections
+    .map((section) => ({ section: section.section.trim(), content: section.content }))
+    .filter((section) => section.section && section.content.trim());
+  if (!sections.length) {
+    throw new Error("未提供可写入的 Word 章节");
+  }
+
+  const content = await readFile(sourcePath, "binary");
+  const zip = new PizZip(content);
+  const templateJson = await loadWordTemplateJson(input.templateJsonPath);
+  const templateReplacementCount = await replaceTemplatePlaceholders(
+    zip,
+    buildExplicitTemplateFieldOverrides({
+      prompt: "",
+      memory: "",
+      generatedMarkdown: "",
+      fields: input.fields,
+      templateFields: input.templateFields
+    })
+  );
+  const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, input.templateCells ?? []);
+  const replacements = replaceDocumentSectionsWithMarkdown(zip, sections, templateJson);
+
+  const embeddedDiagrams = await appendGeneratedDiagrams(zip, input.diagrams ?? [], templateJson);
+
+  await mkdir(dirname(outputPath), { recursive: true });
+  const buffer = zip.generate({ type: "nodebuffer", compression: "DEFLATE" });
+  await writeFile(outputPath, buffer);
+
+  return {
+    outputPath,
+    fileName: sanitizeFileName(outputPath.split(/[\\/]/).at(-1) || "密码应用方案.docx"),
+    sections: replacements,
+    templateReplacementCount,
+    templateCellReplacementCount,
     embeddedDiagrams
   };
 }
@@ -355,14 +534,26 @@ export async function writeSchemeDocxFromTemplate(
   const data = buildSchemeTemplateData(input);
   const content = await readFile(templatePath, "binary");
   const zip = new PizZip(content);
-  const templateReplacementCount = replaceTemplatePlaceholders(zip, data);
+  const templateJson = await loadWordTemplateJson(input.templateJsonPath ?? inferTemplateJsonPath(templatePath));
+  const templateReplacementCount = await replaceTemplatePlaceholders(zip, data);
+  const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, input.templateCells ?? []);
   const renderedZip = zip;
   const renderMode = input.renderMode ?? "append";
-  const appendedMarkdown =
-    renderMode === "full_document"
-      ? replaceDocumentBodyWithGeneratedMarkdown(renderedZip, input.generatedMarkdown, facts)
-      : appendGeneratedMarkdown(renderedZip, input.generatedMarkdown, facts);
-  const embeddedDiagrams = await appendGeneratedDiagrams(renderedZip, input.diagrams ?? []);
+  let appendedMarkdown = false;
+  let templateAnchorsUsed: string[] = [];
+  if (renderMode === "full_document") {
+    appendedMarkdown = replaceDocumentBodyWithGeneratedMarkdown(renderedZip, input.generatedMarkdown, facts);
+  } else if (renderMode === "template_sections") {
+    const replacement = replaceMarkdownDocumentSections(renderedZip, input.generatedMarkdown, templateJson);
+    appendedMarkdown = replacement.replacementCount > 0;
+    templateAnchorsUsed = replacement.templateAnchorIds;
+    if (!appendedMarkdown) {
+      appendedMarkdown = appendGeneratedMarkdown(renderedZip, input.generatedMarkdown, facts);
+    }
+  } else {
+    appendedMarkdown = appendGeneratedMarkdown(renderedZip, input.generatedMarkdown, facts);
+  }
+  const embeddedDiagrams = await appendGeneratedDiagrams(renderedZip, input.diagrams ?? [], templateJson);
   await mkdir(dirname(outputPath), { recursive: true });
   const buffer = renderedZip.generate({ type: "nodebuffer", compression: "DEFLATE" });
   await writeFile(outputPath, buffer);
@@ -378,7 +569,9 @@ export async function writeSchemeDocxFromTemplate(
     appendedMarkdown,
     embeddedDiagrams,
     templateReplacementCount,
-    renderMode
+    templateCellReplacementCount,
+    renderMode,
+    templateAnchorsUsed
   };
 }
 
@@ -414,24 +607,9 @@ export async function validateGeneratedSchemeDocx(filePath: string): Promise<Sch
   });
 }
 
-export function replaceTemplatePlaceholders(zip: PizZip, data: TemplateData): number {
-  const replacements = buildPlaceholderReplacements(data);
-  if (!replacements.length) return 0;
-
-  let replacementCount = 0;
-  for (const fileName of getTemplateXmlFileNames(zip)) {
-    const file = zip.file(fileName);
-    const xml = file?.asText();
-    if (!xml) continue;
-
-    const result = replaceTextNodePlaceholders(xml, replacements);
-    if (result.count > 0) {
-      zip.file(fileName, result.xml);
-      replacementCount += result.count;
-    }
-  }
-
-  return replacementCount;
+export async function replaceTemplatePlaceholders(zip: PizZip, data: TemplateData): Promise<number> {
+  const docxTemplateData = buildDocxTemplatesData(data);
+  return Object.keys(docxTemplateData).length ? await renderDocxTemplateFields(zip, docxTemplateData) : 0;
 }
 
 function buildExplicitTemplateFieldOverrides(input: SchemeDocumentInput): TemplateData {
@@ -520,13 +698,11 @@ function normalizeTemplateFieldKey(rawKey: string): string {
 }
 
 function stripTemplateDelimiters(rawKey: string): string {
-  let key = rawKey.trim();
-  if (key.startsWith("${") && key.endsWith("}")) {
-    key = key.slice(2, -1);
-  } else if (key.startsWith("{") && key.endsWith("}")) {
-    key = key.slice(1, -1);
+  const key = rawKey.trim();
+  if (key.startsWith("{") && key.endsWith("}") && !key.startsWith("${")) {
+    return key.slice(1, -1).trim();
   }
-  return key.replace(/^\$/, "").trim();
+  return key;
 }
 
 function stringifyTemplateFieldValue(value: unknown): string {
@@ -585,9 +761,7 @@ const TEMPLATE_FIELD_ALIASES: Record<string, PlaceholderKey> = {
 
 function addTemplateValue(data: TemplateData, key: string, value: string): void {
   data[key] = value;
-  data[`$${key}`] = value;
   data[key.replace(/\s+/g, "")] = value;
-  data[`$${key.replace(/\s+/g, "")}`] = value;
 }
 
 interface PlaceholderReplacement {
@@ -605,18 +779,100 @@ interface TextNodeToken {
   textEnd: number;
 }
 
-function buildPlaceholderReplacements(data: TemplateData): PlaceholderReplacement[] {
-  const replacements = new Map<string, string>();
+function buildDocxTemplatesData(data: TemplateData): TemplateData {
+  const fields: TemplateData = {};
   for (const [key, value] of Object.entries(data)) {
-    if (!key || key.startsWith("$")) continue;
-    if (key === "方案生成正文" || key === "结构化事实摘要" || key === "当前时间") continue;
-    replacements.set(`{${key}}`, value);
-    replacements.set(`\${${key}}`, value);
+    if (!isRenderableTemplateFieldKey(key)) continue;
+    fields[key] = value;
+    const compactKey = key.replace(/\s+/g, "");
+    if (compactKey !== key) fields[compactKey] = value;
   }
+  return fields;
+}
 
+async function renderDocxTemplateFields(zip: PizZip, data: TemplateData): Promise<number> {
+  const before = countDocxTemplateFieldOccurrences(zip, data);
+  if (!before) return 0;
+
+  const preparedZip = new PizZip(zip.generate({ type: "nodebuffer", compression: "DEFLATE" }));
+  prepareDocxTemplateCommands(preparedZip, data);
+  const rendered = await createReport({
+    template: preparedZip.generate({ type: "nodebuffer", compression: "DEFLATE" }),
+    data: { data },
+    cmdDelimiter: ["{", "}"],
+    noSandbox: false,
+    failFast: true,
+    rejectNullish: false,
+    processLineBreaks: true,
+    errorHandler: (_error, rawCode) => `{${rawCode ?? ""}}`
+  });
+  replaceZipContents(zip, new PizZip(rendered));
+  return before - countDocxTemplateFieldOccurrences(zip, data);
+}
+
+function prepareDocxTemplateCommands(zip: PizZip, data: TemplateData): void {
+  const commandReplacements = buildDocxTemplateCommandReplacements(data);
+  if (!commandReplacements.length) return;
+  for (const fileName of getTemplateXmlFileNames(zip)) {
+    const file = zip.file(fileName);
+    const xml = file?.asText();
+    if (!xml) continue;
+
+    const result = replaceTextNodePlaceholders(xml, commandReplacements);
+    if (result.count > 0) zip.file(fileName, result.xml);
+  }
+}
+
+function buildDocxTemplateCommandReplacements(data: TemplateData): PlaceholderReplacement[] {
+  const replacements = new Map<string, string>();
+  for (const key of Object.keys(data)) {
+    if (!isRenderableTemplateFieldKey(key)) continue;
+    replacements.set(`{${key}}`, `{INS data[${JSON.stringify(key)}]}`);
+  }
   return Array.from(replacements, ([placeholder, value]) => ({ placeholder, value })).sort(
     (left, right) => right.placeholder.length - left.placeholder.length
   );
+}
+
+function countDocxTemplateFieldOccurrences(zip: PizZip, data: TemplateData): number {
+  let count = 0;
+  for (const fileName of getTemplateXmlFileNames(zip)) {
+    const text = extractTextFromXml(zip.file(fileName)?.asText() ?? "");
+    if (!text) continue;
+    for (const key of Object.keys(data)) {
+      count += countOccurrences(text, `{${key}}`);
+    }
+  }
+  return count;
+}
+
+function replaceZipContents(target: PizZip, source: PizZip): void {
+  for (const fileName of Object.keys(target.files)) {
+    target.remove(fileName);
+  }
+
+  for (const [fileName, file] of Object.entries(source.files)) {
+    if (file.dir) {
+      target.folder(fileName.replace(/\/$/, ""));
+      continue;
+    }
+    target.file(fileName, file.asUint8Array(), { binary: true });
+  }
+}
+
+function countOccurrences(source: string, needle: string): number {
+  if (!source || !needle) return 0;
+  let count = 0;
+  let index = source.indexOf(needle);
+  while (index >= 0) {
+    count += 1;
+    index = source.indexOf(needle, index + needle.length);
+  }
+  return count;
+}
+
+function isRenderableTemplateFieldKey(key: string): boolean {
+  return Boolean(key) && !key.startsWith("$") && key !== "方案生成正文" && key !== "结构化事实摘要" && key !== "当前时间";
 }
 
 function getTemplateXmlFileNames(zip: PizZip): string[] {
@@ -748,6 +1004,7 @@ interface WordBodyBlock {
   xml: string;
   text: string;
   styleId: string;
+  sdtTag?: string;
   headingLevel?: number;
   headingNumber?: string;
 }
@@ -755,6 +1012,13 @@ interface WordBodyBlock {
 interface SectionReplacementSummary {
   matchedHeading: string;
   replacementCount: number;
+  templateAnchorId?: string;
+}
+
+interface DocumentSectionsReplacementSummary {
+  matchedHeadings: string[];
+  replacementCount: number;
+  templateAnchorIds: string[];
 }
 
 interface MarkdownSectionSegment {
@@ -765,10 +1029,21 @@ interface MarkdownSectionSegment {
   hasChildren: boolean;
 }
 
+interface SectionReplacementAnchor {
+  target: WordBodyBlock;
+  replacementStartIndex: number;
+  replacementEndIndex: number;
+  insertStartOffset?: number;
+  insertEndOffset?: number;
+  sdtBlock?: WordBodyBlock;
+  templateSection?: WordTemplateSection;
+}
+
 function replaceDocumentSectionWithMarkdown(
   zip: PizZip,
   section: string,
-  markdown: string
+  markdown: string,
+  templateJson?: WordTemplateJson
 ): SectionReplacementSummary | undefined {
   const compactedMarkdown = compactText(markdown, 120000);
   if (!compactedMarkdown.trim()) return undefined;
@@ -783,54 +1058,154 @@ function replaceDocumentSectionWithMarkdown(
 
   const bodyStart = bodyOpen.index + bodyOpen[0].length;
   const bodyXml = documentXml.slice(bodyStart, bodyEnd);
-  const preciseReplacements = replaceNumberedMarkdownSections(zip, section, markdown);
+  const preciseReplacements = replaceNumberedMarkdownSections(zip, section, markdown, templateJson);
   if (preciseReplacements.length) {
     return {
       matchedHeading: preciseReplacements.map((replacement) => replacement.matchedHeading).join("、"),
-      replacementCount: preciseReplacements.reduce((total, replacement) => total + replacement.replacementCount, 0)
+      replacementCount: preciseReplacements.reduce((total, replacement) => total + replacement.replacementCount, 0),
+      templateAnchorId: preciseReplacements.map((replacement) => replacement.templateAnchorId).find(Boolean)
     };
   }
 
   const blocks = collectWordBodyBlocks(bodyXml, buildStyleHeadingLevels(zip));
-  const target = findSectionHeadingBlock(blocks, section);
-  if (!target || !target.headingLevel) return undefined;
+  const anchor = findSectionReplacementAnchor(blocks, section, templateJson);
+  if (!anchor) return undefined;
 
-  const replacementStartIndex = target.index + 1;
-  const replacementEndIndex = findSectionEndBlockIndex(blocks, target.index, target.headingLevel);
-  const insertStart = blocks[replacementStartIndex]?.start ?? target.end;
-  const insertEnd = blocks[replacementEndIndex]?.start ?? bodyXml.length;
-  const markdownBody = stripLeadingMatchingMarkdownHeading(compactedMarkdown, section, target.text);
-  const replacementXml = buildSectionReplacementXml(markdownBody, blocks, target);
-  const nextBodyXml = `${bodyXml.slice(0, insertStart)}${replacementXml}${bodyXml.slice(insertEnd)}`;
+  const insertStart = anchor.insertStartOffset ?? blocks[anchor.replacementStartIndex]?.start ?? anchor.target.end;
+  const insertEnd = anchor.insertEndOffset ?? blocks[anchor.replacementEndIndex]?.start ?? bodyXml.length;
+  const markdownBody = stripLeadingMatchingMarkdownHeading(compactedMarkdown, section, anchor.target.text);
+  const replacementXml = buildSectionReplacementXml(markdownBody, blocks, anchor.target, anchor.sdtBlock);
+  const anchoredReplacementXml = anchor.sdtBlock ? replaceSdtContentXml(anchor.sdtBlock.xml, replacementXml) : replacementXml;
+  const nextBodyXml = `${bodyXml.slice(0, insertStart)}${anchoredReplacementXml}${bodyXml.slice(insertEnd)}`;
   const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
   zip.file("word/document.xml", nextXml);
 
   return {
-    matchedHeading: formatMatchedHeading(target),
-    replacementCount: Math.max(0, replacementEndIndex - replacementStartIndex)
+    matchedHeading: formatMatchedHeading(anchor.target),
+    replacementCount: Math.max(0, anchor.replacementEndIndex - anchor.replacementStartIndex),
+    templateAnchorId: anchor.templateSection?.id
   };
 }
 
 function replaceNumberedMarkdownSections(
   zip: PizZip,
   section: string,
-  markdown: string
+  markdown: string,
+  templateJson?: WordTemplateJson
 ): SectionReplacementSummary[] {
   const segments = selectPreciseMarkdownSectionSegments(section, extractMarkdownSectionSegments(markdown));
   const replacements: SectionReplacementSummary[] = [];
 
   for (const segment of segments.sort(compareSectionNumbersDescending)) {
-    const replacement = replaceSingleDocumentSectionWithMarkdown(zip, segment.number, segment.body);
+    const replacement = replaceSingleDocumentSectionWithMarkdown(zip, segment.number, segment.body, templateJson);
     if (replacement) replacements.push(replacement);
   }
 
   return replacements.reverse();
 }
 
+function replaceMarkdownDocumentSections(
+  zip: PizZip,
+  markdown: string,
+  templateJson?: WordTemplateJson
+): DocumentSectionsReplacementSummary {
+  const segments = extractMarkdownSectionSegments(markdown).filter((segment) => segment.body.trim() && !segment.hasChildren);
+  const replacements: SectionReplacementSummary[] = [];
+
+  for (const segment of segments.sort(compareSectionNumbersDescending)) {
+    const replacement = replaceSingleDocumentSectionWithMarkdown(zip, segment.number, segment.body, templateJson);
+    if (replacement) replacements.push(replacement);
+  }
+
+  const orderedReplacements = replacements.reverse();
+  return {
+    matchedHeadings: orderedReplacements.map((replacement) => replacement.matchedHeading),
+    replacementCount: orderedReplacements.reduce((total, replacement) => total + replacement.replacementCount, 0),
+    templateAnchorIds: orderedReplacements
+      .map((replacement) => replacement.templateAnchorId)
+      .filter((id): id is string => Boolean(id))
+  };
+}
+
+function replaceDocumentSectionsWithMarkdown(
+  zip: PizZip,
+  sections: WordSectionContentInput[],
+  templateJson?: WordTemplateJson
+): WordSectionBatchReplacementResult["sections"] {
+  const documentFile = zip.file("word/document.xml");
+  const documentXml = documentFile?.asText();
+  if (!documentXml) return [];
+
+  const bodyOpen = documentXml.match(/<w:body\b[^>]*>/);
+  const bodyEnd = documentXml.lastIndexOf("</w:body>");
+  if (!bodyOpen || bodyOpen.index === undefined || bodyEnd < 0) return [];
+
+  const bodyStart = bodyOpen.index + bodyOpen[0].length;
+  const bodyXml = documentXml.slice(bodyStart, bodyEnd);
+  const blocks = collectWordBodyBlocks(bodyXml, buildStyleHeadingLevels(zip));
+  const xmlReplacements: Array<{
+    section: string;
+    start: number;
+    end: number;
+    xml: string;
+    summary: WordSectionBatchReplacementResult["sections"][number];
+  }> = [];
+
+  for (const item of sections) {
+    const compactedMarkdown = compactText(item.content, 120000);
+    if (!compactedMarkdown.trim()) continue;
+
+    const anchor = findSectionReplacementAnchor(blocks, item.section, templateJson);
+    if (!anchor) throw new Error(`未找到 Word 章节：${item.section}`);
+
+    const insertStart = anchor.insertStartOffset ?? blocks[anchor.replacementStartIndex]?.start ?? anchor.target.end;
+    const insertEnd = anchor.insertEndOffset ?? blocks[anchor.replacementEndIndex]?.start ?? bodyXml.length;
+    const markdownBody = stripLeadingMatchingMarkdownHeading(compactedMarkdown, item.section, anchor.target.text);
+    const replacementXml = buildSectionReplacementXml(markdownBody, blocks, anchor.target, anchor.sdtBlock);
+    const anchoredReplacementXml = anchor.sdtBlock ? replaceSdtContentXml(anchor.sdtBlock.xml, replacementXml) : replacementXml;
+    xmlReplacements.push({
+      section: item.section,
+      start: insertStart,
+      end: insertEnd,
+      xml: anchoredReplacementXml,
+      summary: {
+        section: item.section,
+        matchedHeading: formatMatchedHeading(anchor.target),
+        replacementCount: Math.max(0, anchor.replacementEndIndex - anchor.replacementStartIndex),
+        templateAnchorId: anchor.templateSection?.id
+      }
+    });
+  }
+
+  assertNonOverlappingSectionReplacements(xmlReplacements);
+  let nextBodyXml = bodyXml;
+  for (const replacement of [...xmlReplacements].sort((left, right) => right.start - left.start)) {
+    nextBodyXml = `${nextBodyXml.slice(0, replacement.start)}${replacement.xml}${nextBodyXml.slice(replacement.end)}`;
+  }
+
+  const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
+  zip.file("word/document.xml", nextXml);
+  return xmlReplacements.map((replacement) => replacement.summary);
+}
+
+function assertNonOverlappingSectionReplacements(
+  replacements: Array<{ section: string; start: number; end: number }>
+): void {
+  const sorted = [...replacements].sort((left, right) => left.start - right.start);
+  for (let index = 1; index < sorted.length; index += 1) {
+    const previous = sorted[index - 1];
+    const current = sorted[index];
+    if (current.start < previous.end) {
+      throw new Error(`Word 章节锚点范围重叠：${previous.section} / ${current.section}`);
+    }
+  }
+}
+
 function replaceSingleDocumentSectionWithMarkdown(
   zip: PizZip,
   section: string,
-  markdown: string
+  markdown: string,
+  templateJson?: WordTemplateJson
 ): SectionReplacementSummary | undefined {
   const compactedMarkdown = compactText(markdown, 120000);
   if (!compactedMarkdown.trim()) return undefined;
@@ -846,22 +1221,22 @@ function replaceSingleDocumentSectionWithMarkdown(
   const bodyStart = bodyOpen.index + bodyOpen[0].length;
   const bodyXml = documentXml.slice(bodyStart, bodyEnd);
   const blocks = collectWordBodyBlocks(bodyXml, buildStyleHeadingLevels(zip));
-  const target = findSectionHeadingBlock(blocks, section);
-  if (!target || !target.headingLevel) return undefined;
+  const anchor = findSectionReplacementAnchor(blocks, section, templateJson);
+  if (!anchor) return undefined;
 
-  const replacementStartIndex = target.index + 1;
-  const replacementEndIndex = findSectionEndBlockIndex(blocks, target.index, target.headingLevel);
-  const insertStart = blocks[replacementStartIndex]?.start ?? target.end;
-  const insertEnd = blocks[replacementEndIndex]?.start ?? bodyXml.length;
-  const markdownBody = stripLeadingMatchingMarkdownHeading(compactedMarkdown, section, target.text);
-  const replacementXml = buildSectionReplacementXml(markdownBody, blocks, target);
-  const nextBodyXml = `${bodyXml.slice(0, insertStart)}${replacementXml}${bodyXml.slice(insertEnd)}`;
+  const insertStart = anchor.insertStartOffset ?? blocks[anchor.replacementStartIndex]?.start ?? anchor.target.end;
+  const insertEnd = anchor.insertEndOffset ?? blocks[anchor.replacementEndIndex]?.start ?? bodyXml.length;
+  const markdownBody = stripLeadingMatchingMarkdownHeading(compactedMarkdown, section, anchor.target.text);
+  const replacementXml = buildSectionReplacementXml(markdownBody, blocks, anchor.target, anchor.sdtBlock);
+  const anchoredReplacementXml = anchor.sdtBlock ? replaceSdtContentXml(anchor.sdtBlock.xml, replacementXml) : replacementXml;
+  const nextBodyXml = `${bodyXml.slice(0, insertStart)}${anchoredReplacementXml}${bodyXml.slice(insertEnd)}`;
   const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
   zip.file("word/document.xml", nextXml);
 
   return {
-    matchedHeading: formatMatchedHeading(target),
-    replacementCount: Math.max(0, replacementEndIndex - replacementStartIndex)
+    matchedHeading: formatMatchedHeading(anchor.target),
+    replacementCount: Math.max(0, anchor.replacementEndIndex - anchor.replacementStartIndex),
+    templateAnchorId: anchor.templateSection?.id
   };
 }
 
@@ -949,23 +1324,26 @@ function compareSectionNumbersDescending(left: MarkdownSectionSegment, right: Ma
 
 function collectWordBodyBlocks(bodyXml: string, headingLevels: Map<string, number>): WordBodyBlock[] {
   const blocks: WordBodyBlock[] = [];
-  const pattern = /<w:(p|tbl|sdt)\b[\s\S]*?<\/w:\1>|<w:sectPr\b[\s\S]*?<\/w:sectPr>/g;
   const counters: number[] = [];
-  let match: RegExpExecArray | null;
+  let cursor = 0;
 
-  while ((match = pattern.exec(bodyXml))) {
-    const xml = match[0];
-    const tagName = match[1] ?? "sectPr";
+  while (cursor < bodyXml.length) {
+    const next = findNextBodyBlock(bodyXml, cursor);
+    if (!next) break;
+
+    const { xml, tagName, start, end } = next;
     const styleId = tagName === "p" ? extractParagraphStyleId(xml) : "";
     const headingLevel = tagName === "p" ? extractParagraphHeadingLevel(xml, styleId, headingLevels) : undefined;
+    const sdtTag = tagName === "sdt" ? extractSdtTag(xml) : undefined;
     const block: WordBodyBlock = {
       index: blocks.length,
-      start: match.index,
-      end: match.index + xml.length,
+      start,
+      end,
       tagName,
       xml,
       text: extractVisibleWordText(xml),
       styleId,
+      ...(sdtTag ? { sdtTag } : {}),
       headingLevel
     };
 
@@ -976,9 +1354,27 @@ function collectWordBodyBlocks(bodyXml: string, headingLevels: Map<string, numbe
     }
 
     blocks.push(block);
+    cursor = end;
   }
 
   return blocks;
+}
+
+function findNextBodyBlock(
+  bodyXml: string,
+  cursor: number
+): { xml: string; tagName: string; start: number; end: number } | undefined {
+  const candidates = [
+    { tagName: "p", start: findNextElementStart(bodyXml, "w:p", cursor) },
+    { tagName: "tbl", start: findNextElementStart(bodyXml, "w:tbl", cursor) },
+    { tagName: "sdt", start: findNextElementStart(bodyXml, "w:sdt", cursor) },
+    { tagName: "sectPr", start: findNextElementStart(bodyXml, "w:sectPr", cursor) }
+  ].filter((candidate) => candidate.start >= 0);
+
+  if (!candidates.length) return undefined;
+  const candidate = candidates.sort((left, right) => left.start - right.start)[0];
+  const element = readBalancedWordElement(bodyXml, candidate.start, `w:${candidate.tagName}`);
+  return element ? { ...element, tagName: candidate.tagName } : undefined;
 }
 
 function buildStyleHeadingLevels(zip: PizZip): Map<string, number> {
@@ -1006,6 +1402,111 @@ function buildStyleHeadingLevels(zip: PizZip): Map<string, number> {
   return levels;
 }
 
+function findNextElementStart(xml: string, tagName: string, cursor: number): number {
+  const pattern = new RegExp(`<${escapeRegExp(tagName)}(?=[\\s>/])`, "g");
+  pattern.lastIndex = cursor;
+  const match = pattern.exec(xml);
+  return match ? match.index : -1;
+}
+
+function readBalancedWordElement(
+  xml: string,
+  start: number,
+  tagName: string
+): { xml: string; start: number; end: number } | undefined {
+  const openTagEnd = xml.indexOf(">", start);
+  if (openTagEnd < 0) return undefined;
+
+  const openTag = xml.slice(start, openTagEnd + 1);
+  if (openTag.endsWith("/>")) return { xml: openTag, start, end: openTagEnd + 1 };
+
+  const closePattern = `</${tagName}>`;
+  let cursor = openTagEnd + 1;
+  let depth = 1;
+
+  while (cursor < xml.length) {
+    const nextOpen = findNextElementStart(xml, tagName, cursor);
+    const nextClose = xml.indexOf(closePattern, cursor);
+    if (nextClose < 0) return undefined;
+
+    if (nextOpen >= 0 && nextOpen < nextClose) {
+      const nestedOpenEnd = xml.indexOf(">", nextOpen);
+      if (nestedOpenEnd < 0) return undefined;
+      const nestedOpenTag = xml.slice(nextOpen, nestedOpenEnd + 1);
+      if (!nestedOpenTag.endsWith("/>")) depth += 1;
+      cursor = nestedOpenEnd + 1;
+      continue;
+    }
+
+    depth -= 1;
+    cursor = nextClose + closePattern.length;
+    if (depth === 0) return { xml: xml.slice(start, cursor), start, end: cursor };
+  }
+
+  return undefined;
+}
+
+function extractSdtTag(xml: string): string {
+  const contentStart = xml.indexOf("<w:sdtContent");
+  const propertiesXml = contentStart >= 0 ? xml.slice(0, contentStart) : xml;
+  return propertiesXml.match(/<w:tag\b[^>]*\bw:val="([^"]+)"/)?.[1] ?? "";
+}
+
+function findSdtElementByTag(
+  xml: string,
+  tag: string,
+  baseOffset = 0
+): { xml: string; start: number; end: number } | undefined {
+  if (!tag) return undefined;
+  let cursor = 0;
+
+  while (cursor < xml.length) {
+    const start = findNextElementStart(xml, "w:sdt", cursor);
+    if (start < 0) return undefined;
+
+    const element = readBalancedWordElement(xml, start, "w:sdt");
+    if (!element) return undefined;
+    if (extractSdtTag(element.xml) === tag) {
+      return {
+        xml: element.xml,
+        start: baseOffset + element.start,
+        end: baseOffset + element.end
+      };
+    }
+
+    const contentRange = getSdtContentRange(element.xml);
+    const nested = contentRange
+      ? findSdtElementByTag(
+          element.xml.slice(contentRange.start, contentRange.end),
+          tag,
+          baseOffset + element.start + contentRange.start
+        )
+      : undefined;
+    if (nested) return nested;
+    cursor = element.end;
+  }
+
+  return undefined;
+}
+
+function extractSdtContentXml(xml: string): string {
+  const range = getSdtContentRange(xml);
+  return range ? xml.slice(range.start, range.end) : "";
+}
+
+function replaceSdtContentXml(sdtXml: string, contentXml: string): string {
+  const range = getSdtContentRange(sdtXml);
+  if (!range) return contentXml;
+  return `${sdtXml.slice(0, range.start)}${contentXml}${sdtXml.slice(range.end)}`;
+}
+
+function getSdtContentRange(xml: string): { start: number; end: number } | undefined {
+  const match = xml.match(/<w:sdtContent\b[^>]*>/);
+  const end = xml.lastIndexOf("</w:sdtContent>");
+  if (!match || match.index === undefined || end < 0) return undefined;
+  return { start: match.index + match[0].length, end };
+}
+
 function extractParagraphStyleId(paragraphXml: string): string {
   return paragraphXml.match(/<w:pStyle\b[^>]*\bw:val="([^"]+)"/)?.[1] ?? "";
 }
@@ -1030,21 +1531,340 @@ function extractVisibleWordText(xml: string): string {
     .trim();
 }
 
-function findSectionHeadingBlock(blocks: WordBodyBlock[], section: string): WordBodyBlock | undefined {
+function findSectionReplacementAnchor(
+  blocks: WordBodyBlock[],
+  section: string,
+  templateJson?: WordTemplateJson
+): SectionReplacementAnchor | undefined {
+  const templateSection = findTemplateSection(templateJson, section);
+  return templateSection ? buildTemplateSectionReplacementAnchor(blocks, templateSection) : undefined;
+}
+
+function findTemplateSection(templateJson: WordTemplateJson | undefined, section: string): WordTemplateSection | undefined {
   const targetNumber = parseSectionNumber(section);
   const targetTitle = normalizeHeadingLookup(section);
-  return blocks.find((block) => {
-    if (!block.headingLevel || !block.text.trim()) return false;
-    if (targetNumber && block.headingNumber === targetNumber) return true;
+  const targetAnchorId = normalizeTemplateAnchorId(section);
+  const sections = templateJson?.sections ?? [];
 
-    const blockTitle = normalizeHeadingLookup(block.text);
-    const combined = normalizeHeadingLookup(formatMatchedHeading(block));
-    return Boolean(targetTitle && (blockTitle === targetTitle || combined === targetTitle || blockTitle.includes(targetTitle)));
+  if (targetAnchorId) {
+    const exact = sections.find((item) => normalizeTemplateAnchorId(item.id) === targetAnchorId);
+    if (exact) return exact;
+  }
+
+  if (targetNumber) {
+    const exact = sections.find((item) => item.number === targetNumber);
+    if (exact) return exact;
+  }
+
+  if (!targetTitle) return undefined;
+  const titleMatches = sections.filter((item) => {
+    const title = normalizeHeadingLookup(item.title);
+    const combined = normalizeHeadingLookup(`${item.number} ${item.title}`);
+    const dotted = normalizeHeadingLookup(`${item.number}.${item.title}`);
+    return title === targetTitle || combined === targetTitle || dotted === targetTitle;
   });
+  return titleMatches.length === 1 ? titleMatches[0] : undefined;
+}
+
+function buildTemplateSectionReplacementAnchor(
+  blocks: WordBodyBlock[],
+  templateSection: WordTemplateSection
+): SectionReplacementAnchor | undefined {
+  const sectionNumber = parseSectionNumberFromTemplateId(templateSection.id) || templateSection.number;
+  const headingLevel = templateSection.headingLevel ?? (sectionNumber.split(".").filter(Boolean).length || 1);
+  const sdtBlock = findSdtBlockByTag(blocks, getSectionBodyAnchorTag(templateSection));
+  if (sdtBlock) {
+    const target = findPreviousHeadingBlock(blocks, sdtBlock.index, headingLevel) ?? {
+      ...sdtBlock,
+      tagName: "p",
+      headingLevel,
+      headingNumber: sectionNumber,
+      text: templateSection.title
+    };
+
+    return {
+      target: {
+        ...target,
+        headingNumber: sectionNumber,
+        headingLevel,
+        text: templateSection.title || target.text
+      },
+      replacementStartIndex: sdtBlock.index,
+      replacementEndIndex: sdtBlock.index + 1,
+      insertStartOffset: sdtBlock.start,
+      insertEndOffset: sdtBlock.end,
+      sdtBlock,
+      templateSection
+    };
+  }
+
+  const target =
+    findTemplateSectionHeadingByBlockIndex(blocks, templateSection, sectionNumber, headingLevel) ??
+    findTemplateSectionHeadingByNumber(blocks, sectionNumber, headingLevel, templateSection.title);
+  if (!target) return undefined;
+
+  const replacementRange =
+    buildTemplateSectionStaticReplacementRange(blocks, target, templateSection) ??
+    buildTemplateSectionDynamicReplacementRange(blocks, target);
+  if (!replacementRange) return undefined;
+
+  return {
+    target: {
+      ...target,
+      headingNumber: sectionNumber,
+      headingLevel,
+      text: templateSection.title || target.text
+    },
+    replacementStartIndex: replacementRange.startIndex,
+    replacementEndIndex: replacementRange.endIndex,
+    insertStartOffset: replacementRange.insertStartOffset,
+    insertEndOffset: replacementRange.insertEndOffset,
+    templateSection
+  };
+}
+
+function getSectionBodyAnchorTag(section: WordTemplateSection): string {
+  return section.anchors?.body?.tag || `ps:section:${section.id}:body`;
+}
+
+function findSdtBlockByTag(blocks: WordBodyBlock[], tag: string): WordBodyBlock | undefined {
+  if (!tag) return undefined;
+  return blocks.find((block) => block.tagName === "sdt" && block.sdtTag === tag);
+}
+
+function findPreviousHeadingBlock(
+  blocks: WordBodyBlock[],
+  beforeIndex: number,
+  headingLevel?: number
+): WordBodyBlock | undefined {
+  for (let index = beforeIndex - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (!block?.headingLevel) continue;
+    if (!headingLevel || block.headingLevel <= headingLevel) return block;
+  }
+  return undefined;
+}
+
+function findTemplateSectionHeadingByBlockIndex(
+  blocks: WordBodyBlock[],
+  templateSection: WordTemplateSection,
+  sectionNumber: string,
+  headingLevel: number
+): WordBodyBlock | undefined {
+  const block = blocks[templateSection.headingBlock];
+  if (!block || block.tagName !== "p" || !block.headingLevel) return undefined;
+  const expectedTitle = normalizeHeadingLookup(templateSection.title);
+  const actualTitle = normalizeHeadingLookup(block.text);
+  const matchesNumber = !sectionNumber || block.headingNumber === sectionNumber;
+  const matchesLevel = !headingLevel || block.headingLevel === headingLevel;
+  const matchesTitle = !expectedTitle || actualTitle === expectedTitle || actualTitle.includes(expectedTitle);
+  return matchesNumber && matchesLevel && matchesTitle ? block : undefined;
+}
+
+function findTemplateSectionHeadingByNumber(
+  blocks: WordBodyBlock[],
+  sectionNumber: string,
+  headingLevel: number,
+  title: string
+): WordBodyBlock | undefined {
+  const normalizedTitle = normalizeHeadingLookup(title);
+  return blocks.find((block) => {
+    if (block.tagName !== "p" || !block.headingLevel) return false;
+    if (sectionNumber && block.headingNumber !== sectionNumber) return false;
+    if (headingLevel && block.headingLevel !== headingLevel) return false;
+    if (!normalizedTitle) return true;
+    const blockTitle = normalizeHeadingLookup(block.text);
+    return blockTitle === normalizedTitle || blockTitle.includes(normalizedTitle);
+  });
+}
+
+function buildTemplateSectionStaticReplacementRange(
+  blocks: WordBodyBlock[],
+  target: WordBodyBlock,
+  templateSection: WordTemplateSection
+): { startIndex: number; endIndex: number; insertStartOffset: number; insertEndOffset: number } | undefined {
+  if (target.index !== templateSection.headingBlock) return undefined;
+  const [directStart, directEnd] = templateSection.directBodyRange ?? templateSection.bodyRange;
+  const startBlock = blocks[directStart];
+  const afterEndBlock = blocks[directEnd + 1];
+  if (!startBlock || directStart <= target.index || directEnd < directStart - 1) return undefined;
+
+  return {
+    startIndex: directStart,
+    endIndex: directEnd + 1,
+    insertStartOffset: startBlock.start,
+    insertEndOffset: afterEndBlock?.start ?? blocks.at(-1)?.end ?? target.end
+  };
+}
+
+function buildTemplateSectionDynamicReplacementRange(
+  blocks: WordBodyBlock[],
+  target: WordBodyBlock
+): { startIndex: number; endIndex: number; insertStartOffset: number; insertEndOffset: number } | undefined {
+  const startIndex = target.index + 1;
+  const endBlock = blocks.slice(startIndex).find((block) => block.headingLevel || block.tagName === "sectPr");
+  const endIndex = endBlock?.index ?? blocks.length;
+  const insertStartOffset = blocks[startIndex]?.start ?? target.end;
+  const insertEndOffset = endBlock?.start ?? blocks.at(-1)?.end ?? target.end;
+
+  return {
+    startIndex,
+    endIndex,
+    insertStartOffset,
+    insertEndOffset
+  };
+}
+
+function replaceTemplateTableCells(
+  zip: PizZip,
+  templateJson: WordTemplateJson | undefined,
+  replacements: TemplateCellReplacementInput[]
+): number {
+  if (!templateJson?.tables?.length || !replacements.length) return 0;
+
+  let replacementCount = 0;
+  for (const replacement of replacements) {
+    if (!replacement.value.trim()) continue;
+    if (replaceSingleTemplateTableCell(zip, templateJson, replacement)) replacementCount += 1;
+  }
+  return replacementCount;
+}
+
+function replaceSingleTemplateTableCell(
+  zip: PizZip,
+  templateJson: WordTemplateJson,
+  replacement: TemplateCellReplacementInput
+): boolean {
+  const table = findTemplateTable(templateJson, replacement);
+  if (!table) return false;
+
+  const cellIndex = resolveTemplateCellIndex(table, replacement);
+  if (cellIndex < 0 || replacement.rowIndex < 0) return false;
+
+  const documentFile = zip.file("word/document.xml");
+  const documentXml = documentFile?.asText();
+  if (!documentXml) return false;
+
+  const bodyOpen = documentXml.match(/<w:body\b[^>]*>/);
+  const bodyEnd = documentXml.lastIndexOf("</w:body>");
+  if (!bodyOpen || bodyOpen.index === undefined || bodyEnd < 0) return false;
+
+  const bodyStart = bodyOpen.index + bodyOpen[0].length;
+  const bodyXml = documentXml.slice(bodyStart, bodyEnd);
+  const anchoredTable = findSdtElementByTag(bodyXml, table.anchors?.table?.tag || `ps:table:${table.id}`);
+  if (anchoredTable) {
+    const nextTableXml = replaceTableCellXml(anchoredTable.xml, replacement.rowIndex, cellIndex, replacement.value);
+    if (!nextTableXml || nextTableXml === anchoredTable.xml) return false;
+
+    const nextBodyXml = `${bodyXml.slice(0, anchoredTable.start)}${nextTableXml}${bodyXml.slice(anchoredTable.end)}`;
+    const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
+    zip.file("word/document.xml", nextXml);
+    return true;
+  }
+
+  const blocks = collectWordBodyBlocks(bodyXml, buildStyleHeadingLevels(zip));
+  const tableBlock = findTemplateTableBlock(blocks, table);
+  if (!tableBlock) return false;
+
+  const nextTableXml = replaceTableCellXml(tableBlock.xml, replacement.rowIndex, cellIndex, replacement.value);
+  if (!nextTableXml || nextTableXml === tableBlock.xml) return false;
+
+  const nextBodyXml = `${bodyXml.slice(0, tableBlock.start)}${nextTableXml}${bodyXml.slice(tableBlock.end)}`;
+  const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
+  zip.file("word/document.xml", nextXml);
+  return true;
+}
+
+function findTemplateTable(
+  templateJson: WordTemplateJson,
+  replacement: TemplateCellReplacementInput
+): WordTemplateTable | undefined {
+  if (replacement.tableId) {
+    const table = templateJson.tables?.find((item) => item.id === replacement.tableId);
+    if (table) return table;
+  }
+
+  const caption = normalizeHeadingLookup(replacement.caption ?? "");
+  if (!caption) return undefined;
+  return templateJson.tables?.find((item) => normalizeHeadingLookup(item.caption ?? "") === caption);
+}
+
+function resolveTemplateCellIndex(table: WordTemplateTable, replacement: TemplateCellReplacementInput): number {
+  if (typeof replacement.cellIndex === "number" && Number.isInteger(replacement.cellIndex)) return replacement.cellIndex;
+  if (typeof replacement.columnIndex !== "number" || !Number.isInteger(replacement.columnIndex)) return -1;
+
+  const row = table.rows?.find((item) => item.index === replacement.rowIndex);
+  return row?.cells.find((cell) => cell.columnIndex === replacement.columnIndex)?.cellIndex ?? -1;
+}
+
+function findTemplateTableBlock(
+  blocks: WordBodyBlock[],
+  table: WordTemplateTable
+): WordBodyBlock | undefined {
+  const anchoredBlock = findSdtBlockByTag(blocks, table.anchors?.table?.tag || `ps:table:${table.id}`);
+  if (anchoredBlock && /<w:tbl\b/.test(anchoredBlock.xml)) return anchoredBlock;
+
+  const indexedBlock = blocks[table.block];
+  if (indexedBlock?.tagName === "tbl") return indexedBlock;
+
+  const captionBlock = findTemplateCaptionBlock(blocks, table.caption, "table");
+  if (captionBlock) {
+    const previous = blocks[captionBlock.index - 1];
+    if (previous?.tagName === "tbl") return previous;
+    const next = blocks[captionBlock.index + 1];
+    if (next?.tagName === "tbl") return next;
+  }
+
+  const ordinal = Number(table.id.match(/^table_(\d+)/)?.[1]);
+  if (Number.isInteger(ordinal) && ordinal > 0) {
+    return blocks.filter((block) => block.tagName === "tbl")[ordinal - 1];
+  }
+  return undefined;
+}
+
+function findTemplateCaptionBlock(
+  blocks: WordBodyBlock[],
+  caption: string | undefined,
+  type: "table" | "figure"
+): WordBodyBlock | undefined {
+  const normalizedCaption = normalizeHeadingLookup(caption ?? "");
+  if (!normalizedCaption) return undefined;
+  const prefix = type === "table" ? "表" : "图";
+  return blocks.find((block) => block.tagName === "p" && block.text.startsWith(prefix) && normalizeHeadingLookup(block.text) === normalizedCaption);
+}
+
+function replaceTableCellXml(tableXml: string, rowIndex: number, cellIndex: number, value: string): string | undefined {
+  const rows = Array.from(tableXml.matchAll(/<w:tr\b[\s\S]*?<\/w:tr>/g));
+  const rowMatch = rows[rowIndex];
+  if (!rowMatch || rowMatch.index === undefined) return undefined;
+
+  const rowXml = rowMatch[0];
+  const cells = Array.from(rowXml.matchAll(/<w:tc\b[\s\S]*?<\/w:tc>/g));
+  const cellMatch = cells[cellIndex];
+  if (!cellMatch || cellMatch.index === undefined) return undefined;
+
+  const nextCellXml = replaceWordTableCellText(cellMatch[0], value);
+  const nextRowXml = `${rowXml.slice(0, cellMatch.index)}${nextCellXml}${rowXml.slice(cellMatch.index + cellMatch[0].length)}`;
+  return `${tableXml.slice(0, rowMatch.index)}${nextRowXml}${tableXml.slice(rowMatch.index + rowXml.length)}`;
+}
+
+function replaceWordTableCellText(cellXml: string, value: string): string {
+  const cellProperties = cellXml.match(/<w:tcPr\b[\s\S]*?<\/w:tcPr>/)?.[0] ?? "";
+  const paragraphTemplate = cellXml.match(/<w:p\b[\s\S]*?<\/w:p>/)?.[0] ?? "<w:p><w:r><w:t></w:t></w:r></w:p>";
+  return ["<w:tc>", cellProperties, buildWordParagraphFromTemplate(paragraphTemplate, value), "</w:tc>"].join("");
 }
 
 function parseSectionNumber(section: string): string {
   return section.trim().match(/^(\d+(?:\.\d+)*)(?:[.．、\s]|$)/)?.[1] ?? "";
+}
+
+function parseSectionNumberFromTemplateId(value: string): string {
+  const match = value.trim().toLowerCase().match(/^sec_(\d+(?:_\d+)*)$/);
+  return match?.[1]?.replace(/_/g, ".") ?? "";
+}
+
+function normalizeTemplateAnchorId(value: string): string {
+  return value.trim().toLowerCase().match(/^sec_\d+(?:_\d+)*$/)?.[0] ?? "";
 }
 
 function normalizeHeadingLookup(value: string): string {
@@ -1054,16 +1874,6 @@ function normalizeHeadingLookup(value: string): string {
     .replace(/[\s\t　:：,，.。;；、\-—_]/g, "")
     .toLowerCase()
     .trim();
-}
-
-function findSectionEndBlockIndex(blocks: WordBodyBlock[], headingIndex: number, headingLevel: number): number {
-  const nextHeadingIndex = blocks.findIndex(
-    (block, index) => index > headingIndex && Boolean(block.headingLevel && block.headingLevel <= headingLevel)
-  );
-  if (nextHeadingIndex >= 0) return nextHeadingIndex;
-
-  const sectionPropertiesIndex = blocks.findIndex((block, index) => index > headingIndex && block.tagName === "sectPr");
-  return sectionPropertiesIndex >= 0 ? sectionPropertiesIndex : blocks.length;
 }
 
 function stripLeadingMatchingMarkdownHeading(markdown: string, section: string, matchedHeading: string): string {
@@ -1076,7 +1886,7 @@ function stripLeadingMatchingMarkdownHeading(markdown: string, section: string, 
 
   const headingText = firstLine.replace(/^#{1,6}\s+/, "");
   const firstNumber = parseSectionNumber(headingText);
-  const sectionNumber = parseSectionNumber(section);
+  const sectionNumber = parseSectionNumber(section) || parseSectionNumber(matchedHeading);
   const firstTitle = normalizeHeadingLookup(headingText);
   const sectionTitle = normalizeHeadingLookup(section);
   const matchedTitle = normalizeHeadingLookup(matchedHeading);
@@ -1091,13 +1901,27 @@ function stripLeadingMatchingMarkdownHeading(markdown: string, section: string, 
   return markdown;
 }
 
-function buildSectionReplacementXml(markdown: string, blocks: WordBodyBlock[], target: WordBodyBlock): string {
-  const paragraphTemplate = findBodyParagraphTemplate(blocks, target.index) ?? target.xml;
+function buildSectionReplacementXml(
+  markdown: string,
+  blocks: WordBodyBlock[],
+  target: WordBodyBlock,
+  sdtBlock?: WordBodyBlock
+): string {
+  const anchorBlocks = sdtBlock ? collectWordBodyBlocks(extractSdtContentXml(sdtBlock.xml), new Map()) : [];
+  const headingStyleIds = collectHeadingStyleIds(blocks);
+  const paragraphTemplate =
+    findBodyParagraphTemplate(anchorBlocks, -1, headingStyleIds) ??
+    findBodyParagraphTemplate(blocks, target.index, headingStyleIds) ??
+    findBodyParagraphTemplate(blocks, -1, headingStyleIds) ??
+    buildDefaultBodyParagraphTemplate();
+  const tableTemplate = findTableTemplate(anchorBlocks, -1) ?? findTableTemplate(blocks, target.index);
   const headingTemplates = buildHeadingTemplates(blocks);
   const paragraphs: string[] = [];
   let inCodeBlock = false;
+  const lines = markdown.split(/\r?\n/);
 
-  for (const rawLine of markdown.split(/\r?\n/)) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const rawLine = lines[lineIndex];
     const line = rawLine.trim();
     if (/^```/.test(line)) {
       inCodeBlock = !inCodeBlock;
@@ -1115,13 +1939,10 @@ function buildSectionReplacementXml(markdown: string, blocks: WordBodyBlock[], t
       continue;
     }
 
-    if (!inCodeBlock && /^\|.*\|$/.test(line)) {
-      const cells = line
-        .split("|")
-        .map((cell) => cell.trim())
-        .filter(Boolean);
-      if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) continue;
-      paragraphs.push(buildWordParagraphFromTemplate(paragraphTemplate, cells.join("    ")));
+    const table = !inCodeBlock ? parseMarkdownTable(lines, lineIndex) : undefined;
+    if (table) {
+      paragraphs.push(buildWordTableFromMarkdown(table.rows, paragraphTemplate, tableTemplate));
+      lineIndex = table.nextIndex - 1;
       continue;
     }
 
@@ -1131,18 +1952,97 @@ function buildSectionReplacementXml(markdown: string, blocks: WordBodyBlock[], t
   return paragraphs.join("");
 }
 
-function findBodyParagraphTemplate(blocks: WordBodyBlock[], headingIndex: number): string | undefined {
-  const sameSectionBody = blocks.find(
+function findBodyParagraphTemplate(
+  blocks: WordBodyBlock[],
+  headingIndex: number,
+  headingStyleIds = collectHeadingStyleIds(blocks)
+): string | undefined {
+  const localBlocks = blocks.filter((block, index) => index > headingIndex);
+  const localTemplate = pickBestBodyParagraphTemplate(localBlocks, headingStyleIds, 40);
+  if (localTemplate) return localTemplate;
+
+  const globalTemplate = pickBestBodyParagraphTemplate(blocks, headingStyleIds, 40);
+  if (globalTemplate) return globalTemplate;
+  return undefined;
+}
+
+function collectHeadingStyleIds(blocks: WordBodyBlock[]): Set<string> {
+  return new Set(blocks.filter((block) => block.headingLevel && block.styleId).map((block) => block.styleId));
+}
+
+function pickBestBodyParagraphTemplate(
+  blocks: WordBodyBlock[],
+  headingStyleIds: Set<string>,
+  minScore = Number.NEGATIVE_INFINITY
+): string | undefined {
+  const candidates = blocks
+    .flatMap((block) => collectBodyParagraphTemplateCandidates(block, headingStyleIds))
+    .filter((candidate) => candidate.score >= minScore)
+    .sort((left, right) => right.score - left.score);
+  return candidates[0]?.xml;
+}
+
+function collectBodyParagraphTemplateCandidates(
+  block: WordBodyBlock,
+  headingStyleIds: Set<string>
+): Array<{ xml: string; score: number }> {
+  if (block.tagName === "p") {
+    const score = scoreBodyParagraphTemplate(block.xml, headingStyleIds);
+    return Number.isFinite(score) ? [{ xml: block.xml, score }] : [];
+  }
+
+  if (block.tagName !== "sdt") return [];
+  return collectWordBodyBlocks(extractSdtContentXml(block.xml), new Map()).flatMap((nestedBlock) =>
+    collectBodyParagraphTemplateCandidates(nestedBlock, headingStyleIds)
+  );
+}
+
+function scoreBodyParagraphTemplate(paragraphXml: string, headingStyleIds: Set<string>): number {
+  const text = extractVisibleWordText(paragraphXml);
+  if (!text || /^\d+$/.test(text)) return Number.NEGATIVE_INFINITY;
+
+  const styleId = extractParagraphStyleId(paragraphXml);
+  if (styleId && headingStyleIds.has(styleId)) return Number.NEGATIVE_INFINITY;
+  if (styleId === "12" || /^[表图]\s*\d/.test(text)) return Number.NEGATIVE_INFINITY;
+  const paragraphProperties = paragraphXml.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/)?.[0] ?? "";
+  if (/<w:tabs\b[\s\S]*?<w:tab\b[^>]*\bw:leader="dot"/.test(paragraphProperties)) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  let score = 0;
+  if (styleId === "30") score += 100;
+  if (styleId) score += 35;
+  if (/<w:rFonts\b/.test(paragraphXml)) score += 8;
+  if (/<w:sz(?:Cs)?\b/.test(paragraphXml)) score += 8;
+  if (/<w:rPr\b/.test(paragraphProperties)) score -= 70;
+  if (/<w:b(?:Cs)?\b/.test(paragraphXml)) score -= 90;
+  if (/<w:i(?:Cs)?\b/.test(paragraphXml)) score -= 35;
+  if (/<w:sz(?:Cs)?\b/.test(paragraphProperties)) score -= 45;
+  if (/<w:numPr\b/.test(paragraphXml)) score -= 25;
+  if (/<w:tbl\b/.test(paragraphXml)) score -= 50;
+  return score;
+}
+
+function buildDefaultBodyParagraphTemplate(): string {
+  return [
+    "<w:p>",
+    '<w:pPr><w:pStyle w:val="30"/><w:wordWrap w:val="0"/></w:pPr>',
+    '<w:r><w:rPr><w:rFonts w:hint="eastAsia"/></w:rPr><w:t></w:t></w:r>',
+    "</w:p>"
+  ].join("");
+}
+
+function findTableTemplate(blocks: WordBodyBlock[], headingIndex: number): string | undefined {
+  const target = blocks[headingIndex];
+  const sameSectionTable = blocks.find(
     (block, index) =>
       index > headingIndex &&
-      block.tagName === "p" &&
-      !block.headingLevel &&
-      block.text.trim() &&
-      !/^\d+$/.test(block.text.trim())
+      block.tagName === "tbl" &&
+      !blocks
+        .slice(Math.max(0, headingIndex + 1), index)
+        .some((item) => item.headingLevel && target?.headingLevel && item.headingLevel <= target.headingLevel)
   );
-  if (sameSectionBody) return sameSectionBody.xml;
-
-  return blocks.find((block) => block.tagName === "p" && !block.headingLevel && block.text.trim())?.xml;
+  return sameSectionTable?.xml ?? blocks.find((block) => block.tagName === "tbl")?.xml;
 }
 
 function buildHeadingTemplates(blocks: WordBodyBlock[]): Map<number, string> {
@@ -1158,6 +2058,10 @@ function buildWordParagraphFromTemplate(templateXml: string, text: string): stri
   const paragraphProperties = templateXml.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/)?.[0] ?? "";
   const firstRun = templateXml.match(/<w:r\b[\s\S]*?<\/w:r>/)?.[0] ?? "";
   const runProperties = firstRun.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/)?.[0] ?? "";
+  return buildWordParagraphXml(paragraphProperties, runProperties, text);
+}
+
+function buildWordParagraphXml(paragraphProperties: string, runProperties: string, text: string): string {
   return [
     "<w:p>",
     paragraphProperties,
@@ -1167,6 +2071,138 @@ function buildWordParagraphFromTemplate(templateXml: string, text: string): stri
     "</w:r>",
     "</w:p>"
   ].join("");
+}
+
+interface ParsedMarkdownTable {
+  rows: string[][];
+  nextIndex: number;
+}
+
+function parseMarkdownTable(lines: string[], startIndex: number): ParsedMarkdownTable | undefined {
+  const header = lines[startIndex]?.trim() ?? "";
+  const separator = lines[startIndex + 1]?.trim() ?? "";
+  if (!isMarkdownTableRow(header) || !isMarkdownTableSeparatorRow(separator)) return undefined;
+
+  const rows = [splitMarkdownTableRow(header)];
+  let nextIndex = startIndex + 2;
+  while (nextIndex < lines.length && isMarkdownTableRow(lines[nextIndex]?.trim() ?? "")) {
+    const row = splitMarkdownTableRow(lines[nextIndex]);
+    if (row.length) rows.push(row);
+    nextIndex += 1;
+  }
+
+  return rows.length ? { rows: normalizeMarkdownTableRows(rows), nextIndex } : undefined;
+}
+
+function isMarkdownTableRow(line: string): boolean {
+  return /^\|.*\|$/.test(line.trim()) && splitMarkdownTableRow(line).length > 0;
+}
+
+function isMarkdownTableSeparatorRow(line: string): boolean {
+  if (!isMarkdownTableRow(line)) return false;
+  const cells = splitMarkdownTableRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
+function splitMarkdownTableRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  const cells: string[] = [];
+  let current = "";
+  let escaped = false;
+
+  for (const char of trimmed) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "|") {
+      cells.push(cleanMarkdownInline(current.trim()));
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  cells.push(cleanMarkdownInline(current.trim()));
+  return cells;
+}
+
+function normalizeMarkdownTableRows(rows: string[][]): string[][] {
+  const columnCount = Math.max(...rows.map((row) => row.length));
+  return rows.map((row) => Array.from({ length: columnCount }, (_, index) => row[index] ?? ""));
+}
+
+function buildWordTableFromMarkdown(rows: string[][], paragraphTemplate = "", tableTemplate?: string): string {
+  const columnCount = Math.max(1, ...rows.map((row) => row.length));
+  const columnWidth = Math.max(900, Math.floor(9000 / columnCount));
+  const paragraphProperties = "";
+  const firstRun = paragraphTemplate.match(/<w:r\b[\s\S]*?<\/w:r>/)?.[0] ?? "";
+  const runProperties = firstRun.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/)?.[0] ?? "";
+  const tableProperties = tableTemplate?.match(/<w:tblPr\b[\s\S]*?<\/w:tblPr>/)?.[0] ?? buildDefaultTableProperties();
+  const grid = [
+    "<w:tblGrid>",
+    ...Array.from({ length: columnCount }, () => `<w:gridCol w:w="${columnWidth}"/>`),
+    "</w:tblGrid>"
+  ].join("");
+  const rowXml = rows
+    .map((row, rowIndex) =>
+      [
+        "<w:tr>",
+        ...Array.from({ length: columnCount }, (_, columnIndex) =>
+          buildWordTableCell(row[columnIndex] ?? "", columnWidth, paragraphProperties, runProperties, rowIndex === 0)
+        ),
+        "</w:tr>"
+      ].join("")
+    )
+    .join("");
+
+  return ["<w:tbl>", tableProperties, grid, rowXml, "</w:tbl>"].join("");
+}
+
+function buildDefaultTableProperties(): string {
+  return [
+    "<w:tblPr>",
+    '<w:tblW w:w="0" w:type="auto"/>',
+    '<w:tblBorders>',
+    '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>',
+    '<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>',
+    '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>',
+    '<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>',
+    '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>',
+    '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>',
+    '</w:tblBorders>',
+    '<w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>',
+    "</w:tblPr>"
+  ].join("");
+}
+
+function buildWordTableCell(
+  text: string,
+  width: number,
+  paragraphProperties: string,
+  runProperties: string,
+  header: boolean
+): string {
+  const cellProperties = [
+    "<w:tcPr>",
+    `<w:tcW w:w="${width}" w:type="dxa"/>`,
+    header ? '<w:shd w:val="clear" w:color="auto" w:fill="D9EAF7"/>' : "",
+    "</w:tcPr>"
+  ]
+    .filter(Boolean)
+    .join("");
+  const headerRunProperties = header ? mergeRunBold(runProperties) : runProperties;
+  return ["<w:tc>", cellProperties, buildWordParagraphXml(paragraphProperties, headerRunProperties, text), "</w:tc>"].join("");
+}
+
+function mergeRunBold(runProperties: string): string {
+  if (!runProperties) return "<w:rPr><w:b/></w:rPr>";
+  if (/<w:b\b/.test(runProperties)) return runProperties;
+  return runProperties.replace("</w:rPr>", "<w:b/></w:rPr>");
 }
 
 function cleanMarkdownInline(value: string): string {
@@ -1228,27 +2264,112 @@ function appendGeneratedMarkdown(zip: PizZip, markdown: string, facts: SchemeFac
   return insertBeforeDocumentSection(zip, appendixXml);
 }
 
-async function appendGeneratedDiagrams(zip: PizZip, diagrams: SchemeDiagramAsset[]): Promise<string[]> {
+async function appendGeneratedDiagrams(
+  zip: PizZip,
+  diagrams: SchemeDiagramAsset[],
+  templateJson?: WordTemplateJson
+): Promise<string[]> {
   const validDiagrams = diagrams.filter((diagram) => diagram.path && diagram.label.trim());
   if (!validDiagrams.length) return [];
 
   const embedded: string[] = [];
+  const remainingDiagrams: SchemeDiagramAsset[] = [];
+  const usedFigureIds = new Set<string>();
   const drawingBlocks: string[] = [buildWordParagraph("方案图示", { heading: true })];
   let nextDocPrId = getNextDocPrId(zip);
+  let mediaIndex = 0;
 
-  for (const [index, diagram] of validDiagrams.entries()) {
-    const media = await tryBuildDiagramMedia(zip, diagram, index, nextDocPrId);
+  for (const diagram of validDiagrams) {
+    const figure = findTemplateFigureForDiagram(templateJson, diagram, usedFigureIds);
+    if (!figure) {
+      remainingDiagrams.push(diagram);
+      continue;
+    }
+
+    const media = await tryBuildDiagramMedia(zip, diagram, mediaIndex, nextDocPrId);
+    if (!media || !replaceTemplateFigureImage(zip, figure, media)) {
+      remainingDiagrams.push(diagram);
+      continue;
+    }
+
+    nextDocPrId += 1;
+    mediaIndex += 1;
+    usedFigureIds.add(figure.id);
+    embedded.push(diagram.label);
+  }
+
+  for (const diagram of remainingDiagrams) {
+    const media = await tryBuildDiagramMedia(zip, diagram, mediaIndex, nextDocPrId);
     if (!media) continue;
 
     nextDocPrId += 1;
+    mediaIndex += 1;
     embedded.push(diagram.label);
     drawingBlocks.push(buildWordParagraph(`图：${diagram.label}`));
     drawingBlocks.push(buildWordImageParagraph(media));
   }
 
-  if (!embedded.length) return [];
-  if (!insertBeforeDocumentSection(zip, drawingBlocks.join(""))) return [];
+  if (drawingBlocks.length > 1 && !insertBeforeDocumentSection(zip, drawingBlocks.join(""))) return embedded;
   return embedded;
+}
+
+function findTemplateFigureForDiagram(
+  templateJson: WordTemplateJson | undefined,
+  diagram: SchemeDiagramAsset,
+  usedFigureIds: Set<string>
+): WordTemplateFigure | undefined {
+  const label = normalizeFigureLookup(diagram.label);
+  if (!label) return undefined;
+
+  return (templateJson?.figures ?? []).find((figure) => {
+    if (usedFigureIds.has(figure.id)) return false;
+    const caption = normalizeFigureLookup(figure.caption);
+    return Boolean(caption && (caption === label || caption.includes(label) || label.includes(caption)));
+  });
+}
+
+function replaceTemplateFigureImage(zip: PizZip, figure: WordTemplateFigure, media: WordImageMedia): boolean {
+  const documentFile = zip.file("word/document.xml");
+  const documentXml = documentFile?.asText();
+  if (!documentXml) return false;
+
+  const bodyOpen = documentXml.match(/<w:body\b[^>]*>/);
+  const bodyEnd = documentXml.lastIndexOf("</w:body>");
+  if (!bodyOpen || bodyOpen.index === undefined || bodyEnd < 0) return false;
+
+  const bodyStart = bodyOpen.index + bodyOpen[0].length;
+  const bodyXml = documentXml.slice(bodyStart, bodyEnd);
+  const anchoredImage = findSdtElementByTag(bodyXml, figure.anchors?.image?.tag || `ps:figure:${figure.id}:image`);
+  if (anchoredImage) {
+    const imageXml = buildWordImageParagraph(media);
+    const replacementXml = replaceSdtContentXml(anchoredImage.xml, imageXml);
+    const nextBodyXml = `${bodyXml.slice(0, anchoredImage.start)}${replacementXml}${bodyXml.slice(anchoredImage.end)}`;
+    const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
+    zip.file("word/document.xml", nextXml);
+    return true;
+  }
+
+  const blocks = collectWordBodyBlocks(bodyXml, buildStyleHeadingLevels(zip));
+  const imageBlock = findSdtBlockByTag(blocks, figure.anchors?.image?.tag || `ps:figure:${figure.id}:image`);
+  if (!imageBlock) return false;
+  const imageXml = buildWordImageParagraph(media);
+  const insertStart = imageBlock.start;
+  const insertEnd = imageBlock.end;
+  const replacementXml = imageBlock.tagName === "sdt" ? replaceSdtContentXml(imageBlock.xml, imageXml) : imageXml;
+  const nextBodyXml = `${bodyXml.slice(0, insertStart)}${replacementXml}${bodyXml.slice(insertEnd)}`;
+  const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
+  zip.file("word/document.xml", nextXml);
+  return true;
+}
+
+function normalizeFigureLookup(value: string): string {
+  return normalizeHeadingLookup(value)
+    .replace(/^图\d+/, "")
+    .replace(/技术架构/g, "技术框架")
+    .replace(/架构/g, "框架")
+    .replace(/示意图$/g, "")
+    .replace(/流程图$/g, "流程")
+    .replace(/图$/g, "");
 }
 
 async function tryBuildDiagramMedia(
@@ -1270,12 +2391,17 @@ async function buildDiagramMedia(
   index: number,
   docPrId: number
 ): Promise<WordImageMedia | undefined> {
-  const extension = normalizeImageExtension(extname(diagram.path));
+  let extension = normalizeImageExtension(extname(diagram.path));
+  let data: Buffer = Buffer.from(await readFile(diagram.path));
+  if (extension === "svg") {
+    data = await renderSvgToPng(data);
+    extension = "png";
+  }
+
   const contentType = getImageContentType(extension);
   if (!contentType) return undefined;
 
-  const data = await readFile(diagram.path);
-  const mediaName = sanitizeFileName(`diagram-${index + 1}-${diagram.label}`).replace(/\.+$/g, "") || `diagram-${index + 1}`;
+  const mediaName = `diagram-${index + 1}`;
   const mediaPath = `word/media/${mediaName}.${extension}`;
   const relationshipId = ensureImageRelationship(zip, `media/${mediaName}.${extension}`);
   ensureImageContentType(zip, extension, contentType);
@@ -1290,6 +2416,20 @@ async function buildDiagramMedia(
     cx: size.cx,
     cy: size.cy
   };
+}
+
+async function renderSvgToPng(data: Buffer): Promise<Buffer> {
+  const svgText = data.toString("utf-8");
+  const dimensions = getSvgDimensions(svgText);
+  const image = await loadImage(data);
+  const width = Math.max(1, Math.ceil(dimensions?.width || image.width || 1280));
+  const height = Math.max(1, Math.ceil(dimensions?.height || image.height || 720));
+  const canvas = createCanvas(width, height);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(image, 0, 0, width, height);
+  return canvas.toBuffer("image/png");
 }
 
 interface WordImageMedia {
@@ -1307,10 +2447,16 @@ function insertBeforeDocumentSection(zip: PizZip, xml: string): boolean {
   const documentXml = documentFile?.asText();
   if (!documentXml) return false;
 
-  const insertAt = documentXml.lastIndexOf("<w:sectPr");
   const bodyEnd = documentXml.lastIndexOf("</w:body>");
-  const targetIndex = insertAt >= 0 ? insertAt : bodyEnd;
-  if (targetIndex < 0) return false;
+  const bodyOpen = documentXml.match(/<w:body\b[^>]*>/);
+  if (!bodyOpen || bodyOpen.index === undefined || bodyEnd < 0) return false;
+
+  const bodyStart = bodyOpen.index + bodyOpen[0].length;
+  const bodyXml = documentXml.slice(bodyStart, bodyEnd);
+  const finalSectionProperties = bodyXml.match(
+    /(?:<w:p\b[\s\S]*?<w:sectPr\b[\s\S]*?<\/w:sectPr>[\s\S]*?<\/w:p>|<w:sectPr\b[\s\S]*?<\/w:sectPr>)\s*$/
+  );
+  const targetIndex = bodyStart + (finalSectionProperties?.index ?? bodyXml.length);
 
   const nextXml = `${documentXml.slice(0, targetIndex)}${xml}${documentXml.slice(targetIndex)}`;
   zip.file("word/document.xml", nextXml);
@@ -1320,8 +2466,10 @@ function insertBeforeDocumentSection(zip: PizZip, xml: string): boolean {
 function markdownToWordParagraphs(markdown: string): string[] {
   const paragraphs: string[] = [];
   let inCodeBlock = false;
+  const lines = markdown.split(/\r?\n/);
 
-  for (const rawLine of markdown.split(/\r?\n/)) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const rawLine = lines[lineIndex];
     const line = rawLine.trim();
     if (/^```/.test(line)) {
       inCodeBlock = !inCodeBlock;
@@ -1334,13 +2482,10 @@ function markdownToWordParagraphs(markdown: string): string[] {
       continue;
     }
 
-    if (!inCodeBlock && /^\|.*\|$/.test(line)) {
-      const cells = line
-        .split("|")
-        .map((cell) => cell.trim())
-        .filter(Boolean);
-      if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) continue;
-      paragraphs.push(buildWordParagraph(cells.join("    ")));
+    const table = !inCodeBlock ? parseMarkdownTable(lines, lineIndex) : undefined;
+    if (table) {
+      paragraphs.push(buildWordTableFromMarkdown(table.rows));
+      lineIndex = table.nextIndex - 1;
       continue;
     }
 
@@ -1594,6 +2739,7 @@ function findUnresolvedSchemeMarkers(text: string): string[] {
     /待补充(?:[\u4e00-\u9fa5A-Za-z0-9_ -]{0,20})?/g,
     /需确认(?:[\u4e00-\u9fa5A-Za-z0-9_ -]{0,20})?/g,
     /\bXXX(?:\.\.\.XXX)?\b/gi,
+    /\[\[PS:field:[^\]\n]{1,80}\]\]/g,
     /\$\{[^}\n]{1,60}\}/g,
     /(?<!\$)\{[^}\n]{1,60}\}/g
   ];

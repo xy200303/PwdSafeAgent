@@ -107,10 +107,16 @@ button {
   background: #f3f5f7;
 }
 
+.app-shell.with-progress {
+  grid-template-columns: 270px minmax(0, 1fr) 340px;
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  height: 100vh;
   border-right: 1px solid #d9e2ea;
   background: #eef2f6;
   padding: 16px;
@@ -233,7 +239,8 @@ button {
 
 .session-list {
   display: flex;
-  height: 100%;
+  min-height: 100%;
+  width: 100%;
   flex-direction: column;
   gap: 4px;
 }
@@ -241,13 +248,25 @@ button {
 .session-scroll,
 .message-scroll,
 .settings-scroll,
-.preview-scroll {
+.preview-scroll,
+.scheme-progress-scroll {
   min-height: 0;
   overflow: hidden;
 }
 
 .session-scroll {
   flex: 1;
+  height: 100%;
+  width: 100%;
+}
+
+.session-scroll > [data-radix-scroll-area-viewport] {
+  height: 100%;
+  width: 100%;
+}
+
+.session-scroll > [data-radix-scroll-area-viewport] > div {
+  display: block !important;
 }
 
 .message-scroll {
@@ -381,6 +400,245 @@ button {
 .status-pill.running {
   border-color: #b7791f;
   color: #8a5a11;
+}
+
+.scheme-progress-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-width: 0;
+  height: 100vh;
+  border-left: 1px solid #d9e2ea;
+  background: #fbfcfd;
+}
+
+.scheme-progress-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid #d9e2ea;
+  padding: 14px 14px;
+}
+
+.scheme-progress-header > svg {
+  color: #1b4f8a;
+}
+
+.scheme-progress-header div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.scheme-progress-header span,
+.scheme-progress-summary p,
+.scheme-chapter-main span,
+.scheme-section-main small {
+  color: #637285;
+  font-size: 12px;
+}
+
+.scheme-progress-header strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.scheme-progress-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  border: 1px solid #c9d5df;
+  border-radius: 999px;
+  background: #fff;
+  color: #516173;
+  font-size: 12px;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+
+.scheme-progress-pill.running,
+.scheme-chapter.running .scheme-chapter-trigger,
+.scheme-section-row.running,
+.scheme-section-row.drafting {
+  color: #8a5a11;
+}
+
+.scheme-progress-pill.partial,
+.scheme-section-row.drafted {
+  color: #1b4f8a;
+}
+
+.scheme-progress-pill.completed,
+.scheme-chapter.completed .scheme-chapter-trigger,
+.scheme-section-row.completed {
+  color: #267146;
+}
+
+.scheme-progress-pill.failed,
+.scheme-chapter.failed .scheme-chapter-trigger,
+.scheme-section-row.failed {
+  color: #b42318;
+}
+
+.scheme-progress-summary {
+  border-bottom: 1px solid #d9e2ea;
+  padding: 12px 14px;
+}
+
+.scheme-progress-numbers {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.scheme-progress-numbers strong {
+  font-size: 18px;
+}
+
+.scheme-progress-numbers span {
+  color: #516173;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.scheme-progress-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.scheme-progress-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #397951;
+  transition: width 180ms ease;
+}
+
+.scheme-progress-summary p {
+  margin: 8px 0 0;
+  line-height: 1.5;
+}
+
+.scheme-progress-body {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  height: 100%;
+  padding: 10px;
+}
+
+.scheme-progress-scroll {
+  height: 100%;
+  width: 100%;
+}
+
+.scheme-progress-scroll > [data-radix-scroll-area-viewport] {
+  height: 100%;
+  width: 100%;
+}
+
+.scheme-progress-scroll > [data-radix-scroll-area-viewport] > div {
+  display: block !important;
+}
+
+.scheme-chapter {
+  border: 1px solid #d9e2ea;
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.scheme-chapter-trigger {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 44px;
+  background: transparent;
+  color: #102033;
+  cursor: pointer;
+  padding: 8px 9px;
+  text-align: left;
+}
+
+.scheme-chapter-trigger:hover {
+  background: #f3f7fb;
+}
+
+.scheme-chapter-trigger[data-state="open"] > svg:last-child {
+  transform: rotate(180deg);
+}
+
+.scheme-chapter-main,
+.scheme-section-main {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.scheme-chapter-main strong,
+.scheme-section-main strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheme-chapter-main strong {
+  font-size: 13px;
+}
+
+.scheme-section-list {
+  border-top: 1px solid #edf1f5;
+  padding: 4px 0;
+}
+
+.scheme-section-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 6px 9px;
+  color: #516173;
+}
+
+.scheme-section-row + .scheme-section-row {
+  border-top: 1px solid #f0f3f6;
+}
+
+.scheme-section-row.depth-1 {
+  padding-left: 20px;
+}
+
+.scheme-section-row.depth-2 {
+  padding-left: 32px;
+}
+
+.scheme-section-row.depth-3 {
+  padding-left: 44px;
+}
+
+.scheme-section-row.depth-4 {
+  padding-left: 56px;
+}
+
+.scheme-section-main strong {
+  color: inherit;
+  font-size: 12px;
+}
+
+.scheme-section-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .message-pane {

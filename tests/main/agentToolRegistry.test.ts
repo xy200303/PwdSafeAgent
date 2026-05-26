@@ -12,9 +12,26 @@ import {
   searchWeb,
   type AgentToolExecutionContext
 } from "../../src/main/agentToolRegistry";
-import type { AppSettings } from "../../src/shared/types";
+import {
+  DRAFT_SECTION_PARALLELISM_DEFAULT,
+  IMAGE_GENERATION_PARALLELISM_DEFAULT,
+  IMAGE_GENERATION_REQUEST_TIMEOUT_DEFAULT_MS,
+  clampDraftSectionParallelism,
+  clampImageGenerationParallelism,
+  type AppSettings
+} from "../../src/shared/types";
 
 describe("agentToolRegistry", () => {
+  it("defaults drafting to twenty parallel tasks and image generation to ten", () => {
+    expect(DRAFT_SECTION_PARALLELISM_DEFAULT).toBe(20);
+    expect(clampDraftSectionParallelism(undefined)).toBe(20);
+    expect(clampDraftSectionParallelism(99)).toBe(20);
+    expect(IMAGE_GENERATION_REQUEST_TIMEOUT_DEFAULT_MS).toBe(300000);
+    expect(IMAGE_GENERATION_PARALLELISM_DEFAULT).toBe(10);
+    expect(clampImageGenerationParallelism(undefined)).toBe(10);
+    expect(clampImageGenerationParallelism(99)).toBe(10);
+  });
+
   it("builds tool definitions and keeps exec_bash opt-in", () => {
     const safeTools = buildAgentChatTools({ includeExecBash: false });
     const fullTools = buildAgentChatTools({ includeExecBash: true });
@@ -23,6 +40,7 @@ describe("agentToolRegistry", () => {
     expect(safeTools.map((tool) => tool.function.name)).toContain("web_search");
     expect(safeTools.map((tool) => tool.function.name)).toContain("read_word");
     expect(safeTools.map((tool) => tool.function.name)).toContain("read_pdf");
+    expect(safeTools.map((tool) => tool.function.name)).toContain("draft_scheme_sections");
     expect(safeTools.map((tool) => tool.function.name)).toContain("create_word");
     expect(safeTools.map((tool) => tool.function.name)).toContain("write_word");
     expect(safeTools.map((tool) => tool.function.name)).not.toContain("exec_bash");
@@ -37,6 +55,7 @@ describe("agentToolRegistry", () => {
     expect(names).toContain("remember_project");
     expect(names).toContain("read_word");
     expect(names).toContain("write_file");
+    expect(names).not.toContain("draft_scheme_sections");
     expect(names).not.toContain("create_word");
     expect(names).not.toContain("write_word");
     expect(names).not.toContain("write_pdf");
@@ -119,6 +138,74 @@ describe("agentToolRegistry", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("drafts scheme sections without writing Word artifacts", async () => {
+    const result = await executeAgentToolCall(
+      createToolCall("draft_scheme_sections", {
+        sections: [
+          { section: "2.1" },
+          { section: "2.2.2", title: "网络环境" }
+        ],
+        project_context: "系统名称：统一身份认证系统；建设单位：示例政务服务中心",
+        max_parallel: 2
+      }),
+      {
+        ...createContext(process.cwd()),
+        memory: "等保级别：三级"
+      }
+    );
+
+    expect(result.toolName).toBe("draft_scheme_sections");
+    expect(result.summary).toContain("已并行起草 2");
+    expect(result.artifactPath).toBeUndefined();
+    expect(result.content).toContain("## 2.1 基本情况");
+    expect(result.content).toContain("## 2.2.2 网络环境");
+    expect(result.schemeProgressUpdates).toEqual([
+      expect.objectContaining({ section: "2.1", status: "drafted" }),
+      expect.objectContaining({ section: "2.2.2", status: "drafted" })
+    ]);
+  });
+
+  it("uses the configured draft section parallelism when no override is provided", async () => {
+    const settings = createSettings();
+    settings.agent.draftSectionParallelism = 3;
+
+    const result = await executeAgentToolCall(
+      createToolCall("draft_scheme_sections", {
+        sections: [{ section: "2.1" }, { section: "2.2.2" }],
+        project_context: "系统名称：统一身份认证系统"
+      }),
+      {
+        ...createContext(process.cwd()),
+        settings
+      }
+    );
+
+    expect(result.toolName).toBe("draft_scheme_sections");
+    expect(result.content).toContain("并行度：3");
+  });
+
+  it("drafts up to twenty sections in one batch", async () => {
+    const template = JSON.parse(
+      await readFile(join(process.cwd(), "docs", "密码应用方案.template.json"), "utf-8")
+    ) as { sections: Array<{ id: string }> };
+    const sections = template.sections.slice(0, 21).map((section) => ({ section: section.id }));
+
+    expect(sections.length).toBeGreaterThan(20);
+
+    const result = await executeAgentToolCall(
+      createToolCall("draft_scheme_sections", {
+        sections,
+        project_context: "系统名称：统一身份认证系统"
+      }),
+      createContext(process.cwd())
+    );
+
+    expect(result.toolName).toBe("draft_scheme_sections");
+    expect(result.summary).toContain("已并行起草 20");
+    expect(result.content).toContain("并行度：20");
+    expect(result.content).toContain("本批超过 20 个章节");
   });
 
   it("sends an existing output file when the model only provides the file name", async () => {
@@ -242,6 +329,54 @@ describe("agentToolRegistry", () => {
       expect(result.toolName).toBe("image_generate");
       expect(result.summary).toContain("已生成");
       expect(result.artifactPath).toContain(".svg");
+    } finally {
+      if (previousImageKey === undefined) {
+        delete process.env.OPENAI_IMAGE_API_KEY;
+      } else {
+        process.env.OPENAI_IMAGE_API_KEY = previousImageKey;
+      }
+      if (previousApiKey === undefined) {
+        delete process.env.OPENAI_API_KEY;
+      } else {
+        process.env.OPENAI_API_KEY = previousApiKey;
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("can run multiple image generation tool calls concurrently with unique output files", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-image-parallel-"));
+    const previousImageKey = process.env.OPENAI_IMAGE_API_KEY;
+    const previousApiKey = process.env.OPENAI_API_KEY;
+
+    try {
+      delete process.env.OPENAI_IMAGE_API_KEY;
+      delete process.env.OPENAI_API_KEY;
+
+      const [first, second] = await Promise.all([
+        executeAgentToolCall(
+          createToolCall("image_generate", {
+            kind: "architecture",
+            label: "密码应用技术架构图",
+            prompt: "生成密码应用方案配图"
+          }),
+          createContext(dir)
+        ),
+        executeAgentToolCall(
+          createToolCall("image_generate", {
+            kind: "architecture",
+            label: "密码应用技术架构图",
+            prompt: "生成密码应用方案配图"
+          }),
+          createContext(dir)
+        )
+      ]);
+
+      expect(first.toolName).toBe("image_generate");
+      expect(second.toolName).toBe("image_generate");
+      expect(first.artifactPath).toContain(".svg");
+      expect(second.artifactPath).toContain(".svg");
+      expect(first.artifactPath).not.toBe(second.artifactPath);
     } finally {
       if (previousImageKey === undefined) {
         delete process.env.OPENAI_IMAGE_API_KEY;
@@ -531,6 +666,7 @@ function createSettings(): AppSettings {
       thinkingEnabled: true,
       reasoningEffort: "",
       requestTimeoutMs: 120000,
+      imageRequestTimeoutMs: 300000,
       maxOutputTokens: 16000,
       apiKeyConfigured: false,
       imageApiKeyConfigured: false
@@ -540,7 +676,9 @@ function createSettings(): AppSettings {
       libreOfficePath: ""
     },
     agent: {
-      execBashEnabled: false
+      execBashEnabled: false,
+      draftSectionParallelism: 20,
+      imageGenerationParallelism: 10
     }
   };
 }

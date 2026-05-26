@@ -10,6 +10,7 @@ export type BuiltinToolName =
   | "read_word"
   | "read_pdf"
   | "write_file"
+  | "draft_scheme_sections"
   | "create_word"
   | "write_word"
   | "write_pdf"

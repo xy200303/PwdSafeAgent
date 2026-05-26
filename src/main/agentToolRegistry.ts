@@ -2,8 +2,9 @@ import { exec } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { promisify } from "node:util";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
-import type { ChatCompletionMessageToolCall, ChatCompletionTool } from "openai/resources/chat/completions";
-import type { AppSettings } from "../shared/types";
+import OpenAI from "openai";
+import type { ChatCompletionMessageParam, ChatCompletionMessageToolCall, ChatCompletionTool } from "openai/resources/chat/completions";
+import type { AppSettings, SchemeSectionStatus } from "../shared/types";
 import {
   compactText,
   getCurrentTimeText,
@@ -18,12 +19,22 @@ import { generateDiagramImage, type DiagramKind } from "./imageGeneration";
 import {
   createWordDocxFromTemplate,
   replaceWordSectionContent,
+  replaceWordSectionsContent,
   writeSchemeDocxFromTemplate,
   type SchemeCompletenessResult,
-  type SchemeDiagramAsset
+  type SchemeDiagramAsset,
+  type TemplateCellReplacementInput
 } from "./schemeDocument";
+import { loadSchemeTemplateSections, type SchemeProgressUpdateInput } from "./schemeProgress";
+import {
+  DRAFT_SECTION_PARALLELISM_MAX,
+  clampDraftSectionParallelism,
+  clampImageGenerationParallelism
+} from "../shared/types";
 
 const execAsync = promisify(exec);
+const imageGenerationQueue: Array<{ limit: number; resolve: () => void }> = [];
+let activeImageGenerations = 0;
 
 export interface AgentToolExecutionContext {
   rootDir: string;
@@ -45,6 +56,7 @@ export interface AgentToolExecutionResult {
   summary: string;
   content: string;
   artifactPath?: string;
+  schemeProgressUpdates?: SchemeProgressUpdateInput[];
 }
 
 export interface WebSearchResult {
@@ -217,9 +229,61 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
     {
       type: "function",
       function: {
+        name: "draft_scheme_sections",
+        description: [
+          "并行起草多个 Word 模板章节的正文草稿，但不写入 Word。",
+          "用于加速正式方案生成：先按模板 JSON 顺序选取待生成小节调用本工具并行生成正文；再把返回草稿合并到 write_word.sections，按章节顺序批量写入同一个 docx。",
+          "sections[].section 必须来自 docs/密码应用方案.template.json 的真实 sections 条目，优先传 id，例如 sec_2_2_2；不要自行拆分或编造模板中不存在的 7.2、sec_7_2 等虚拟章节。",
+          "本工具只生成正文段落和必要列表，不生成 Markdown 表格，不生成图片，不修改模板表格单元格；表格 template_cells 和配图 image_generate/diagrams 应在所有正文写入后由 Agent 统一处理。",
+          "草稿必须贴合 section 的 writingHint、placeholders、relatedTables、relatedFigures 和已确认项目事实；资料不足处写待补充，不编造关键事实。"
+        ].join("\n"),
+        parameters: {
+          type: "object",
+          properties: {
+            sections: {
+              type: "array",
+              description:
+                "要并行起草的模板章节，必须按 docs/密码应用方案.template.json 的 sections 顺序传入。建议每批数量与设置中的章节并行数接近。",
+              items: {
+                type: "object",
+                properties: {
+                  section: {
+                    type: "string",
+                    description: "必须是模板 JSON 中已存在的章节 id 或编号，推荐 id，例如 sec_2_2_2；不存在的虚拟章节会被拒绝。"
+                  },
+                  title: {
+                    type: "string",
+                    description: "章节标题，可省略，工具会从模板 JSON 尝试补全。"
+                  },
+                  writing_hint: {
+                    type: "string",
+                    description: "该章节写作提示，可省略，工具会从模板 JSON 尝试补全。"
+                  }
+                },
+                required: ["section"],
+                additionalProperties: false
+              }
+            },
+            project_context: {
+              type: "string",
+              description: "本批章节需要特别参考的项目事实；不传时使用已沉淀项目档案和最近工具结果。"
+            },
+            max_parallel: {
+              type: "integer",
+              description: "临时覆盖本次并行起草数；不传时使用设置中的方案章节并行数，范围 1-20。"
+            }
+          },
+          required: ["sections"],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
         name: "create_word",
         description:
-          "根据内置 docs/密码应用方案.docx 模板创建一个 Word 文件。默认直接复制模板，内容和格式与模板保持一致；可选 template_fields 仅做模板占位符替换。",
+          "根据内置 docs/密码应用方案.docx 模板创建一个 Word 文件。默认直接复制模板，内容和格式与模板保持一致；可选 template_fields 使用 docx-templates 替换模板中的 {字段名} 占位。",
         parameters: {
           type: "object",
           properties: {
@@ -234,13 +298,14 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             },
             template_fields: {
               type: "array",
-              description: "可选模板字段覆盖。未提供时不会改动模板内容，会生成与模板一致的 Word 副本。",
+              description:
+                "可选模板字段覆盖。内置模板使用 docx-templates 驱动的 {字段名} 占位，这里优先传字段名；未提供时不会改动模板内容，会生成与模板一致的 Word 副本。",
               items: {
                 type: "object",
                 properties: {
                   key: {
                     type: "string",
-                    description: "模板字段名或占位符名，例如 应用系统、${建设单位}、cloudPlatform。"
+                    description: "模板字段名，例如 应用系统、建设单位、cloudPlatform；也可直接传 {建设单位}。"
                   },
                   value: {
                     type: "string",
@@ -248,6 +313,42 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
                   }
                 },
                 required: ["key", "value"],
+                additionalProperties: false
+              }
+            },
+            template_cells: {
+              type: "array",
+              description:
+                "可选模板表格单元格替换。按 docs/密码应用方案.template.json 的 table_id 找到表格模板锚点，再按 0 基行列坐标精准替换单元格，保留单元格格式。",
+              items: {
+                type: "object",
+                properties: {
+                  table_id: {
+                    type: "string",
+                    description: "模板 JSON 中的表格 ID，例如 table_4_2_2_1。"
+                  },
+                  caption: {
+                    type: "string",
+                    description: "表格题注，仅用于在模板 JSON 中选择表格；Word 内定位使用表格 anchors.table 的不可见 SDT 锚。"
+                  },
+                  row_index: {
+                    type: "number",
+                    description: "0 基行号。"
+                  },
+                  cell_index: {
+                    type: "number",
+                    description: "0 基单元格序号，优先于 column_index。"
+                  },
+                  column_index: {
+                    type: "number",
+                    description: "0 基逻辑列号，可用于带合并单元格的表格。"
+                  },
+                  value: {
+                    type: "string",
+                    description: "写入单元格的文本。"
+                  }
+                },
+                required: ["row_index", "value"],
                 additionalProperties: false
               }
             }
@@ -262,9 +363,14 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
         name: "write_word",
         description: [
           "增量写入 Word 文档，并登记为前端文件卡片。",
-          "推荐流程：先调用 create_word 基于内置模板创建 docx；再传入 path、section 和 content，替换模板中的某章某节正文。",
-          "传入 section 时，只替换该标题下直到下一个同级/上级标题前的内容，保留模板其他章节、页眉页脚、样式和编号。不会因为章节或图示未完成而阻止生成。",
-          "不传 section 时兼容旧流程：基于模板写入 content，可用 render_mode=full_document 重建正文。"
+          "标准流程：先读取 docs/密码应用方案.template.json 获取真实 sections、tables、figures 和 anchors；再调用 create_word 基于 docs/密码应用方案.docx 创建模板副本；随后把多个章节草稿放入 sections 批量写入。",
+          "正式生成优先使用 sections 批量写入多个已起草章节：一次打开 docx、替换多个不可见锚、一次保存，明显快于多次调用 write_word。",
+          "正文可先由 draft_scheme_sections 并行起草，再把多个草稿合并到 sections 数组中按模板顺序一次性写入同一个 docx。",
+          "表格 template_cells 和配图 diagrams 建议放在所有正文章节写入后统一补充，避免正文生成阶段反复改表格和图片锚点。",
+          "兼容模式：不传 section 时可用 template_sections 按 Markdown 编号拆分章节，但正式交付不推荐一次性写入整篇长文。",
+          "传入 section 时，section 必须精确匹配 template.json 中已存在的章节 id 或 number，推荐传 id，例如 sec_7；不要传模板中不存在的 7.2、sec_7_2 等虚拟章节。",
+          "Word 内部定位只使用该章节 anchors.body.tag 对应的不可见 SDT 锚，并只替换 w:sdtContent，保留模板其他章节、页眉页脚、样式和编号。",
+          "Markdown 表格会渲染为真实 Word 表格；可用 render_mode=full_document 强制重建正文，或 append 追加到文末。"
         ].join("\n"),
         parameters: {
           type: "object",
@@ -279,11 +385,11 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             },
             section: {
               type: "string",
-              description: "要替换的章节编号或标题，例如 1.1、2.2.2、密码应用技术框架。"
+              description: "要替换的章节，必须存在于 docs/密码应用方案.template.json 的 sections 中。推荐传 id，例如 sec_1_2_1；也可传已存在的编号，例如 7。不存在的 7.2/sec_7_2 会失败。"
             },
             section_title: {
               type: "string",
-              description: "section 的别名；可传章节标题。"
+              description: "section 的别名；仅允许唯一精确匹配 template.json 中已有章节标题。推荐改传 section id。"
             },
             prompt: {
               type: "string",
@@ -293,6 +399,26 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
               type: "string",
               description: "要写入的 Markdown 正文。传 section 时可只写该章节内容。"
             },
+            sections: {
+              type: "array",
+              description:
+                "批量章节写入。数组项必须使用 template.json 中真实存在的 section id 或 number，推荐 id。传入后会一次打开 Word、按不可见锚替换多节、一次保存。",
+              items: {
+                type: "object",
+                properties: {
+                  section: {
+                    type: "string",
+                    description: "模板 JSON 中已存在的章节 id 或 number，例如 sec_1_2_1、sec_7。"
+                  },
+                  content: {
+                    type: "string",
+                    description: "该章节要写入的 Markdown 正文，不包含章节标题。"
+                  }
+                },
+                required: ["section", "content"],
+                additionalProperties: false
+              }
+            },
             fields: {
               type: "object",
               description: "可选结构化模板字段覆盖，例如 constructionUnit、subsystems、machineRooms、cryptoProducts。",
@@ -301,13 +427,13 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             template_fields: {
               type: "array",
               description:
-                "可选模板字段覆盖。用于把用户已明确提供的信息写入 Word 模板占位符，key 可用应用系统、建设单位、单位省份、单位地址、单位邮编、等保级别、物理机房1、物理机房1地址、物理机房2地址、云平台、密码系统产品等。",
+                "可选模板字段覆盖。用于把用户已明确提供的信息写入 Word 模板的 docx-templates 字段占位 {字段名}，key 优先传字段名，可用 应用系统、建设单位、单位省份、单位地址、单位邮编、等保级别、物理机房1、物理机房1地址、物理机房2地址、云平台、密码系统产品等。",
               items: {
                 type: "object",
                 properties: {
                   key: {
                     type: "string",
-                    description: "模板字段名或占位符名，例如 应用系统、${建设单位}、cloudPlatform。"
+                    description: "模板字段名，例如 应用系统、建设单位、cloudPlatform；也可直接传 {建设单位}。"
                   },
                   value: {
                     type: "string",
@@ -315,6 +441,42 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
                   }
                 },
                 required: ["key", "value"],
+                additionalProperties: false
+              }
+            },
+            template_cells: {
+              type: "array",
+              description:
+                "可选模板表格单元格替换。按 docs/密码应用方案.template.json 的 table_id 找到表格模板锚点，再按 0 基行列坐标精准替换单元格，适合只更新模板表格中的个别单元格。",
+              items: {
+                type: "object",
+                properties: {
+                  table_id: {
+                    type: "string",
+                    description: "模板 JSON 中的表格 ID，例如 table_4_2_2_1。"
+                  },
+                  caption: {
+                    type: "string",
+                    description: "表格题注，仅用于在模板 JSON 中选择表格；Word 内定位使用表格 anchors.table 的不可见 SDT 锚。"
+                  },
+                  row_index: {
+                    type: "number",
+                    description: "0 基行号。"
+                  },
+                  cell_index: {
+                    type: "number",
+                    description: "0 基单元格序号，优先于 column_index。"
+                  },
+                  column_index: {
+                    type: "number",
+                    description: "0 基逻辑列号，可用于带合并单元格的表格。"
+                  },
+                  value: {
+                    type: "string",
+                    description: "写入单元格的文本。"
+                  }
+                },
+                required: ["row_index", "value"],
                 additionalProperties: false
               }
             },
@@ -344,11 +506,11 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             },
             render_mode: {
               type: "string",
-              enum: ["append", "full_document"],
-              description: "不传 section 时使用。append 表示追加正文，full_document 表示用正文替换文档主体。"
+              enum: ["template_sections", "append", "full_document"],
+              description: "兼容模式下不传 section/sections 时使用。默认 template_sections：按 Markdown 编号替换 Word 模板；append 表示追加正文，full_document 表示用正文替换文档主体。正式方案优先传 sections 批量写入。"
             }
           },
-          required: ["content"],
+          required: [],
           additionalProperties: false
         }
       }
@@ -358,7 +520,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       function: {
         name: "image_generate",
         description:
-          "生成密码应用技术架构图或业务流程图，并登记为前端文件卡片。仅当用户明确要求生成方案交付物、架构图、流程图、拓扑图或配图时使用；寒暄、答疑、资料澄清阶段不要调用。",
+          "生成密码应用技术架构图或业务流程图，并登记为前端文件卡片。需要多张配图时可以并行调用多个 image_generate；实际并发数受设置中的生图并行数限制。仅当用户明确要求生成方案交付物、架构图、流程图、拓扑图或配图时使用；寒暄、答疑、资料澄清阶段不要调用。",
         parameters: {
           type: "object",
           properties: {
@@ -460,7 +622,14 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
 }
 
 function isFinalArtifactToolName(name: string): boolean {
-  return name === "create_word" || name === "write_word" || name === "write_pdf" || name === "image_generate" || name === "send_file";
+  return (
+    name === "draft_scheme_sections" ||
+    name === "create_word" ||
+    name === "write_word" ||
+    name === "write_pdf" ||
+    name === "image_generate" ||
+    name === "send_file"
+  );
 }
 
 export async function executeAgentToolCall(
@@ -495,6 +664,8 @@ export async function executeAgentToolCall(
       return executeReadFile(args, context, "read_pdf");
     case "write_file":
       return executeWriteFile(args, context);
+    case "draft_scheme_sections":
+      return executeDraftSchemeSections(args, context);
     case "create_word":
       return executeCreateWord(args, context);
     case "write_word":
@@ -656,6 +827,288 @@ async function executeReadFile(
   };
 }
 
+interface DraftSchemeSectionInput {
+  section: string;
+  title?: string;
+  writingHint?: string;
+}
+
+interface ResolvedDraftSchemeSection {
+  section: string;
+  id?: string;
+  number: string;
+  title: string;
+  writingHint?: string;
+  relatedTables?: string[];
+  relatedFigures?: string[];
+}
+
+interface DraftSchemeSectionResult {
+  section: ResolvedDraftSchemeSection;
+  status: Extract<SchemeSectionStatus, "drafted" | "failed">;
+  content?: string;
+  error?: string;
+}
+
+async function executeDraftSchemeSections(
+  args: Record<string, unknown>,
+  context: AgentToolExecutionContext
+): Promise<AgentToolExecutionResult> {
+  const requestedSections = readDraftSectionsArg(args);
+  if (!requestedSections.length) {
+    return {
+      toolName: "draft_scheme_sections",
+      summary: "缺少待起草章节",
+      content: "draft_scheme_sections failed: missing sections"
+    };
+  }
+
+  const configuredParallel = clampDraftSectionParallelism(context.settings.agent.draftSectionParallelism);
+  const requestedParallel = readNumberArg(args, "max_parallel", Number.NaN);
+  const maxParallel = Number.isFinite(requestedParallel)
+    ? clampDraftSectionParallelism(requestedParallel)
+    : configuredParallel;
+  const templateSections = loadSchemeTemplateSections(context.docsDir);
+  const sections = requestedSections
+    .slice(0, DRAFT_SECTION_PARALLELISM_MAX)
+    .map((section) => resolveDraftSchemeSection(section, templateSections));
+  const projectContext = readStringArg(args, "project_context");
+  const results = await mapWithConcurrency(sections, maxParallel, async (section) => {
+    try {
+      const content = await draftSchemeSection(section, context, projectContext);
+      return { section, status: "drafted", content } satisfies DraftSchemeSectionResult;
+    } catch (error) {
+      return {
+        section,
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error)
+      } satisfies DraftSchemeSectionResult;
+    }
+  });
+
+  const drafted = results.filter((result) => result.status === "drafted").length;
+  const failed = results.length - drafted;
+  const content = formatDraftSchemeSectionResults(results, {
+    maxParallel,
+    truncated: requestedSections.length > sections.length
+  });
+
+  return {
+    toolName: "draft_scheme_sections",
+    summary: failed
+      ? `已并行起草 ${drafted}/${results.length} 个章节，失败 ${failed} 个`
+      : `已并行起草 ${drafted} 个章节`,
+    content,
+    schemeProgressUpdates: results.map((result) => ({
+      section: result.section.number,
+      anchorIds: result.section.id ? [result.section.id] : undefined,
+      status: result.status,
+      detail: result.status === "drafted" ? `${result.section.number} 已起草，等待写入 Word` : `${result.section.number} 起草失败`
+    }))
+  };
+}
+
+function readDraftSectionsArg(args: Record<string, unknown>): DraftSchemeSectionInput[] {
+  const value = args.sections;
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string") {
+        return { section: item.trim() };
+      }
+      if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+      const record = item as Record<string, unknown>;
+      const section = typeof record.section === "string" ? record.section.trim() : "";
+      if (!section) return undefined;
+      return {
+        section,
+        title: typeof record.title === "string" ? record.title.trim() : undefined,
+        writingHint: typeof record.writing_hint === "string" ? record.writing_hint.trim() : undefined
+      };
+    })
+    .filter((item): item is DraftSchemeSectionInput => Boolean(item?.section));
+}
+
+function resolveDraftSchemeSection(
+  input: DraftSchemeSectionInput,
+  templateSections: ReturnType<typeof loadSchemeTemplateSections>
+): ResolvedDraftSchemeSection {
+  const normalizedInput = normalizeDraftSectionLookup(input.section);
+  const matches = templateSections.filter((section) =>
+    [
+      section.id,
+      section.number,
+      section.title,
+      `${section.number}${section.title}`,
+      `${section.number}.${section.title}`,
+      `${section.number} ${section.title}`,
+      `${section.number}、${section.title}`
+    ].some((candidate) => normalizeDraftSectionLookup(candidate) === normalizedInput)
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      matches.length
+        ? `draft_scheme_sections failed: ambiguous template section ${input.section}; use the exact sections[].id`
+        : `draft_scheme_sections failed: unknown template section ${input.section}; use an existing sections[].id from docs/密码应用方案.template.json`
+    );
+  }
+  const matched = matches[0];
+
+  return {
+    section: input.section,
+    id: matched.id,
+    number: matched.number,
+    title: input.title || matched.title,
+    writingHint: input.writingHint || matched.writingHint,
+    relatedTables: matched.relatedTables,
+    relatedFigures: matched.relatedFigures
+  };
+}
+
+async function draftSchemeSection(
+  section: ResolvedDraftSchemeSection,
+  context: AgentToolExecutionContext,
+  projectContext: string
+): Promise<string> {
+  if (context.signal?.aborted) {
+    throw new Error("draft_scheme_sections aborted");
+  }
+
+  const apiKey = context.settings.openai.apiKeyConfigured ? process.env.OPENAI_API_KEY : undefined;
+  if (!apiKey) {
+    return buildFallbackDraftSchemeSection(section, context, projectContext);
+  }
+
+  const client = new OpenAI({
+    apiKey,
+    baseURL: context.settings.openai.baseUrl,
+    timeout: context.settings.openai.requestTimeoutMs
+  });
+  const response = await client.chat.completions.create(
+    {
+      model: context.settings.openai.chatModel,
+      messages: buildDraftSchemeSectionMessages(section, context, projectContext),
+      max_tokens: Math.min(Math.max(Math.floor(context.settings.openai.maxOutputTokens / 6), 900), 2200)
+    },
+    { signal: context.signal }
+  );
+  const content = response.choices[0]?.message?.content?.trim();
+  if (!content) {
+    throw new Error("模型未返回章节草稿");
+  }
+  return normalizeDraftContent(content);
+}
+
+function buildDraftSchemeSectionMessages(
+  section: ResolvedDraftSchemeSection,
+  context: AgentToolExecutionContext,
+  projectContext: string
+): ChatCompletionMessageParam[] {
+  const facts = compactText([context.userPrompt, projectContext, context.memory].filter(Boolean).join("\n\n"), 12000);
+  return [
+    {
+      role: "system",
+      content: [
+        "你是密码应用方案章节正文起草器，只负责起草一个模板章节的正文。",
+        "输出要求：只输出可直接传给 write_word(content) 的 Markdown 正文，不要输出章节标题，不要输出代码块，不要解释你的思路。",
+        "本阶段只写正文段落和必要列表；不要生成 Markdown 表格，不要生成图片，不要写 Mermaid/SVG，不要编造表格单元格。",
+        "如该节关联表格或图示，只写引入性正文，具体表格和配图将在最后由 Agent 用 template_cells、image_generate 和 diagrams 统一生成。",
+        "降低 AI 味：围绕本节事实写短而具体的句子，说明对象、位置、算法/产品/调用路径/安全效果；避免万能套话、重复政策背景和空泛排比。",
+        "资料不足时明确写“待补充/需确认”，不得虚构建设单位、设备型号、产品名称、网络边界或密钥管理细节。"
+      ].join("\n")
+    },
+    {
+      role: "user",
+      content: [
+        `章节：${section.number} ${section.title}`,
+        section.writingHint ? `写作提示：${section.writingHint}` : "",
+        section.relatedTables?.length ? `关联表格：${section.relatedTables.join("、")}（最后统一填充，此处不生成表格）` : "",
+        section.relatedFigures?.length ? `关联图示：${section.relatedFigures.join("、")}（最后统一生成，此处不生成图片）` : "",
+        "",
+        "项目事实和上下文：",
+        facts || "暂无明确项目事实。"
+      ]
+        .filter(Boolean)
+        .join("\n")
+    }
+  ];
+}
+
+function buildFallbackDraftSchemeSection(
+  section: ResolvedDraftSchemeSection,
+  context: AgentToolExecutionContext,
+  projectContext: string
+): string {
+  const contextText = compactText([context.userPrompt, projectContext, context.memory].filter(Boolean).join("\n"), 900);
+  return [
+    `本节围绕“${section.title}”说明${context.sessionTitle}在该部分的现状、建设要求和密码应用安排。`,
+    section.writingHint ? `应重点补充：${section.writingHint}` : "应结合已确认项目事实补充具体对象、边界、产品、算法和调用路径。",
+    contextText ? `已确认上下文摘要：${contextText}` : "当前项目资料不足，具体系统边界、设备清单、产品型号和责任主体待补充/需确认。",
+    section.relatedTables?.length ? `本节关联模板表格 ${section.relatedTables.join("、")}，表格单元格将在最后统一补充。` : "",
+    section.relatedFigures?.length ? `本节关联模板图示 ${section.relatedFigures.join("、")}，配图将在最后统一生成并嵌入。` : ""
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function formatDraftSchemeSectionResults(
+  results: DraftSchemeSectionResult[],
+  options: { maxParallel: number; truncated: boolean }
+): string {
+  const lines = [
+    "draft_scheme_sections completed",
+    `并行度：${options.maxParallel}`,
+    options.truncated
+      ? `本批超过 ${DRAFT_SECTION_PARALLELISM_MAX} 个章节，已只处理前 ${DRAFT_SECTION_PARALLELISM_MAX} 个；请继续分批起草。`
+      : "",
+    "注意：以下为正文草稿，不含 Markdown 表格和配图；写入 Word 时请按章节顺序合并到 write_word.sections 批量写入。"
+  ].filter(Boolean);
+
+  for (const result of results) {
+    lines.push("", `## ${result.section.number} ${result.section.title}`, `状态：${result.status === "drafted" ? "已起草" : "失败"}`);
+    if (result.status === "drafted") {
+      lines.push(result.content || "");
+    } else {
+      lines.push(`错误：${result.error || "未知错误"}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function normalizeDraftContent(content: string): string {
+  return content
+    .replace(/^```(?:markdown|md)?\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+}
+
+function normalizeDraftSectionLookup(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[第章节]/g, "")
+    .replace(/[\s.。．、,，:：()（）\[\]【】《》"'“”‘’_-]+/g, "")
+    .trim();
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 async function executeCreateWord(
   args: Record<string, unknown>,
   context: AgentToolExecutionContext
@@ -664,9 +1117,12 @@ async function executeCreateWord(
   const safeName = sanitizeFileName(rawName.endsWith(".docx") ? rawName : `${rawName}.docx`);
   const outputPath = join(context.outputDir, `${Date.now().toString(36)}-${safeName}`);
   const templatePath = join(context.docsDir, "密码应用方案.docx");
+  const templateJsonPath = join(context.docsDir, "密码应用方案.template.json");
   const result = await createWordDocxFromTemplate(templatePath, outputPath, {
     fields: readObjectArg(args, "fields"),
-    templateFields: readTemplateFieldsArg(args)
+    templateFields: readTemplateFieldsArg(args),
+    templateJsonPath,
+    templateCells: readTemplateCellsArg(args)
   });
 
   return {
@@ -678,6 +1134,7 @@ async function executeCreateWord(
     content: [
       `create_word completed: ${result.outputPath}`,
       `模板占位符替换次数：${result.templateReplacementCount}`,
+      `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
       `显式字段：${result.filledFields.join("、") || "无"}`
     ].join("\n"),
     artifactPath: result.outputPath
@@ -689,14 +1146,45 @@ async function executeWriteWord(
   context: AgentToolExecutionContext
 ): Promise<AgentToolExecutionResult> {
   const content = readStringArg(args, "content");
-  if (!content) {
-    return { toolName: "write_word", summary: "缺少写入正文", content: "write_word failed: missing content" };
-  }
+  const sectionBatch = readWordSectionBatchArg(args);
 
   const prompt = readStringArg(args, "prompt");
   const templatePath = join(context.docsDir, "密码应用方案.docx");
+  const templateJsonPath = join(context.docsDir, "密码应用方案.template.json");
   const diagrams = readDiagramAssetsArg(args, context);
   const section = readSectionArg(args);
+
+  if (sectionBatch.length) {
+    const sourcePath = readWordSourcePath(args, context, templatePath);
+    const outputPath = resolveWordOutputPath(args, context, sourcePath);
+    const result = await replaceWordSectionsContent(sourcePath, outputPath, {
+      sections: sectionBatch,
+      fields: readObjectArg(args, "fields"),
+      templateFields: readTemplateFieldsArg(args),
+      templateCells: readTemplateCellsArg(args),
+      diagrams,
+      templateJsonPath
+    });
+
+    return {
+      toolName: "write_word",
+      summary: `已批量更新 ${result.fileName} 的 ${result.sections.length} 个章节`,
+      content: [
+        `write_word completed: ${result.outputPath}`,
+        `批量更新章节：${result.sections.map((item) => item.matchedHeading).join("、")}`,
+        `模板锚点：${result.sections.map((item) => item.templateAnchorId).filter(Boolean).join("、") || "未使用"}`,
+        `替换原内容块：${result.sections.reduce((total, item) => total + item.replacementCount, 0)}`,
+        `模板占位符替换次数：${result.templateReplacementCount}`,
+        `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
+        `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`
+      ].join("\n"),
+      artifactPath: result.outputPath
+    };
+  }
+
+  if (!content) {
+    return { toolName: "write_word", summary: "缺少写入正文", content: "write_word failed: missing content" };
+  }
 
   if (section) {
     const sourcePath = readWordSourcePath(args, context, templatePath);
@@ -706,7 +1194,9 @@ async function executeWriteWord(
       content,
       fields: readObjectArg(args, "fields"),
       templateFields: readTemplateFieldsArg(args),
-      diagrams
+      templateCells: readTemplateCellsArg(args),
+      diagrams,
+      templateJsonPath
     });
 
     return {
@@ -715,8 +1205,10 @@ async function executeWriteWord(
       content: [
         `write_word completed: ${result.outputPath}`,
         `更新章节：${result.matchedHeading}`,
+        `模板锚点：${result.templateAnchorId || "未使用"}`,
         `替换原内容块：${result.replacementCount}`,
         `模板占位符替换次数：${result.templateReplacementCount}`,
+        `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
         `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`
       ].join("\n"),
       artifactPath: result.outputPath
@@ -734,8 +1226,10 @@ async function executeWriteWord(
     generatedMarkdown: content,
     fields: readObjectArg(args, "fields"),
     templateFields: readTemplateFieldsArg(args),
+    templateCells: readTemplateCellsArg(args),
     diagrams,
-    renderMode
+    renderMode,
+    templateJsonPath
   });
 
   return {
@@ -744,6 +1238,8 @@ async function executeWriteWord(
     content: [
       `write_word completed: ${result.outputPath}`,
       `填充字段：${result.filledFields.join("、") || "无"}`,
+      `模板锚点：${result.templateAnchorsUsed.join("、") || "未使用"}`,
+      `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
       `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`,
       `写入模式：${result.renderMode}`
     ].join("\n"),
@@ -775,6 +1271,14 @@ async function executeImageGenerate(
   args: Record<string, unknown>,
   context: AgentToolExecutionContext
 ): Promise<AgentToolExecutionResult> {
+  const maxParallel = clampImageGenerationParallelism(context.settings.agent.imageGenerationParallelism);
+  return runWithImageGenerationSlot(maxParallel, async () => executeImageGenerateUnlocked(args, context));
+}
+
+async function executeImageGenerateUnlocked(
+  args: Record<string, unknown>,
+  context: AgentToolExecutionContext
+): Promise<AgentToolExecutionResult> {
   if (!context.settings.openai.autoImageGeneration) {
     return {
       toolName: "image_generate",
@@ -793,7 +1297,7 @@ async function executeImageGenerate(
       imageModel: context.settings.openai.imageModel,
       imageSize: context.settings.openai.imageSize,
       imageQuality: context.settings.openai.imageQuality,
-      requestTimeoutMs: context.settings.openai.requestTimeoutMs
+      requestTimeoutMs: context.settings.openai.imageRequestTimeoutMs
     },
     {
       kind,
@@ -803,7 +1307,7 @@ async function executeImageGenerate(
       memory: context.memory,
       generatedMarkdown: "",
       outputDir: context.outputDir,
-      artifactStamp: Date.now().toString(36)
+      artifactStamp: createToolArtifactStamp()
     },
     context.signal
   );
@@ -814,6 +1318,41 @@ async function executeImageGenerate(
     content: [`image_generate completed: ${result.outputPath}`, `图示名称：${label}`, `图示类型：${kind}`].join("\n"),
     artifactPath: result.outputPath
   };
+}
+
+async function runWithImageGenerationSlot<T>(maxParallel: number, task: () => Promise<T>): Promise<T> {
+  await acquireImageGenerationSlot(maxParallel);
+  try {
+    return await task();
+  } finally {
+    releaseImageGenerationSlot();
+  }
+}
+
+async function acquireImageGenerationSlot(maxParallel: number): Promise<void> {
+  const limit = clampImageGenerationParallelism(maxParallel);
+  if (activeImageGenerations < limit) {
+    activeImageGenerations += 1;
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    imageGenerationQueue.push({ limit, resolve });
+  });
+}
+
+function releaseImageGenerationSlot(): void {
+  activeImageGenerations = Math.max(0, activeImageGenerations - 1);
+  const nextIndex = imageGenerationQueue.findIndex((item) => activeImageGenerations < item.limit);
+  if (nextIndex < 0) return;
+
+  const [next] = imageGenerationQueue.splice(nextIndex, 1);
+  activeImageGenerations += 1;
+  next.resolve();
+}
+
+function createToolArtifactStamp(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 async function executeSendFile(
@@ -1061,6 +1600,45 @@ function readTemplateFieldsArg(args: Record<string, unknown>): Array<Record<stri
   return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
 }
 
+function readTemplateCellsArg(args: Record<string, unknown>): TemplateCellReplacementInput[] | undefined {
+  const value = args.template_cells ?? args.templateCells;
+  if (!Array.isArray(value)) return undefined;
+  const cells = value
+    .map((item) => normalizeTemplateCellReplacement(item))
+    .filter((item): item is TemplateCellReplacementInput => Boolean(item));
+  return cells.length ? cells : undefined;
+}
+
+function normalizeTemplateCellReplacement(item: unknown): TemplateCellReplacementInput | undefined {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+  const record = item as Record<string, unknown>;
+  const rowIndex = readTemplateCellNumber(record.row_index ?? record.rowIndex);
+  const cellIndex = readTemplateCellNumber(record.cell_index ?? record.cellIndex);
+  const columnIndex = readTemplateCellNumber(record.column_index ?? record.columnIndex);
+  const value = typeof record.value === "string" ? record.value.trim() : "";
+  const tableId = typeof (record.table_id ?? record.tableId) === "string" ? String(record.table_id ?? record.tableId).trim() : "";
+  const caption = typeof record.caption === "string" ? record.caption.trim() : "";
+
+  if (!value || !Number.isInteger(rowIndex) || rowIndex < 0) return undefined;
+  if (!tableId && !caption) return undefined;
+  if ((!Number.isInteger(cellIndex) || cellIndex < 0) && (!Number.isInteger(columnIndex) || columnIndex < 0)) return undefined;
+
+  return {
+    ...(tableId ? { tableId } : {}),
+    ...(caption ? { caption } : {}),
+    rowIndex,
+    ...(Number.isInteger(cellIndex) && cellIndex >= 0 ? { cellIndex } : {}),
+    ...(Number.isInteger(columnIndex) && columnIndex >= 0 ? { columnIndex } : {}),
+    value
+  };
+}
+
+function readTemplateCellNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) return Number(value.trim());
+  return Number.NaN;
+}
+
 function readSectionArg(args: Record<string, unknown>): string {
   return (
     readStringArg(args, "section") ||
@@ -1069,6 +1647,25 @@ function readSectionArg(args: Record<string, unknown>): string {
     readStringArg(args, "target") ||
     readStringArg(args, "heading")
   );
+}
+
+function readWordSectionBatchArg(args: Record<string, unknown>): Array<{ section: string; content: string }> {
+  const value = args.sections;
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+      const record = item as Record<string, unknown>;
+      const section = typeof record.section === "string" ? record.section.trim() : "";
+      const content =
+        typeof record.content === "string"
+          ? record.content.trim()
+          : typeof record.markdown === "string"
+            ? record.markdown.trim()
+            : "";
+      return section && content ? { section, content } : undefined;
+    })
+    .filter((item): item is { section: string; content: string } => Boolean(item));
 }
 
 function readWordSourcePath(args: Record<string, unknown>, context: AgentToolExecutionContext, templatePath: string): string {
@@ -1096,8 +1693,10 @@ function resolveWordOutputPath(args: Record<string, unknown>, context: AgentTool
   return join(context.outputDir, `${Date.now().toString(36)}-${safeName}`);
 }
 
-function readRenderModeArg(args: Record<string, unknown>): "append" | "full_document" {
-  return readStringArg(args, "render_mode") === "append" || readStringArg(args, "renderMode") === "append" ? "append" : "full_document";
+function readRenderModeArg(args: Record<string, unknown>): "template_sections" | "append" | "full_document" {
+  const value = readStringArg(args, "render_mode") || readStringArg(args, "renderMode");
+  if (value === "append" || value === "full_document" || value === "template_sections") return value;
+  return "template_sections";
 }
 
 function readDiagramAssetsArg(args: Record<string, unknown>, context: AgentToolExecutionContext): SchemeDiagramAsset[] {

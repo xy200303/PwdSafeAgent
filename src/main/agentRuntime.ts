@@ -2,6 +2,7 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 import type { AppSettings, ChatSession, StreamItem } from "../shared/types";
 import type { BundledPythonRuntime } from "./bundledRuntime";
 import { createPiAgentBridge } from "./piAgentBridge";
+import type { SchemeProgressUpdateInput } from "./schemeProgress";
 
 export type MessageStreamItem = Extract<StreamItem, { kind: "message" }>;
 
@@ -29,6 +30,9 @@ export interface AgentRuntimeHost {
   startToolCall(sessionId: string, toolName: string, summary: string): StreamItem;
   finishToolCall(sessionId: string, item: StreamItem, status: "success" | "failed", summary: string): void;
   addStage(sessionId: string, title: string, detail?: string): void;
+  ensureSchemeProgress(sessionId: string, detail?: string, artifactName?: string): void;
+  updateSchemeSectionProgress(sessionId: string, update: SchemeProgressUpdateInput): void;
+  settleSchemeProgress(sessionId: string, status: "completed" | "failed"): void;
   appendSessionMemory(sessionId: string, source: string, content: string): void;
   formatSessionMemory(sessionId: string): string;
   getSessionReadableFiles(sessionId: string): string[];

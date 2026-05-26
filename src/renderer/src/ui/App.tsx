@@ -23,11 +23,13 @@ import {
   Bot,
   CheckCircle2,
   ChevronDown,
+  Circle,
   Eye,
   File,
   Files,
   FolderOpen,
   Image,
+  ListChecks,
   Loader2,
   MoreHorizontal,
   Paperclip,
@@ -61,6 +63,17 @@ import {
 import { useDispatch, useSelector } from "react-redux";
 import type { AppDispatch } from "../store";
 import type { ReactNode } from "react";
+import {
+  DRAFT_SECTION_PARALLELISM_DEFAULT,
+  DRAFT_SECTION_PARALLELISM_MAX,
+  DRAFT_SECTION_PARALLELISM_MIN,
+  IMAGE_GENERATION_REQUEST_TIMEOUT_DEFAULT_MS,
+  IMAGE_GENERATION_PARALLELISM_DEFAULT,
+  IMAGE_GENERATION_PARALLELISM_MAX,
+  IMAGE_GENERATION_PARALLELISM_MIN,
+  clampDraftSectionParallelism,
+  clampImageGenerationParallelism
+} from "../../../shared/types";
 import type {
   AppSettings,
   ArtifactKind,
@@ -71,6 +84,9 @@ import type {
   PwdSafeAgentApi,
   RuntimeCheckResult,
   RuntimeCommandCheck,
+  SchemeProgressItem,
+  SchemeProgressSection,
+  SchemeSectionStatus,
   StreamItem
 } from "../../../shared/types";
 import { getErrorMessage, resolvePwdSafeAgentApi } from "../bridge";
@@ -90,6 +106,7 @@ export function App(): JSX.Element {
   const [renameTarget, setRenameTarget] = useState<ChatSession | undefined>();
   const [deleteTarget, setDeleteTarget] = useState<ChatSession | undefined>();
   const currentSession = sessions.find((session) => session.id === currentSessionId);
+  const schemeProgress = findLatestSchemeProgressItem(currentSession);
   const bridge = resolvePwdSafeAgentApi(window.pwdSafeAgent);
   const api = bridge.api;
 
@@ -154,7 +171,7 @@ export function App(): JSX.Element {
 
   return (
     <Tooltip.Provider delayDuration={350}>
-      <div className="app-shell">
+      <div className={schemeProgress ? "app-shell with-progress" : "app-shell"}>
         <Sidebar
           sessions={sessions}
           artifactCount={artifacts.length}
@@ -189,6 +206,7 @@ export function App(): JSX.Element {
             onError={(message) => setAppError(message)}
           />
         </main>
+        {schemeProgress ? <SchemeProgressPanel item={schemeProgress} /> : null}
         {settingsOpen ? (
           <SettingsPanel
             api={api}
@@ -429,11 +447,176 @@ function MessagePane({
   );
 }
 
+interface SchemeProgressChapter {
+  root: SchemeProgressSection;
+  sections: SchemeProgressSection[];
+  total: number;
+  completed: number;
+  failed: number;
+  status: SchemeSectionStatus;
+}
+
+function SchemeProgressPanel({ item }: { item: SchemeProgressItem }): JSX.Element {
+  const chapters = buildSchemeProgressChapters(item.sections);
+  const percent = item.total > 0 ? Math.round((item.completed / item.total) * 100) : 0;
+  const drafted = item.drafted ?? item.sections.filter((section) => section.status === "drafted").length;
+
+  return (
+    <aside className="scheme-progress-panel">
+      <header className="scheme-progress-header">
+        <ListChecks size={17} />
+        <div>
+          <span>章节进度</span>
+          <strong>{item.artifactName || item.title}</strong>
+        </div>
+        <span className={`scheme-progress-pill ${item.status}`}>
+          <SchemeStatusIcon status={item.status} />
+          {schemeProgressStatusLabel(item.status)}
+        </span>
+      </header>
+
+      <div className="scheme-progress-summary">
+        <div className="scheme-progress-numbers">
+          <strong>
+            {item.completed}/{item.total}
+          </strong>
+          <span>{percent}%</span>
+        </div>
+        <div className="scheme-progress-track" aria-label={`章节完成 ${percent}%`}>
+          <span style={{ width: `${percent}%` }} />
+        </div>
+        <p>
+          {item.detail || "等待按模板章节写入"}
+          {drafted ? ` · 已起草 ${drafted}` : ""}
+          {item.failed ? ` · 失败 ${item.failed}` : ""}
+        </p>
+      </div>
+
+      <ScrollArea.Root className="scheme-progress-scroll">
+        <ScrollArea.Viewport className="scheme-progress-body">
+          {chapters.map((chapter, index) => (
+            <SchemeChapterProgress
+              key={chapter.root.id}
+              chapter={chapter}
+              defaultOpen={chapter.status === "running" || chapter.failed > 0 || chapter.completed > 0 || index === 0}
+            />
+          ))}
+        </ScrollArea.Viewport>
+        <ScrollArea.Scrollbar className="scrollbar" orientation="vertical">
+          <ScrollArea.Thumb className="scrollbar-thumb" />
+        </ScrollArea.Scrollbar>
+      </ScrollArea.Root>
+    </aside>
+  );
+}
+
+function SchemeChapterProgress({
+  chapter,
+  defaultOpen
+}: {
+  chapter: SchemeProgressChapter;
+  defaultOpen: boolean;
+}): JSX.Element {
+  const childSections = chapter.sections.filter((section) => section.id !== chapter.root.id);
+  const percent = chapter.total > 0 ? Math.round((chapter.completed / chapter.total) * 100) : 0;
+
+  return (
+    <Collapsible.Root className={`scheme-chapter ${chapter.status}`} defaultOpen={defaultOpen}>
+      <Collapsible.Trigger asChild>
+        <button type="button" className="scheme-chapter-trigger">
+          <SchemeStatusIcon status={chapter.status} />
+          <span className="scheme-chapter-main">
+            <strong>
+              {chapter.root.number} {chapter.root.title}
+            </strong>
+            <span>
+              {chapter.completed}/{chapter.total} · {percent}%
+              {chapter.failed ? ` · 失败 ${chapter.failed}` : ""}
+            </span>
+          </span>
+          <ChevronDown size={14} />
+        </button>
+      </Collapsible.Trigger>
+      <Collapsible.Content className="scheme-section-list">
+        {childSections.length ? (
+          childSections.map((section) => <SchemeSectionProgressRow key={section.id} section={section} />)
+        ) : (
+          <SchemeSectionProgressRow section={chapter.root} />
+        )}
+      </Collapsible.Content>
+    </Collapsible.Root>
+  );
+}
+
+function SchemeSectionProgressRow({ section }: { section: SchemeProgressSection }): JSX.Element {
+  const depth = Math.min(Math.max(section.headingLevel - 2, 0), 4);
+  return (
+    <div className={`scheme-section-row ${section.status} depth-${depth}`}>
+      <SchemeStatusIcon status={section.status} />
+      <span className="scheme-section-main">
+        <strong>
+          {section.number} {section.title}
+        </strong>
+        <small>{formatSchemeSectionDetail(section)}</small>
+      </span>
+    </div>
+  );
+}
+
+function SchemeStatusIcon({ status }: { status: SchemeSectionStatus | SchemeProgressItem["status"] }): JSX.Element {
+  if (status === "running" || status === "drafting") return <Loader2 size={13} className="spin" />;
+  if (status === "drafted") return <PencilLine size={13} />;
+  if (status === "completed") return <CheckCircle2 size={13} />;
+  if (status === "failed") return <XCircle size={13} />;
+  return <Circle size={13} />;
+}
+
+function buildSchemeProgressChapters(sections: SchemeProgressSection[]): SchemeProgressChapter[] {
+  const roots = sections.filter((section) => section.headingLevel === 1);
+  const chapterRoots = roots.length ? roots : sections.slice(0, 1);
+  return chapterRoots.map((root) => {
+    const members = sections.filter((section) => section.id === root.id || section.number.startsWith(`${root.number}.`));
+    const completed = members.filter((section) => section.status === "completed").length;
+    const failed = members.filter((section) => section.status === "failed").length;
+    return {
+      root,
+      sections: members,
+      total: members.length,
+      completed,
+      failed,
+      status: resolveSchemeChapterStatus(members, completed, failed)
+    };
+  });
+}
+
+function resolveSchemeChapterStatus(
+  sections: SchemeProgressSection[],
+  completed: number,
+  failed: number
+): SchemeSectionStatus {
+  if (sections.some((section) => section.status === "running" || section.status === "drafting")) return "running";
+  if (failed > 0) return "failed";
+  if (sections.length > 0 && completed === sections.length) return "completed";
+  if (sections.some((section) => section.status === "drafted") || completed > 0) return "running";
+  return "pending";
+}
+
+function formatSchemeSectionDetail(section: SchemeProgressSection): string {
+  if (section.detail) return section.detail;
+  const refs = [
+    section.relatedTables?.length ? `表格 ${section.relatedTables.length}` : "",
+    section.relatedFigures?.length ? `图示 ${section.relatedFigures.length}` : ""
+  ].filter(Boolean);
+  if (refs.length) return refs.join(" · ");
+  return section.writingHint || schemeSectionStatusLabel(section.status);
+}
+
 function isUnfinishedAssistantMessage(item: StreamItem): boolean {
   return item.kind === "message" && item.role === "assistant" && !item.isFinished;
 }
 
 function shouldRenderStreamItem(item: StreamItem): boolean {
+  if (item.kind === "scheme_progress") return false;
   return !(item.kind === "message" && item.role === "assistant" && item.isFinished && !item.content.trim());
 }
 
@@ -1037,8 +1220,19 @@ function SettingsPanel({
   const [autoPdfExport, setAutoPdfExport] = useState(settings?.document.autoPdfExport ?? false);
   const [libreOfficePath, setLibreOfficePath] = useState(settings?.document.libreOfficePath || "");
   const [timeout, setTimeoutValue] = useState(settings?.openai.requestTimeoutMs || 120000);
+  const [imageTimeout, setImageTimeoutValue] = useState(
+    settings?.openai.imageRequestTimeoutMs || IMAGE_GENERATION_REQUEST_TIMEOUT_DEFAULT_MS
+  );
   const [maxTokens, setMaxTokens] = useState(settings?.openai.maxOutputTokens || 16000);
   const [execBashEnabled, setExecBashEnabled] = useState(settings?.agent.execBashEnabled ?? true);
+  const [draftSectionParallelism, setDraftSectionParallelism] = useState(
+    settings ? clampDraftSectionParallelism(settings.agent.draftSectionParallelism) : DRAFT_SECTION_PARALLELISM_DEFAULT
+  );
+  const [imageGenerationParallelism, setImageGenerationParallelism] = useState(
+    settings
+      ? clampImageGenerationParallelism(settings.agent.imageGenerationParallelism)
+      : IMAGE_GENERATION_PARALLELISM_DEFAULT
+  );
   const [apiKey, setApiKey] = useState("");
   const [imageApiKey, setImageApiKey] = useState("");
   const [runtimeCheck, setRuntimeCheck] = useState<RuntimeCheckResult | undefined>();
@@ -1060,6 +1254,7 @@ function SettingsPanel({
           thinkingEnabled,
           reasoningEffort,
           requestTimeoutMs: timeout,
+          imageRequestTimeoutMs: imageTimeout,
           maxOutputTokens: maxTokens,
           apiKey: apiKey.trim() || undefined,
           imageApiKey: imageApiKey.trim() || undefined
@@ -1069,7 +1264,9 @@ function SettingsPanel({
           libreOfficePath
         },
         agent: {
-          execBashEnabled
+          execBashEnabled,
+          draftSectionParallelism: clampDraftSectionParallelism(draftSectionParallelism),
+          imageGenerationParallelism: clampImageGenerationParallelism(imageGenerationParallelism)
         }
       });
       onSaved(next);
@@ -1241,6 +1438,16 @@ function SettingsPanel({
                   />
                 </label>
                 <label>
+                  生图请求超时 ms
+                  <input
+                    type="number"
+                    min={1000}
+                    step={1000}
+                    value={imageTimeout}
+                    onChange={(event) => setImageTimeoutValue(Number(event.target.value))}
+                  />
+                </label>
+                <label>
                   最大输出 tokens
                   <input
                     type="number"
@@ -1248,6 +1455,36 @@ function SettingsPanel({
                     onChange={(event) => setMaxTokens(Number(event.target.value))}
                   />
                 </label>
+                <label>
+                  方案章节并行数
+                  <input
+                    type="number"
+                    min={DRAFT_SECTION_PARALLELISM_MIN}
+                    max={DRAFT_SECTION_PARALLELISM_MAX}
+                    step={1}
+                    value={draftSectionParallelism}
+                    onChange={(event) => setDraftSectionParallelism(clampDraftSectionParallelism(event.target.value))}
+                  />
+                </label>
+                <p className="settings-note">
+                  控制 draft_scheme_sections 默认同时起草的章节数；工具调用中的 max_parallel 仅作为单次覆盖。
+                </p>
+                <label>
+                  生图并行数
+                  <input
+                    type="number"
+                    min={IMAGE_GENERATION_PARALLELISM_MIN}
+                    max={IMAGE_GENERATION_PARALLELISM_MAX}
+                    step={1}
+                    value={imageGenerationParallelism}
+                    onChange={(event) =>
+                      setImageGenerationParallelism(clampImageGenerationParallelism(event.target.value))
+                    }
+                  />
+                </label>
+                <p className="settings-note">
+                  控制多个 image_generate 同时执行的数量；默认 10，可按生图接口配额下调。
+                </p>
                 <SwitchRow checked={execBashEnabled} onCheckedChange={setExecBashEnabled}>
                   允许 Agent 使用 exec_bash 执行命令
                 </SwitchRow>
@@ -1369,6 +1606,39 @@ function statusLabel(status: ChatSession["status"]): string {
     running: "生成中",
     completed: "已完成",
     failed: "失败"
+  };
+  return map[status];
+}
+
+function findLatestSchemeProgressItem(session?: ChatSession): SchemeProgressItem | undefined {
+  if (!session) return undefined;
+  for (let index = session.items.length - 1; index >= 0; index -= 1) {
+    const item = session.items[index];
+    if (item.kind === "scheme_progress") return item;
+  }
+  return undefined;
+}
+
+function schemeProgressStatusLabel(status: SchemeProgressItem["status"]): string {
+  const map = {
+    pending: "待开始",
+    running: "生成中",
+    partial: "部分完成",
+    completed: "已完成",
+    failed: "失败"
+  };
+  return map[status];
+}
+
+function schemeSectionStatusLabel(status: SchemeSectionStatus): string {
+  const map = {
+    pending: "待生成",
+    drafting: "起草中",
+    drafted: "已起草",
+    running: "生成中",
+    completed: "已完成",
+    failed: "失败",
+    skipped: "跳过"
   };
   return map[status];
 }
