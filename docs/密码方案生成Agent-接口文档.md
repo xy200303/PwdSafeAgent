@@ -837,7 +837,124 @@ export interface ReadWordResult {
 }
 ```
 
-### 11.9 `write_word`
+### 11.9 `plan_scheme_batches`
+
+`plan_scheme_batches` 根据 `docs/密码应用方案.template.json` 规划稳定的章节起草批次，不生成正文、不写 Word。
+
+### Input
+
+```ts
+export interface PlanSchemeBatchesInput {
+  start_section?: string;
+  completed_sections?: string[];
+  batch_size?: number;
+}
+```
+
+### Output
+
+```ts
+export interface PlanSchemeBatchesResult {
+  first_draft_call: {
+    sections: Array<{
+      section: string;
+      title?: string;
+      writing_hint?: string;
+    }>;
+    max_parallel: number;
+  };
+  all_batches: string[][];
+}
+```
+
+行为规范：
+
+1. 只返回 `template.json` 中真实存在的 section id。
+2. 批次顺序严格保持模板 `sections` 顺序。
+3. 会跳过已完成、已起草、运行中或显式传入 `completed_sections` 的章节。
+4. `start_section` 和 `completed_sections` 必须能在 `template.json` 中唯一匹配；未知或歧义输入直接失败。
+5. 整篇生成时应先调用本工具，再按 `first_draft_call` 调用 `draft_scheme_sections`。
+
+### 11.10 `plan_scheme_assets`
+
+`plan_scheme_assets` 根据 `template.json` 规划章节关联表格和图示任务，不写 Word、不生成图片。
+
+### Input
+
+```ts
+export interface PlanSchemeAssetsInput {
+  section_ids?: string[];
+  include_tables?: boolean;
+  include_figures?: boolean;
+  max_items?: number;
+}
+```
+
+### Output
+
+```ts
+export interface PlanSchemeAssetsResult {
+  template_cells_plan: Array<{
+    table_id: string;
+    row_index: number;
+    column_index: number;
+    cell_index: number;
+    header?: string;
+    value: string;
+  }>;
+  image_generate_plan: Array<{
+    figure_id: string;
+    label: string;
+    kind: "architecture" | "flow";
+    prompt: string;
+  }>;
+}
+```
+
+行为规范：
+
+1. 正文章节写入后调用，用于补齐 `【待填写】` 表格和 `【图片占位】`。
+2. `table_id`、`row_index`、`column_index`、`cell_index` 必须来自工具返回值，不允许模型自造。
+3. 图片先按 `image_generate_plan` 并行生成，再在 `write_word.diagrams` 中传 `figure_id`、`label`、`kind`、`path`。
+
+### 11.11 `draft_scheme_sections`
+
+`draft_scheme_sections` 只负责并行起草正文草稿，不写 Word、不生成表格或图片。
+
+### Input
+
+```ts
+export interface DraftSchemeSectionsInput {
+  sections: Array<{
+    section: string;
+    title?: string;
+    writing_hint?: string;
+  }>;
+  project_context?: string;
+  max_parallel?: number;
+}
+```
+
+### Output
+
+```ts
+export interface DraftSchemeSectionsResult {
+  sections: Array<{
+    section: string;
+    status: "drafted" | "failed";
+    content?: string;
+    error?: string;
+  }>;
+}
+```
+
+行为规范：
+
+1. `sections[].section` 必须来自 `docs/密码应用方案.template.json`，推荐使用 section id。
+2. 默认并行数由 `AGENT_DRAFT_SECTION_PARALLELISM` 控制，当前默认 `20`。
+3. 输出是可传给 `write_word.sections` 的正文草稿，不包含章节标题、Markdown 表格和图片。
+
+### 11.12 `write_word`
 
 ### Input
 
@@ -859,7 +976,7 @@ export interface WriteWordResult {
 }
 ```
 
-### 11.10 `read_pdf`
+### 11.13 `read_pdf`
 
 ### Input
 
@@ -881,7 +998,7 @@ export interface ReadPdfResult {
 }
 ```
 
-### 11.11 `export_pdf`
+### 11.14 `export_pdf`
 
 ### Input
 
@@ -1019,6 +1136,10 @@ await imageClient.images.generate({
 - `AGENT_EXEC_BASH_ENABLED` 已作为设置项暴露，当前默认启用；设置为 `false` 后 Agent 不再注册和执行 `exec_bash` 工具。
 - `AGENT_DRAFT_SECTION_PARALLELISM` 已作为设置项暴露，控制 `draft_scheme_sections` 默认并行起草章节数，默认值为 `20`；工具参数 `max_parallel` 仅覆盖单次调用。
 - `AGENT_IMAGE_GENERATION_PARALLELISM` 已作为设置项暴露，控制 `image_generate` 同时执行数量，默认值为 `10`。
+- `read_file docs/密码应用方案.template.json` 返回规范化“Word 模板规划任务清单”，不再把原始 JSON 直接塞给模型。
+- `plan_scheme_batches` 已作为整篇生成的显式规划工具：先规划真实章节批次，再调用 `draft_scheme_sections`，避免模型每次只传 1 个章节。
+- `plan_scheme_assets` 已作为表格/图示规划工具：正文写入后先规划 `template_cells` 和 `image_generate` 任务，再补齐表格和图片。
+- `write_word.sections` 的正文、表格和图片定位只使用 `template.json` 中的不可见 SDT 锚；图片可通过 `diagrams.figure_id` 精确写入，不再按标题、编号、题注或表格序号兜底写入。
 - `exec_bash` 已支持 Windows 内置 Python runtime：优先使用随安装包复制到 `resources/runtime/win/python` 或 `resources/runtime/win/pyhton` 的运行时，保障无系统 Python 环境也能执行 Python 命令。
 - `settings:get` 的 `runtime.bundledPython` 会返回内置 Python 探测状态，设置面板据此展示当前来源和 `python.exe` 路径。
 - `settings:check-runtime` 会实际执行 Python 与 pip 版本检测，设置面板可显示自检结果，便于定位运行时缺 DLL、权限或杀软拦截问题。

@@ -17,7 +17,7 @@ import { compactText } from "./agentTools";
 import { buildAgentChatTools, executeAgentToolCall, type AgentToolExecutionResult } from "./agentToolRegistry";
 import type { AgentRuntime, AgentRuntimeHost, AgentRuntimeTurnInput, MessageStreamItem } from "./agentRuntime";
 import { extractTemplateAnchorIds } from "./schemeProgress";
-import type { AppSettings, StreamItem } from "../shared/types";
+import type { AppSettings, SchemeProgressItem, StreamItem } from "../shared/types";
 
 const PWD_SAFE_PROVIDER = "pwdsafe-openai";
 const ZERO_USAGE = {
@@ -481,6 +481,7 @@ function createPwdSafePiTools(
             memory: host.formatSessionMemory(sessionId),
             settings: activeSettings,
             userPrompt: getLatestUserPrompt(host, sessionId),
+            schemeProgress: getLatestSchemeProgress(host, sessionId),
             signal: signal ?? undefined,
             allowedReadDirs: [host.docsDir, host.inputDir, host.outputDir],
             allowedReadFiles: host.getSessionReadableFiles(sessionId),
@@ -509,6 +510,8 @@ function resolvePwdSafeToolExecutionMode(toolName: string): "parallel" | "sequen
     toolName === "read_file" ||
     toolName === "read_word" ||
     toolName === "read_pdf" ||
+    toolName === "plan_scheme_batches" ||
+    toolName === "plan_scheme_assets" ||
     toolName === "draft_scheme_sections" ||
     toolName === "image_generate"
   ) {
@@ -641,6 +644,16 @@ function getLatestUserPrompt(host: AgentRuntimeHost, sessionId: string): string 
     }
   }
   return "";
+}
+
+function getLatestSchemeProgress(host: AgentRuntimeHost, sessionId: string): SchemeProgressItem | undefined {
+  const session = host.getSession(sessionId);
+  const items = session?.items ?? [];
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.kind === "scheme_progress") return item;
+  }
+  return undefined;
 }
 
 function extractAssistantText(message: AssistantMessage): string {

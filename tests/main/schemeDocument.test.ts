@@ -33,6 +33,16 @@ function findParagraphXmlContaining(documentXml: string, text: string): string {
   return documentXml.slice(paragraphStart, paragraphEnd);
 }
 
+function findSdtXmlContaining(documentXml: string, tag: string): string {
+  const markerIndex = documentXml.indexOf(tag);
+  expect(markerIndex).toBeGreaterThan(0);
+  const sdtStart = documentXml.lastIndexOf("<w:sdt", markerIndex);
+  const sdtEnd = documentXml.indexOf("</w:sdt>", markerIndex) + "</w:sdt>".length;
+  expect(sdtStart).toBeGreaterThanOrEqual(0);
+  expect(sdtEnd).toBeGreaterThan(sdtStart);
+  return documentXml.slice(sdtStart, sdtEnd);
+}
+
 function expectTemplateBodyParagraphStyle(paragraphXml: string): void {
   expect(paragraphXml).toContain(`<w:pStyle w:val="${TEMPLATE_BODY_STYLE_ID}"`);
   expect(paragraphXml).not.toMatch(HEADING_OR_CAPTION_STYLE_PATTERN);
@@ -415,6 +425,69 @@ describe("schemeDocument", () => {
     }
   });
 
+  it("rejects section replacement when the invisible body anchor is missing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-missing-anchor-"));
+    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const draftPath = join(dir, "锚点缺失方案.docx");
+
+    try {
+      await createWordDocxFromTemplate(templatePath, draftPath);
+      const zip = new PizZip(await readFile(draftPath, "binary"));
+      const documentXml = zip.file("word/document.xml")?.asText() ?? "";
+      expect(documentXml).toContain('w:val="ps:section:sec_1_2_1:body"');
+      zip.file(
+        "word/document.xml",
+        documentXml.replace('w:val="ps:section:sec_1_2_1:body"', 'w:val="ps:section:removed_sec_1_2_1:body"')
+      );
+      await writeFile(draftPath, zip.generate({ type: "nodebuffer", compression: "DEFLATE" }));
+
+      await expect(
+        replaceWordSectionContent(draftPath, draftPath, {
+          section: "sec_1_2_1",
+          content: "锚点缺失时不应退回标题编号搜索。"
+        })
+      ).rejects.toThrow("未找到 Word 章节：sec_1_2_1");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not update template table cells when the invisible table anchor is missing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-missing-table-anchor-"));
+    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const draftPath = join(dir, "表格锚点缺失模板.docx");
+    const outputPath = join(dir, "表格锚点缺失输出.docx");
+
+    try {
+      await createWordDocxFromTemplate(templatePath, draftPath);
+      const zip = new PizZip(await readFile(draftPath, "binary"));
+      const documentXml = zip.file("word/document.xml")?.asText() ?? "";
+      expect(documentXml).toContain('w:val="ps:table:table_4_2_2_1"');
+      zip.file(
+        "word/document.xml",
+        documentXml.replace('w:val="ps:table:table_4_2_2_1"', 'w:val="ps:table:removed_table_4_2_2_1"')
+      );
+      await writeFile(draftPath, zip.generate({ type: "nodebuffer", compression: "DEFLATE" }));
+
+      const result = await createWordDocxFromTemplate(draftPath, outputPath, {
+        templateCells: [
+          {
+            tableId: "table_4_2_2_1",
+            rowIndex: 1,
+            columnIndex: 1,
+            value: "锚点缺失时不应按题注或序号兜底写入"
+          }
+        ]
+      });
+      const outputXml = await readDocumentXml(outputPath);
+
+      expect(result.templateCellReplacementCount).toBe(0);
+      expect(outputXml).not.toContain("锚点缺失时不应按题注或序号兜底写入");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects sections that do not exist in the template JSON", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-missing-section-"));
     const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
@@ -697,6 +770,92 @@ describe("schemeDocument", () => {
       expect(contentTypesXml).toContain('Extension="png"');
       expect(extracted.value).not.toContain("方案图示");
       expect(documentXml).toContain("密码应用技术框架");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("embeds generated diagram images by exact template figure id", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-figure-id-"));
+    const outputPath = join(dir, "精确图位嵌入方案.docx");
+    const diagramPath = join(dir, "storage-flow.png");
+
+    try {
+      await writeFile(
+        diagramPath,
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+          "base64"
+        )
+      );
+
+      const result = await writeSchemeDocxFromTemplate(
+        join(process.cwd(), "docs", "密码应用方案.docx"),
+        outputPath,
+        {
+          prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心",
+          memory: "",
+          generatedMarkdown: "",
+          diagrams: [
+            {
+              label: "自定义标签也应按 figure_id 精确嵌入",
+              kind: "flow",
+              path: diagramPath,
+              figureId: "fig_12_5_4_9_4"
+            }
+          ]
+        }
+      );
+      const zip = new PizZip(await readFile(outputPath, "binary"));
+      const documentXml = zip.file("word/document.xml")?.asText() ?? "";
+      const targetFigureXml = findSdtXmlContaining(documentXml, "ps:figure:fig_12_5_4_9_4:image");
+
+      expect(result.embeddedDiagrams).toEqual(["自定义标签也应按 figure_id 精确嵌入"]);
+      expect(targetFigureXml).toContain("<w:drawing>");
+      expect(documentXml).toContain("图 510");
+      expect(documentXml).toContain("重要数据存储保护流程图");
+      expect(targetFigureXml).not.toContain("【图片占位】");
+      expect(documentXml).not.toContain("方案图示");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not append unmatched diagrams when the template has figure anchors", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-unmatched-diagram-"));
+    const outputPath = join(dir, "未匹配图位不追加.docx");
+    const diagramPath = join(dir, "unmatched.png");
+
+    try {
+      await writeFile(
+        diagramPath,
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+          "base64"
+        )
+      );
+
+      const result = await writeSchemeDocxFromTemplate(
+        join(process.cwd(), "docs", "密码应用方案.docx"),
+        outputPath,
+        {
+          prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心",
+          memory: "",
+          generatedMarkdown: "",
+          diagrams: [
+            {
+              label: "模板中不存在的随手配图",
+              kind: "architecture",
+              path: diagramPath
+            }
+          ]
+        }
+      );
+      const documentXml = await readDocumentXml(outputPath);
+
+      expect(result.embeddedDiagrams).toEqual([]);
+      expect(documentXml).not.toContain("方案图示");
+      expect(documentXml).not.toContain("模板中不存在的随手配图");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

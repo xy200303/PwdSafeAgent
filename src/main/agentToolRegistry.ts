@@ -1,10 +1,10 @@
 import { exec } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { promisify } from "node:util";
 import { basename, extname, isAbsolute, join, resolve } from "node:path";
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam, ChatCompletionMessageToolCall, ChatCompletionTool } from "openai/resources/chat/completions";
-import type { AppSettings, SchemeSectionStatus } from "../shared/types";
+import type { AppSettings, SchemeProgressItem, SchemeSectionStatus } from "../shared/types";
 import {
   compactText,
   getCurrentTimeText,
@@ -44,6 +44,7 @@ export interface AgentToolExecutionContext {
   memory: string;
   settings: AppSettings;
   userPrompt?: string;
+  schemeProgress?: SchemeProgressItem;
   signal?: AbortSignal;
   allowedReadDirs: string[];
   allowedReadFiles?: string[];
@@ -154,7 +155,8 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       type: "function",
       function: {
         name: "read_file",
-        description: "读取 docs、data/input、data/output 范围内的文本文件内容；Word/PDF 优先使用 read_word/read_pdf。",
+        description:
+          "读取 docs、data/input、data/output 范围内的文本文件内容；Word/PDF 优先使用 read_word/read_pdf。读取 docs/密码应用方案.template.json 时返回规范化的章节规划任务清单，而不是原始 JSON。",
         parameters: {
           type: "object",
           properties: {
@@ -222,6 +224,74 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             }
           },
           required: ["name", "content"],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "plan_scheme_batches",
+        description: [
+          "根据 docs/密码应用方案.template.json 生成稳定的章节起草批次计划，不写 Word、不生成正文。",
+          "正式生成整篇方案时，先调用本工具获得批次，再按返回的 first_draft_call 直接调用 draft_scheme_sections。这样避免模型每次只传 1 个章节。",
+          "批次严格使用模板 JSON 中真实存在的 section id，并保持模板顺序；可通过 completed_sections 跳过已完成章节，通过 start_section 从指定章节继续。"
+        ].join("\n"),
+        parameters: {
+          type: "object",
+          properties: {
+            start_section: {
+              type: "string",
+              description: "可选。指定从某个模板章节开始规划，必须是 template.json 中存在且唯一匹配的 section id，推荐传 id。"
+            },
+            completed_sections: {
+              type: "array",
+              description: "可选。已完成或不需要再起草的章节 id，必须能在 template.json 中唯一匹配。",
+              items: {
+                type: "string"
+              }
+            },
+            batch_size: {
+              type: "integer",
+              description: "可选。每批章节数；不传时使用设置中的方案章节并行数，范围 1-20。"
+            }
+          },
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "plan_scheme_assets",
+        description: [
+          "根据 docs/密码应用方案.template.json 规划某些章节关联的表格单元格和图片生成任务，不写 Word、不生成图片。",
+          "用于正文写入后补齐表格和图位：输入 section_ids 后，返回可填的 template_cells 坐标清单，以及需要调用 image_generate 的 figure_id/label/prompt。",
+          "只使用模板 JSON 中真实存在的 sections/tables/figures；不要自行编造 table_id、figure_id、行列号。"
+        ].join("\n"),
+        parameters: {
+          type: "object",
+          properties: {
+            section_ids: {
+              type: "array",
+              description: "要规划表格和图片的章节 id/编号，必须来自 template.json。为空时规划所有包含 relatedTables/relatedFigures 的章节。",
+              items: {
+                type: "string"
+              }
+            },
+            include_tables: {
+              type: "boolean",
+              description: "是否包含表格 template_cells 任务，默认 true。"
+            },
+            include_figures: {
+              type: "boolean",
+              description: "是否包含图片 image_generate/diagrams 任务，默认 true。"
+            },
+            max_items: {
+              type: "integer",
+              description: "最多返回多少个表格/图示任务，默认 40。"
+            }
+          },
           additionalProperties: false
         }
       }
@@ -366,7 +436,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
           "标准流程：先读取 docs/密码应用方案.template.json 获取真实 sections、tables、figures 和 anchors；再调用 create_word 基于 docs/密码应用方案.docx 创建模板副本；随后把多个章节草稿放入 sections 批量写入。",
           "正式生成优先使用 sections 批量写入多个已起草章节：一次打开 docx、替换多个不可见锚、一次保存，明显快于多次调用 write_word。",
           "正文可先由 draft_scheme_sections 并行起草，再把多个草稿合并到 sections 数组中按模板顺序一次性写入同一个 docx。",
-          "表格 template_cells 和配图 diagrams 建议放在所有正文章节写入后统一补充，避免正文生成阶段反复改表格和图片锚点。",
+          "表格 template_cells 和配图 diagrams 必须放在所有正文章节写入后统一补充：先调用 plan_scheme_assets 获取 table_id/row/column 和 figure_id，再写表格、生图并嵌入。",
           "兼容模式：不传 section 时可用 template_sections 按 Markdown 编号拆分章节，但正式交付不推荐一次性写入整篇长文。",
           "传入 section 时，section 必须精确匹配 template.json 中已存在的章节 id 或 number，推荐传 id，例如 sec_7；不要传模板中不存在的 7.2、sec_7_2 等虚拟章节。",
           "Word 内部定位只使用该章节 anchors.body.tag 对应的不可见 SDT 锚，并只替换 w:sdtContent，保留模板其他章节、页眉页脚、样式和编号。",
@@ -494,6 +564,10 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
                   kind: {
                     type: "string",
                     description: "图示类型，architecture 或 flow。"
+                  },
+                  figure_id: {
+                    type: "string",
+                    description: "可选。模板 JSON 中的 figure id，例如 fig_12_5_4_9_4；传入后按该不可见图片锚精确嵌入。"
                   },
                   path: {
                     type: "string",
@@ -623,6 +697,8 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
 
 function isFinalArtifactToolName(name: string): boolean {
   return (
+    name === "plan_scheme_batches" ||
+    name === "plan_scheme_assets" ||
     name === "draft_scheme_sections" ||
     name === "create_word" ||
     name === "write_word" ||
@@ -664,6 +740,10 @@ export async function executeAgentToolCall(
       return executeReadFile(args, context, "read_pdf");
     case "write_file":
       return executeWriteFile(args, context);
+    case "plan_scheme_batches":
+      return executePlanSchemeBatches(args, context);
+    case "plan_scheme_assets":
+      return executePlanSchemeAssets(args, context);
     case "draft_scheme_sections":
       return executeDraftSchemeSections(args, context);
     case "create_word":
@@ -820,11 +900,552 @@ async function executeReadFile(
   }
 
   const result = await readDocumentText(filePath, 18000);
+  if (requestedToolName === "read_file" && isBuiltInTemplateJson(filePath, context)) {
+    const templateSummary = buildSchemeTemplateTaskSummary(filePath, context);
+    return {
+      toolName: result.toolName,
+      summary: `已读取 ${result.sourceName}，返回 Agent 规划任务清单`,
+      content: templateSummary
+    };
+  }
   return {
     toolName: result.toolName,
     summary: result.summary,
     content: result.content || result.summary
   };
+}
+
+interface SchemeTemplateTaskJson {
+  fieldGuide?: unknown[];
+  sections?: unknown[];
+  tables?: unknown[];
+  figures?: unknown[];
+}
+
+interface SchemeTemplateTaskSection {
+  id: string;
+  number: string;
+  title: string;
+  writingHint?: string;
+  placeholders?: string[];
+  relatedTables?: string[];
+  relatedFigures?: string[];
+}
+
+interface SchemeTemplateTaskTable {
+  id: string;
+  section?: string;
+  sectionNumber?: string;
+  caption?: string;
+  purpose?: string;
+  header?: string[];
+  placeholders?: string[];
+  rows?: SchemeTemplateTaskRow[];
+}
+
+interface SchemeTemplateTaskFigure {
+  id: string;
+  section?: string;
+  sectionNumber?: string;
+  recommendedLabel?: string;
+  caption?: string;
+  purpose?: string;
+}
+
+interface SchemeTemplateTaskRow {
+  index: number;
+  cells: SchemeTemplateTaskCell[];
+}
+
+interface SchemeTemplateTaskCell {
+  rowIndex: number;
+  cellIndex: number;
+  columnIndex: number;
+  text: string;
+  placeholders?: string[];
+}
+
+function isBuiltInTemplateJson(filePath: string, context: AgentToolExecutionContext): boolean {
+  return resolve(filePath).toLowerCase() === resolve(context.docsDir, "密码应用方案.template.json").toLowerCase();
+}
+
+function buildSchemeTemplateTaskSummary(filePath: string, context: AgentToolExecutionContext): string {
+  const parsed = JSON.parse(readFileSync(filePath, "utf-8")) as SchemeTemplateTaskJson;
+  const sections = readTemplateTaskSections(parsed.sections);
+  const tables = readTemplateTaskTables(parsed.tables);
+  const figures = readTemplateTaskFigures(parsed.figures);
+  const tableMap = new Map(tables.map((table) => [table.id, table]));
+  const figureMap = new Map(figures.map((figure) => [figure.id, figure]));
+  const batchSize = clampDraftSectionParallelism(context.settings.agent.draftSectionParallelism);
+
+  const lines = [
+    "Word 模板规划任务清单",
+    "",
+    "使用规则：",
+    `- draft_scheme_sections 每批尽量传 ${batchSize} 个 section，严格按下方 sections 顺序放入 sections 数组；不要只传 1 个，除非用户明确要求局部更新。`,
+    "- section 必须使用下方真实 id，例如 sec_2_2_2；不要编造不存在的章节。",
+    "- 每节正文按 task 编写；tables/figures 只记录后续任务，正文阶段不要生成 Markdown 表格或图片。",
+    "- 正文草稿完成后，用 write_word.sections 按相同顺序批量写入 Word；随后调用 plan_scheme_assets 规划表格和图片任务。",
+    "- 表格按 plan_scheme_assets 返回的 template_cells_plan 改写 value 后写入；图片按 image_generate_plan 生成，再用 diagrams.figure_id 精确嵌入。",
+    "",
+    "字段占位任务：",
+    formatFieldGuide(parsed.fieldGuide),
+    "",
+    "章节起草任务（按模板顺序）："
+  ];
+
+  sections.forEach((section, index) => {
+    lines.push(formatTemplateTaskSection(section, index + 1, tableMap, figureMap));
+  });
+
+  return compactText(lines.join("\n"), 60000);
+}
+
+function readTemplateTaskSections(value: unknown): SchemeTemplateTaskSection[] {
+  if (!Array.isArray(value)) return [];
+  const sections: SchemeTemplateTaskSection[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const id = readRecordString(record, "id");
+    const number = readRecordString(record, "number");
+    const title = readRecordString(record, "title");
+    if (!id || !number || !title) continue;
+    sections.push({
+      id,
+      number,
+      title,
+      writingHint: readRecordString(record, "writingHint") || undefined,
+      placeholders: readRecordStringArray(record, "placeholders"),
+      relatedTables: readRecordStringArray(record, "relatedTables"),
+      relatedFigures: readRecordStringArray(record, "relatedFigures")
+    });
+  }
+  return sections;
+}
+
+function readTemplateTaskTables(value: unknown): SchemeTemplateTaskTable[] {
+  if (!Array.isArray(value)) return [];
+  const tables: SchemeTemplateTaskTable[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const id = readRecordString(record, "id");
+    if (!id) continue;
+    tables.push({
+      id,
+      section: readRecordString(record, "section") || undefined,
+      sectionNumber: readRecordString(record, "sectionNumber") || undefined,
+      caption: readRecordString(record, "caption") || undefined,
+      purpose: readRecordString(record, "purpose") || undefined,
+      header: readRecordStringArray(record, "header"),
+      placeholders: readRecordStringArray(record, "placeholders"),
+      rows: readTemplateTaskRows(record.rows)
+    });
+  }
+  return tables;
+}
+
+function readTemplateTaskFigures(value: unknown): SchemeTemplateTaskFigure[] {
+  if (!Array.isArray(value)) return [];
+  const figures: SchemeTemplateTaskFigure[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const id = readRecordString(record, "id");
+    if (!id) continue;
+    figures.push({
+      id,
+      section: readRecordString(record, "section") || undefined,
+      sectionNumber: readRecordString(record, "sectionNumber") || undefined,
+      recommendedLabel: readRecordString(record, "recommendedLabel") || undefined,
+      caption: readRecordString(record, "caption") || undefined,
+      purpose: readRecordString(record, "purpose") || undefined
+    });
+  }
+  return figures;
+}
+
+function readTemplateTaskRows(value: unknown): SchemeTemplateTaskRow[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const rows: SchemeTemplateTaskRow[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const index = readRecordNumber(record, "index", Number.NaN);
+    const cells = readTemplateTaskCells(record.cells);
+    if (!Number.isInteger(index) || !cells.length) continue;
+    rows.push({ index, cells });
+  }
+  return rows.length ? rows : undefined;
+}
+
+function readTemplateTaskCells(value: unknown): SchemeTemplateTaskCell[] {
+  if (!Array.isArray(value)) return [];
+  const cells: SchemeTemplateTaskCell[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const rowIndex = readRecordNumber(record, "rowIndex", Number.NaN);
+    const cellIndex = readRecordNumber(record, "cellIndex", Number.NaN);
+    const columnIndex = readRecordNumber(record, "columnIndex", Number.NaN);
+    if (!Number.isInteger(rowIndex) || !Number.isInteger(cellIndex) || !Number.isInteger(columnIndex)) continue;
+    cells.push({
+      rowIndex,
+      cellIndex,
+      columnIndex,
+      text: readRecordString(record, "text"),
+      placeholders: readRecordStringArray(record, "placeholders")
+    });
+  }
+  return cells;
+}
+
+function formatFieldGuide(value: unknown): string {
+  if (!Array.isArray(value)) return "- 无";
+  const items = value
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const record = item as Record<string, unknown>;
+      const key = readRecordString(record, "key");
+      const description = readRecordString(record, "description");
+      return key ? `- ${key}${description ? `：${description}` : ""}` : "";
+    })
+    .filter(Boolean);
+  return items.length ? items.join("\n") : "- 无";
+}
+
+function formatTemplateTaskSection(
+  section: SchemeTemplateTaskSection,
+  index: number,
+  tableMap: Map<string, SchemeTemplateTaskTable>,
+  figureMap: Map<string, SchemeTemplateTaskFigure>
+): string {
+  const tasks = [
+    `正文：${section.writingHint || `围绕“${section.title}”编写项目化正文，资料不足处写待补充。`}`,
+    section.placeholders?.length ? `字段：${section.placeholders.join("、")}` : "",
+    section.relatedTables?.length ? `表格：${section.relatedTables.map((id) => formatRelatedTable(id, tableMap.get(id))).join("；")}` : "",
+    section.relatedFigures?.length ? `图示：${section.relatedFigures.map((id) => formatRelatedFigure(id, figureMap.get(id))).join("；")}` : ""
+  ].filter(Boolean);
+  return `${index}. ${section.id} | ${section.number} ${section.title}\n   task: ${tasks.join(" / ")}`;
+}
+
+function formatRelatedTable(id: string, table?: SchemeTemplateTaskTable): string {
+  if (!table) return id;
+  const details = [table.purpose, table.header?.length ? `列=${table.header.join("|")}` : "", table.placeholders?.length ? `字段=${table.placeholders.join("、")}` : ""].filter(Boolean);
+  return `${id}${details.length ? `（${details.join("；")}）` : ""}`;
+}
+
+function formatRelatedFigure(id: string, figure?: SchemeTemplateTaskFigure): string {
+  if (!figure) return id;
+  const label = figure.recommendedLabel || figure.caption;
+  const details = [label, figure.purpose].filter(Boolean);
+  return `${id}${details.length ? `（${details.join("；")}）` : ""}`;
+}
+
+function readRecordString(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function readRecordNumber(record: Record<string, unknown>, key: string, fallback: number): number {
+  const value = record[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function readRecordStringArray(record: Record<string, unknown>, key: string): string[] | undefined {
+  const value = record[key];
+  if (!Array.isArray(value)) return undefined;
+  const items = value.filter((item): item is string => typeof item === "string" && Boolean(item.trim()));
+  return items.length ? items : undefined;
+}
+
+function executePlanSchemeBatches(
+  args: Record<string, unknown>,
+  context: AgentToolExecutionContext
+): AgentToolExecutionResult {
+  const templateJsonPath = join(context.docsDir, "密码应用方案.template.json");
+  const parsed = JSON.parse(readFileSync(templateJsonPath, "utf-8")) as SchemeTemplateTaskJson;
+  const allSections = readTemplateTaskSections(parsed.sections);
+  const startSection = readStringArg(args, "start_section");
+  const resolvedStartSection = startSection ? resolveTemplateTaskSection(startSection, allSections) : undefined;
+  if (startSection && !resolvedStartSection) {
+    return {
+      toolName: "plan_scheme_batches",
+      summary: "起始章节不在模板中",
+      content: `plan_scheme_batches failed: unknown start_section ${startSection}; use an existing sections[].id from docs/密码应用方案.template.json`
+    };
+  }
+
+  const skippedPlan = resolveSkippedPlanSections(args, allSections, context.schemeProgress);
+  if (skippedPlan.unknown.length) {
+    return {
+      toolName: "plan_scheme_batches",
+      summary: "跳过章节不在模板中",
+      content: `plan_scheme_batches failed: unknown completed_sections ${skippedPlan.unknown.join("、")}; use existing sections[].id values from docs/密码应用方案.template.json`
+    };
+  }
+
+  const skippedSections = skippedPlan.skipped;
+  const requestedBatchSize = readNumberArg(args, "batch_size", Number.NaN);
+  const batchSize = Number.isFinite(requestedBatchSize)
+    ? clampDraftSectionParallelism(requestedBatchSize)
+    : clampDraftSectionParallelism(context.settings.agent.draftSectionParallelism);
+  const startIndex = resolvedStartSection ? allSections.findIndex((section) => section.id === resolvedStartSection.id) : 0;
+  const effectiveStartIndex = startIndex >= 0 ? startIndex : 0;
+  const sections = allSections.slice(effectiveStartIndex).filter((section) => !skippedSections.has(section.id));
+  const batches = chunkArray(sections, batchSize);
+  const firstBatch = batches[0] ?? [];
+
+  return {
+    toolName: "plan_scheme_batches",
+    summary: batches.length
+      ? `已规划 ${batches.length} 个章节批次，首批 ${firstBatch.length} 个章节`
+      : "没有需要起草的章节",
+    content: formatSchemeBatchPlan({
+      batches,
+      batchSize,
+      startSection,
+      skippedCount: skippedSections.size
+    })
+  };
+}
+
+function resolveSkippedPlanSections(
+  args: Record<string, unknown>,
+  sections: SchemeTemplateTaskSection[],
+  progress: SchemeProgressItem | undefined
+): { skipped: Set<string>; unknown: string[] } {
+  const skipped = new Set<string>();
+  const unknown: string[] = [];
+  const sectionIds = new Set(sections.map((section) => section.id));
+  for (const section of readStringListArg(args, "completed_sections")) {
+    const resolved = resolveTemplateTaskSection(section, sections);
+    if (resolved) {
+      skipped.add(resolved.id);
+    } else {
+      unknown.push(section);
+    }
+  }
+  for (const section of progress?.sections ?? []) {
+    if (section.status === "completed" || section.status === "drafted" || section.status === "running" || section.status === "drafting") {
+      if (sectionIds.has(section.id)) skipped.add(section.id);
+    }
+  }
+  return { skipped, unknown };
+}
+
+function resolveTemplateTaskSection(
+  value: string,
+  sections: SchemeTemplateTaskSection[]
+): SchemeTemplateTaskSection | undefined {
+  const normalized = normalizeDraftSectionLookup(value);
+  if (!normalized) return undefined;
+  const matches = sections.filter((section) =>
+    [
+      section.id,
+      section.number,
+      section.title,
+      `${section.number}${section.title}`,
+      `${section.number}.${section.title}`,
+      `${section.number} ${section.title}`,
+      `${section.number}、${section.title}`
+    ].some((candidate) => normalizeDraftSectionLookup(candidate) === normalized)
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function formatSchemeBatchPlan(input: {
+  batches: SchemeTemplateTaskSection[][];
+  batchSize: number;
+  startSection?: string;
+  skippedCount: number;
+}): string {
+  const firstBatch = input.batches[0] ?? [];
+  const firstDraftCall = {
+    sections: firstBatch.map((section) => ({
+      section: section.id,
+      title: section.title,
+      writing_hint: section.writingHint
+    })),
+    max_parallel: input.batchSize
+  };
+  const lines = [
+    "plan_scheme_batches completed",
+    `批次大小：${input.batchSize}`,
+    input.startSection ? `起始章节：${input.startSection}` : "",
+    input.skippedCount ? `已跳过章节数：${input.skippedCount}` : "",
+    `批次数：${input.batches.length}`,
+    "",
+    "下一步：直接按 first_draft_call 调用 draft_scheme_sections。不要只传其中 1 个 section。",
+    "",
+    "first_draft_call:",
+    JSON.stringify(firstDraftCall, null, 2),
+    "",
+    "all_batches:"
+  ].filter(Boolean);
+
+  input.batches.forEach((batch, index) => {
+    lines.push(
+      `BATCH ${index + 1} (${batch.length}): ${batch.map((section) => section.id).join(", ")}`,
+      ...batch.map((section) => `- ${section.id} | ${section.number} ${section.title} | ${section.writingHint || "按模板章节主题编写正文。"}`)
+    );
+  });
+
+  return compactText(lines.join("\n"), 60000);
+}
+
+function executePlanSchemeAssets(
+  args: Record<string, unknown>,
+  context: AgentToolExecutionContext
+): AgentToolExecutionResult {
+  const templateJsonPath = join(context.docsDir, "密码应用方案.template.json");
+  const parsed = JSON.parse(readFileSync(templateJsonPath, "utf-8")) as SchemeTemplateTaskJson;
+  const sections = readTemplateTaskSections(parsed.sections);
+  const tables = readTemplateTaskTables(parsed.tables);
+  const figures = readTemplateTaskFigures(parsed.figures);
+  const tableMap = new Map(tables.map((table) => [table.id, table]));
+  const figureMap = new Map(figures.map((figure) => [figure.id, figure]));
+  const requestedSections = readStringListArg(args, "section_ids");
+  const resolvedSections = requestedSections.length
+    ? requestedSections.map((section) => ({ input: section, section: resolveTemplateTaskSection(section, sections) }))
+    : sections
+        .filter((section) => section.relatedTables?.length || section.relatedFigures?.length)
+        .map((section) => ({ input: section.id, section }));
+  const unknownSections = resolvedSections.filter((item) => !item.section).map((item) => item.input);
+  if (unknownSections.length) {
+    return {
+      toolName: "plan_scheme_assets",
+      summary: "章节不在模板中",
+      content: `plan_scheme_assets failed: unknown section_ids ${unknownSections.join("、")}; use existing sections[].id values from docs/密码应用方案.template.json`
+    };
+  }
+
+  const includeTables = readBooleanArg(args, "include_tables", true);
+  const includeFigures = readBooleanArg(args, "include_figures", true);
+  const maxItems = Math.min(Math.max(Math.trunc(readNumberArg(args, "max_items", 40)), 1), 120);
+  const selectedSections = resolvedSections.map((item) => item.section).filter((section): section is SchemeTemplateTaskSection => Boolean(section));
+  const plannedTables = includeTables ? uniqueTemplateIds(selectedSections.flatMap((section) => section.relatedTables ?? [])).map((id) => tableMap.get(id)).filter((table): table is SchemeTemplateTaskTable => Boolean(table)).slice(0, maxItems) : [];
+  const remainingSlots = Math.max(0, maxItems - plannedTables.length);
+  const plannedFigures = includeFigures ? uniqueTemplateIds(selectedSections.flatMap((section) => section.relatedFigures ?? [])).map((id) => figureMap.get(id)).filter((figure): figure is SchemeTemplateTaskFigure => Boolean(figure)).slice(0, remainingSlots || maxItems) : [];
+
+  return {
+    toolName: "plan_scheme_assets",
+    summary: `已规划表格 ${plannedTables.length} 个、图示 ${plannedFigures.length} 个`,
+    content: formatSchemeAssetPlan({
+      sections: selectedSections,
+      tables: plannedTables,
+      figures: plannedFigures,
+      maxItems
+    })
+  };
+}
+
+function uniqueTemplateIds(ids: string[]): string[] {
+  return Array.from(new Set(ids.filter(Boolean)));
+}
+
+function formatSchemeAssetPlan(input: {
+  sections: SchemeTemplateTaskSection[];
+  tables: SchemeTemplateTaskTable[];
+  figures: SchemeTemplateTaskFigure[];
+  maxItems: number;
+}): string {
+  const tableCells = input.tables.flatMap((table) => buildTemplateCellPlan(table));
+  const imageCalls = input.figures.map((figure) => buildImageGeneratePlan(figure));
+  const diagramRefs = input.figures.map((figure) => ({
+    figure_id: figure.id,
+    label: figure.recommendedLabel || normalizeFigureCaption(figure.caption) || figure.id,
+    kind: inferFigureKind(figure),
+    path: "使用对应 image_generate completed 路径"
+  }));
+  const lines = [
+    "plan_scheme_assets completed",
+    `章节：${input.sections.map((section) => `${section.id}(${section.number})`).join("、") || "全部关联章节"}`,
+    `表格任务：${input.tables.length}`,
+    `图示任务：${input.figures.length}`,
+    "",
+    "使用规则：",
+    "- 先根据 project_context/项目档案把下方 value 建议改成具体值，再通过 write_word.template_cells 写入。",
+    "- table_id、row_index、column_index/cell_index 必须原样保留；不要自行新增行列坐标。",
+    "- 对 figures 先并行调用 image_generate；再在 write_word.diagrams 中传 figure_id、label、kind、path，按不可见图片锚精确嵌入。",
+    "",
+    "template_cells_plan:",
+    JSON.stringify(tableCells, null, 2),
+    "",
+    "image_generate_plan:",
+    JSON.stringify(imageCalls, null, 2),
+    "",
+    "write_word_diagrams_plan:",
+    JSON.stringify(diagramRefs, null, 2)
+  ];
+  return compactText(lines.join("\n"), 60000);
+}
+
+function buildTemplateCellPlan(table: SchemeTemplateTaskTable): Array<Record<string, unknown>> {
+  return (table.rows ?? [])
+    .flatMap((row) => row.cells)
+    .filter((cell) => isFillableTemplateCell(cell))
+    .map((cell) => ({
+      table_id: table.id,
+      caption: table.caption,
+      row_index: cell.rowIndex,
+      column_index: cell.columnIndex,
+      cell_index: cell.cellIndex,
+      header: table.header?.[cell.columnIndex] || "",
+      current_text: cell.text || "【待填写】",
+      value: suggestTemplateCellValue(table, cell)
+    }));
+}
+
+function isFillableTemplateCell(cell: SchemeTemplateTaskCell): boolean {
+  if (cell.text.includes("【待填写】")) return true;
+  return Boolean(cell.placeholders?.length);
+}
+
+function suggestTemplateCellValue(table: SchemeTemplateTaskTable, cell: SchemeTemplateTaskCell): string {
+  if (cell.placeholders?.length) return cell.placeholders.map((placeholder) => `{${placeholder}}`).join("、");
+  const header = table.header?.[cell.columnIndex] || "";
+  if (/^序号$/.test(header)) return `${cell.rowIndex}.`;
+  if (/安全要求|用途|目的/.test(header)) return "结合本节保护对象和密码应用措施填写";
+  if (/产品|设备|密码/.test(header)) return "结合已选密码产品填写";
+  if (/存储|位置|部署/.test(header)) return "结合系统部署位置填写";
+  return "结合项目事实填写";
+}
+
+function buildImageGeneratePlan(figure: SchemeTemplateTaskFigure): Record<string, unknown> {
+  const label = figure.recommendedLabel || normalizeFigureCaption(figure.caption) || figure.id;
+  const kind = inferFigureKind(figure);
+  return {
+    figure_id: figure.id,
+    label,
+    kind,
+    prompt: [
+      `生成《密码应用方案》图示：${label}。`,
+      figure.caption ? `模板题注：${figure.caption}。` : "",
+      figure.sectionNumber ? `所属章节：${figure.sectionNumber}。` : "",
+      "要求：白底、中文标签清晰、流程方向明确，节点包含应用系统、密码服务/密码设备、数据库或存储、密钥管理/证书/算法调用等关键元素；不要使用模糊装饰图。"
+    ]
+      .filter(Boolean)
+      .join("")
+  };
+}
+
+function normalizeFigureCaption(value?: string): string {
+  return (value || "").replace(/^图\s*\d+(?:[-－]\d+)?\s*/, "").trim();
+}
+
+function inferFigureKind(figure: SchemeTemplateTaskFigure): "architecture" | "flow" {
+  const text = `${figure.recommendedLabel || ""} ${figure.caption || ""} ${figure.purpose || ""}`;
+  return /流程|过程|调用|读取|写入|签名|验签|鉴别/.test(text) ? "flow" : "architecture";
 }
 
 interface DraftSchemeSectionInput {
@@ -1723,6 +2344,7 @@ function normalizeDiagramAsset(item: unknown, context: AgentToolExecutionContext
   return {
     label,
     kind: typeof record.kind === "string" ? record.kind.trim() : undefined,
+    figureId: typeof (record.figure_id ?? record.figureId) === "string" ? String(record.figure_id ?? record.figureId).trim() : undefined,
     path
   };
 }

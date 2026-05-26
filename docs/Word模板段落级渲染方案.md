@@ -111,6 +111,16 @@ w:sdtPr / w:tag[@w:val="ps:section:sec_2_2_1:body"]
 5. 校验锚附近的标题、编号、样式或模板 hash。
 6. 替换 `w:sdtContent` 内部内容，保留外层 `w:sdt` 和结构 tag。
 
+当前实现约束：
+
+1. 章节正文替换必须先匹配 `template.json` 中真实存在的 section。
+2. 匹配到 section 后，必须在 Word 中找到对应 `ps:section:{id}:body` SDT 锚。
+3. 如果锚点缺失、被改名或被删除，写入失败并报告未找到章节。
+4. 不再按章节标题、编号、JSON block 索引或正文关键词兜底写入。
+5. 表格单元格替换同样必须找到 `ps:table:{id}` SDT 锚，不再按题注、表格序号或临近位置猜测。
+6. 图示嵌入优先使用 `figure_id` 对应的 `ps:figure:{id}:image` SDT 锚；label/caption 只作为生成提示和人工可读信息。
+7. 正文写入、表格填充、图片嵌入分阶段执行；正文阶段不负责生成 Markdown 表格或图片。
+
 标题编号只作为校验：
 
 ```text

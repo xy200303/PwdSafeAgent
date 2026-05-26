@@ -306,6 +306,9 @@ stateDiagram-v2
 | `write_file` | 写入中间稿、结构化 JSON、Markdown 草稿 | 是 |
 | `read_file` | 读取模板解析结果、规范文本、用户附件 | 是 |
 | `read_word` | 读取 `.docx` 文本、表格、占位符和结构摘要 | 是 |
+| `plan_scheme_batches` | 按 `template.json` 规划真实章节起草批次 | 是 |
+| `plan_scheme_assets` | 按 `template.json` 规划表格单元格和图片任务 | 是 |
+| `draft_scheme_sections` | 按批次并行起草章节正文草稿 | 是 |
 | `write_word` | 基于规范模板输出 `.docx` | 是 |
 | `read_pdf` | 提取 PDF 文本、页码、摘要和元信息 | 是 |
 | `export_pdf` | 将 Word 或中间结果导出为 PDF | 是 |
@@ -347,9 +350,10 @@ stateDiagram-v2
 推荐实现：
 
 1. Word 读取：Open XML 解析或 `mammoth` 做文本抽取。
-2. Word 输出：模板归一化后走 Open XML / `docx-templates` 模板渲染。
-3. PDF 读取：`pdfjs-dist` 或同类解析方案。
-4. PDF 导出：优先通过本地 LibreOffice / Office 自动化受控导出。
+2. Word 输出：模板归一化后走 Open XML 段落级渲染；`docx-templates` 仅处理短字段。
+3. 整篇方案生成：`read_file(template.json)` 返回规范化任务清单，`plan_scheme_batches` 规划批次，`draft_scheme_sections` 并行起草，`write_word.sections` 按不可见 SDT 锚批量写入正文，之后 `plan_scheme_assets` 规划表格/图示任务并统一补齐。
+4. PDF 读取：`pdfjs-dist` 或同类解析方案。
+5. PDF 导出：优先通过本地 LibreOffice / Office 自动化受控导出。
 
 ### 7.5 内置 Python Runtime
 

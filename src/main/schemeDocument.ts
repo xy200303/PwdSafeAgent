@@ -25,6 +25,7 @@ export interface SchemeDiagramAsset {
   label: string;
   kind?: string;
   path: string;
+  figureId?: string;
 }
 
 export interface SchemeDocumentResult {
@@ -1573,40 +1574,15 @@ function buildTemplateSectionReplacementAnchor(
   const sectionNumber = parseSectionNumberFromTemplateId(templateSection.id) || templateSection.number;
   const headingLevel = templateSection.headingLevel ?? (sectionNumber.split(".").filter(Boolean).length || 1);
   const sdtBlock = findSdtBlockByTag(blocks, getSectionBodyAnchorTag(templateSection));
-  if (sdtBlock) {
-    const target = findPreviousHeadingBlock(blocks, sdtBlock.index, headingLevel) ?? {
-      ...sdtBlock,
-      tagName: "p",
-      headingLevel,
-      headingNumber: sectionNumber,
-      text: templateSection.title
-    };
+  if (!sdtBlock) return undefined;
 
-    return {
-      target: {
-        ...target,
-        headingNumber: sectionNumber,
-        headingLevel,
-        text: templateSection.title || target.text
-      },
-      replacementStartIndex: sdtBlock.index,
-      replacementEndIndex: sdtBlock.index + 1,
-      insertStartOffset: sdtBlock.start,
-      insertEndOffset: sdtBlock.end,
-      sdtBlock,
-      templateSection
-    };
-  }
-
-  const target =
-    findTemplateSectionHeadingByBlockIndex(blocks, templateSection, sectionNumber, headingLevel) ??
-    findTemplateSectionHeadingByNumber(blocks, sectionNumber, headingLevel, templateSection.title);
-  if (!target) return undefined;
-
-  const replacementRange =
-    buildTemplateSectionStaticReplacementRange(blocks, target, templateSection) ??
-    buildTemplateSectionDynamicReplacementRange(blocks, target);
-  if (!replacementRange) return undefined;
+  const target = findPreviousHeadingBlock(blocks, sdtBlock.index, headingLevel) ?? {
+    ...sdtBlock,
+    tagName: "p",
+    headingLevel,
+    headingNumber: sectionNumber,
+    text: templateSection.title
+  };
 
   return {
     target: {
@@ -1615,10 +1591,11 @@ function buildTemplateSectionReplacementAnchor(
       headingLevel,
       text: templateSection.title || target.text
     },
-    replacementStartIndex: replacementRange.startIndex,
-    replacementEndIndex: replacementRange.endIndex,
-    insertStartOffset: replacementRange.insertStartOffset,
-    insertEndOffset: replacementRange.insertEndOffset,
+    replacementStartIndex: sdtBlock.index,
+    replacementEndIndex: sdtBlock.index + 1,
+    insertStartOffset: sdtBlock.start,
+    insertEndOffset: sdtBlock.end,
+    sdtBlock,
     templateSection
   };
 }
@@ -1643,76 +1620,6 @@ function findPreviousHeadingBlock(
     if (!headingLevel || block.headingLevel <= headingLevel) return block;
   }
   return undefined;
-}
-
-function findTemplateSectionHeadingByBlockIndex(
-  blocks: WordBodyBlock[],
-  templateSection: WordTemplateSection,
-  sectionNumber: string,
-  headingLevel: number
-): WordBodyBlock | undefined {
-  const block = blocks[templateSection.headingBlock];
-  if (!block || block.tagName !== "p" || !block.headingLevel) return undefined;
-  const expectedTitle = normalizeHeadingLookup(templateSection.title);
-  const actualTitle = normalizeHeadingLookup(block.text);
-  const matchesNumber = !sectionNumber || block.headingNumber === sectionNumber;
-  const matchesLevel = !headingLevel || block.headingLevel === headingLevel;
-  const matchesTitle = !expectedTitle || actualTitle === expectedTitle || actualTitle.includes(expectedTitle);
-  return matchesNumber && matchesLevel && matchesTitle ? block : undefined;
-}
-
-function findTemplateSectionHeadingByNumber(
-  blocks: WordBodyBlock[],
-  sectionNumber: string,
-  headingLevel: number,
-  title: string
-): WordBodyBlock | undefined {
-  const normalizedTitle = normalizeHeadingLookup(title);
-  return blocks.find((block) => {
-    if (block.tagName !== "p" || !block.headingLevel) return false;
-    if (sectionNumber && block.headingNumber !== sectionNumber) return false;
-    if (headingLevel && block.headingLevel !== headingLevel) return false;
-    if (!normalizedTitle) return true;
-    const blockTitle = normalizeHeadingLookup(block.text);
-    return blockTitle === normalizedTitle || blockTitle.includes(normalizedTitle);
-  });
-}
-
-function buildTemplateSectionStaticReplacementRange(
-  blocks: WordBodyBlock[],
-  target: WordBodyBlock,
-  templateSection: WordTemplateSection
-): { startIndex: number; endIndex: number; insertStartOffset: number; insertEndOffset: number } | undefined {
-  if (target.index !== templateSection.headingBlock) return undefined;
-  const [directStart, directEnd] = templateSection.directBodyRange ?? templateSection.bodyRange;
-  const startBlock = blocks[directStart];
-  const afterEndBlock = blocks[directEnd + 1];
-  if (!startBlock || directStart <= target.index || directEnd < directStart - 1) return undefined;
-
-  return {
-    startIndex: directStart,
-    endIndex: directEnd + 1,
-    insertStartOffset: startBlock.start,
-    insertEndOffset: afterEndBlock?.start ?? blocks.at(-1)?.end ?? target.end
-  };
-}
-
-function buildTemplateSectionDynamicReplacementRange(
-  blocks: WordBodyBlock[],
-  target: WordBodyBlock
-): { startIndex: number; endIndex: number; insertStartOffset: number; insertEndOffset: number } | undefined {
-  const startIndex = target.index + 1;
-  const endBlock = blocks.slice(startIndex).find((block) => block.headingLevel || block.tagName === "sectPr");
-  const endIndex = endBlock?.index ?? blocks.length;
-  const insertStartOffset = blocks[startIndex]?.start ?? target.end;
-  const insertEndOffset = endBlock?.start ?? blocks.at(-1)?.end ?? target.end;
-
-  return {
-    startIndex,
-    endIndex,
-    insertStartOffset,
-    insertEndOffset
-  };
 }
 
 function replaceTemplateTableCells(
@@ -1752,24 +1659,12 @@ function replaceSingleTemplateTableCell(
   const bodyStart = bodyOpen.index + bodyOpen[0].length;
   const bodyXml = documentXml.slice(bodyStart, bodyEnd);
   const anchoredTable = findSdtElementByTag(bodyXml, table.anchors?.table?.tag || `ps:table:${table.id}`);
-  if (anchoredTable) {
-    const nextTableXml = replaceTableCellXml(anchoredTable.xml, replacement.rowIndex, cellIndex, replacement.value);
-    if (!nextTableXml || nextTableXml === anchoredTable.xml) return false;
+  if (!anchoredTable) return false;
 
-    const nextBodyXml = `${bodyXml.slice(0, anchoredTable.start)}${nextTableXml}${bodyXml.slice(anchoredTable.end)}`;
-    const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
-    zip.file("word/document.xml", nextXml);
-    return true;
-  }
+  const nextTableXml = replaceTableCellXml(anchoredTable.xml, replacement.rowIndex, cellIndex, replacement.value);
+  if (!nextTableXml || nextTableXml === anchoredTable.xml) return false;
 
-  const blocks = collectWordBodyBlocks(bodyXml, buildStyleHeadingLevels(zip));
-  const tableBlock = findTemplateTableBlock(blocks, table);
-  if (!tableBlock) return false;
-
-  const nextTableXml = replaceTableCellXml(tableBlock.xml, replacement.rowIndex, cellIndex, replacement.value);
-  if (!nextTableXml || nextTableXml === tableBlock.xml) return false;
-
-  const nextBodyXml = `${bodyXml.slice(0, tableBlock.start)}${nextTableXml}${bodyXml.slice(tableBlock.end)}`;
+  const nextBodyXml = `${bodyXml.slice(0, anchoredTable.start)}${nextTableXml}${bodyXml.slice(anchoredTable.end)}`;
   const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
   zip.file("word/document.xml", nextXml);
   return true;
@@ -1795,42 +1690,6 @@ function resolveTemplateCellIndex(table: WordTemplateTable, replacement: Templat
 
   const row = table.rows?.find((item) => item.index === replacement.rowIndex);
   return row?.cells.find((cell) => cell.columnIndex === replacement.columnIndex)?.cellIndex ?? -1;
-}
-
-function findTemplateTableBlock(
-  blocks: WordBodyBlock[],
-  table: WordTemplateTable
-): WordBodyBlock | undefined {
-  const anchoredBlock = findSdtBlockByTag(blocks, table.anchors?.table?.tag || `ps:table:${table.id}`);
-  if (anchoredBlock && /<w:tbl\b/.test(anchoredBlock.xml)) return anchoredBlock;
-
-  const indexedBlock = blocks[table.block];
-  if (indexedBlock?.tagName === "tbl") return indexedBlock;
-
-  const captionBlock = findTemplateCaptionBlock(blocks, table.caption, "table");
-  if (captionBlock) {
-    const previous = blocks[captionBlock.index - 1];
-    if (previous?.tagName === "tbl") return previous;
-    const next = blocks[captionBlock.index + 1];
-    if (next?.tagName === "tbl") return next;
-  }
-
-  const ordinal = Number(table.id.match(/^table_(\d+)/)?.[1]);
-  if (Number.isInteger(ordinal) && ordinal > 0) {
-    return blocks.filter((block) => block.tagName === "tbl")[ordinal - 1];
-  }
-  return undefined;
-}
-
-function findTemplateCaptionBlock(
-  blocks: WordBodyBlock[],
-  caption: string | undefined,
-  type: "table" | "figure"
-): WordBodyBlock | undefined {
-  const normalizedCaption = normalizeHeadingLookup(caption ?? "");
-  if (!normalizedCaption) return undefined;
-  const prefix = type === "table" ? "表" : "图";
-  return blocks.find((block) => block.tagName === "p" && block.text.startsWith(prefix) && normalizeHeadingLookup(block.text) === normalizedCaption);
 }
 
 function replaceTableCellXml(tableXml: string, rowIndex: number, cellIndex: number, value: string): string | undefined {
@@ -2275,6 +2134,7 @@ async function appendGeneratedDiagrams(
   const embedded: string[] = [];
   const remainingDiagrams: SchemeDiagramAsset[] = [];
   const usedFigureIds = new Set<string>();
+  const hasTemplateFigures = Boolean(templateJson?.figures?.length);
   const drawingBlocks: string[] = [buildWordParagraph("方案图示", { heading: true })];
   let nextDocPrId = getNextDocPrId(zip);
   let mediaIndex = 0;
@@ -2298,6 +2158,8 @@ async function appendGeneratedDiagrams(
     embedded.push(diagram.label);
   }
 
+  if (hasTemplateFigures) return embedded;
+
   for (const diagram of remainingDiagrams) {
     const media = await tryBuildDiagramMedia(zip, diagram, mediaIndex, nextDocPrId);
     if (!media) continue;
@@ -2318,6 +2180,11 @@ function findTemplateFigureForDiagram(
   diagram: SchemeDiagramAsset,
   usedFigureIds: Set<string>
 ): WordTemplateFigure | undefined {
+  if (diagram.figureId) {
+    const exact = (templateJson?.figures ?? []).find((figure) => figure.id === diagram.figureId);
+    if (exact && !usedFigureIds.has(exact.id)) return exact;
+  }
+
   const label = normalizeFigureLookup(diagram.label);
   if (!label) return undefined;
 

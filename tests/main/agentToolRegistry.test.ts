@@ -18,7 +18,8 @@ import {
   IMAGE_GENERATION_REQUEST_TIMEOUT_DEFAULT_MS,
   clampDraftSectionParallelism,
   clampImageGenerationParallelism,
-  type AppSettings
+  type AppSettings,
+  type SchemeProgressItem
 } from "../../src/shared/types";
 
 describe("agentToolRegistry", () => {
@@ -40,6 +41,8 @@ describe("agentToolRegistry", () => {
     expect(safeTools.map((tool) => tool.function.name)).toContain("web_search");
     expect(safeTools.map((tool) => tool.function.name)).toContain("read_word");
     expect(safeTools.map((tool) => tool.function.name)).toContain("read_pdf");
+    expect(safeTools.map((tool) => tool.function.name)).toContain("plan_scheme_batches");
+    expect(safeTools.map((tool) => tool.function.name)).toContain("plan_scheme_assets");
     expect(safeTools.map((tool) => tool.function.name)).toContain("draft_scheme_sections");
     expect(safeTools.map((tool) => tool.function.name)).toContain("create_word");
     expect(safeTools.map((tool) => tool.function.name)).toContain("write_word");
@@ -55,6 +58,8 @@ describe("agentToolRegistry", () => {
     expect(names).toContain("remember_project");
     expect(names).toContain("read_word");
     expect(names).toContain("write_file");
+    expect(names).not.toContain("plan_scheme_batches");
+    expect(names).not.toContain("plan_scheme_assets");
     expect(names).not.toContain("draft_scheme_sections");
     expect(names).not.toContain("create_word");
     expect(names).not.toContain("write_word");
@@ -138,6 +143,137 @@ describe("agentToolRegistry", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("summarizes the built-in Word template JSON as section planning tasks", async () => {
+    const result = await executeAgentToolCall(
+      createToolCall("read_file", { path: "docs/密码应用方案.template.json" }),
+      createContext(process.cwd())
+    );
+
+    expect(result.toolName).toBe("read_file");
+    expect(result.summary).toContain("规划任务清单");
+    expect(result.content).toContain("draft_scheme_sections 每批尽量传 20 个 section");
+    expect(result.content).toContain("sec_2_2_2 | 2.2.2 网络环境");
+    expect(result.content).toContain("task: 正文：描述网络整体结构");
+    expect(result.content).toContain("表格：table_4_2_2_1");
+    expect(result.content).toContain("图示：fig_1_2_2_2_1");
+    expect(result.content).not.toContain("\"schemaVersion\"");
+  });
+
+  it("plans stable scheme section batches from the template json", async () => {
+    const result = await executeAgentToolCall(
+      createToolCall("plan_scheme_batches", {
+        start_section: "sec_2_2_2",
+        batch_size: 5,
+        completed_sections: ["sec_2_2_2_1"]
+      }),
+      createContext(process.cwd())
+    );
+
+    expect(result.toolName).toBe("plan_scheme_batches");
+    expect(result.summary).toContain("首批 5 个章节");
+    expect(result.content).toContain("first_draft_call");
+    expect(result.content).toContain("\"max_parallel\": 5");
+    expect(result.content).toContain("\"section\": \"sec_2_2_2\"");
+    expect(result.content).not.toContain("\"section\": \"sec_2_2_2_1\"");
+    expect(result.content).toContain("BATCH 1 (5)");
+  });
+
+  it("skips already drafted or completed sections when planning batches", async () => {
+    const progress: SchemeProgressItem = {
+      id: "scheme_progress_test",
+      kind: "scheme_progress",
+      title: "方案章节生成",
+      status: "running",
+      total: 3,
+      drafted: 1,
+      completed: 1,
+      failed: 0,
+      createdAt: "2026-05-27T00:00:00.000Z",
+      sections: [
+        { id: "sec_2_2_2", number: "2.2.2", title: "网络环境", headingLevel: 3, status: "completed" },
+        { id: "sec_2_2_2_1", number: "2.2.2.1", title: "网络框架", headingLevel: 4, status: "drafted" }
+      ]
+    };
+
+    const result = await executeAgentToolCall(
+      createToolCall("plan_scheme_batches", {
+        start_section: "sec_2_2_2",
+        batch_size: 3
+      }),
+      {
+        ...createContext(process.cwd()),
+        schemeProgress: progress
+      }
+    );
+
+    expect(result.toolName).toBe("plan_scheme_batches");
+    expect(result.content).toContain("已跳过章节数：2");
+    expect(result.content).not.toContain("\"section\": \"sec_2_2_2\"");
+    expect(result.content).not.toContain("\"section\": \"sec_2_2_2_1\"");
+    expect(result.content).toContain("\"section\": \"sec_2_2_2_2\"");
+  });
+
+  it("does not silently fall back when planning from an unknown section", async () => {
+    const result = await executeAgentToolCall(
+      createToolCall("plan_scheme_batches", {
+        start_section: "sec_7_2",
+        batch_size: 3
+      }),
+      createContext(process.cwd())
+    );
+
+    expect(result.toolName).toBe("plan_scheme_batches");
+    expect(result.summary).toContain("起始章节不在模板中");
+    expect(result.content).toContain("unknown start_section sec_7_2");
+    expect(result.content).not.toContain("\"section\": \"sec_1\"");
+  });
+
+  it("does not ignore unknown completed sections when planning batches", async () => {
+    const result = await executeAgentToolCall(
+      createToolCall("plan_scheme_batches", {
+        completed_sections: ["sec_404"]
+      }),
+      createContext(process.cwd())
+    );
+
+    expect(result.toolName).toBe("plan_scheme_batches");
+    expect(result.summary).toContain("跳过章节不在模板中");
+    expect(result.content).toContain("unknown completed_sections sec_404");
+    expect(result.content).not.toContain("first_draft_call");
+  });
+
+  it("plans table cells and figure tasks for selected scheme sections", async () => {
+    const result = await executeAgentToolCall(
+      createToolCall("plan_scheme_assets", {
+        section_ids: ["sec_5_4_9_4"],
+        max_items: 10
+      }),
+      createContext(process.cwd())
+    );
+
+    expect(result.toolName).toBe("plan_scheme_assets");
+    expect(result.summary).toContain("表格 3 个、图示 2 个");
+    expect(result.content).toContain("template_cells_plan");
+    expect(result.content).toContain("\"table_id\": \"table_30_5_4_9_4\"");
+    expect(result.content).toContain("\"caption\": \"表 5-15 数据存储的保护对象\"");
+    expect(result.content).toContain("\"figure_id\": \"fig_12_5_4_9_4\"");
+    expect(result.content).toContain("\"label\": \"重要数据存储保护流程图\"");
+    expect(result.content).toContain("write_word_diagrams_plan");
+  });
+
+  it("rejects asset planning for unknown sections", async () => {
+    const result = await executeAgentToolCall(
+      createToolCall("plan_scheme_assets", {
+        section_ids: ["sec_7_2"]
+      }),
+      createContext(process.cwd())
+    );
+
+    expect(result.toolName).toBe("plan_scheme_assets");
+    expect(result.summary).toContain("章节不在模板中");
+    expect(result.content).toContain("unknown section_ids sec_7_2");
   });
 
   it("drafts scheme sections without writing Word artifacts", async () => {
