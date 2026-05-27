@@ -775,8 +775,103 @@ button {
   font-size: 13px;
 }
 
+.process-card {
+  max-width: 860px;
+  margin: 8px auto 18px;
+  overflow: hidden;
+  border: 1px solid #d9e2ea;
+  border-radius: 8px;
+  background: #fbfcfd;
+  color: #24384a;
+  font-size: 13px;
+}
+
+.process-card.success {
+  border-color: #bad8c7;
+}
+
+.process-card.failed {
+  border-color: #e3b8b4;
+}
+
+.process-card-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  border-bottom: 1px solid #e3ebf2;
+  padding: 8px 10px;
+}
+
+.process-card[data-state="closed"] .process-card-toolbar {
+  border-bottom: 0;
+}
+
+.process-card-title {
+  font-weight: 700;
+}
+
+.process-card-count {
+  border-radius: 999px;
+  background: #e9f1fb;
+  color: #1b4f8a;
+  font-size: 11px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+.process-card-summary {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: #52687c;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-card-toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #c9d5df;
+  border-radius: 6px;
+  background: #fff;
+  color: #1b4f8a;
+  cursor: pointer;
+}
+
+.process-card-toggle:hover {
+  border-color: #2a6bb3;
+  background: #e9f1fb;
+}
+
+.process-card-toggle[data-state="open"] svg {
+  transform: rotate(180deg);
+}
+
+.process-card-body {
+  padding: 0 10px;
+}
+
+.process-card-body > :not(:first-child) {
+  border-top: 1px solid #e3ebf2;
+}
+
 .tool-row {
   display: block;
+}
+
+.tool-row.embedded,
+.file-row.embedded,
+.stage-row.embedded {
+  max-width: none;
+  min-height: 38px;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 9px 0;
 }
 
 .tool-row-main {

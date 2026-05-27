@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { orderStreamItemsForDisplay } from "../../src/renderer/src/streamOrdering";
+import { groupStreamItemsForDisplay, orderStreamItemsForDisplay } from "../../src/renderer/src/streamOrdering";
 import type { StreamItem } from "../../src/shared/types";
 
 describe("streamOrdering", () => {
@@ -51,6 +51,33 @@ describe("streamOrdering", () => {
 
     expect(orderStreamItemsForDisplay(items).map((item) => item.id)).toEqual(["user_1", "tool_1", "assistant_1"]);
   });
+
+  it("groups process items into a card before the final assistant reply", () => {
+    const items: StreamItem[] = [
+      message("user_1", "user", "生成方案"),
+      tool("tool_1", "write_word"),
+      stage("stage_1", "图片已嵌入"),
+      file("file_1"),
+      message("assistant_1", "assistant", "阶段性文件已发送")
+    ];
+
+    expect(groupStreamItemsForDisplay(items)).toMatchObject([
+      { kind: "message", id: "user_1" },
+      { kind: "process", id: "process_tool_1", items: [{ id: "tool_1" }, { id: "stage_1" }, { id: "file_1" }] },
+      { kind: "message", id: "assistant_1" }
+    ]);
+  });
+
+  it("does not render hidden planning or empty assistant blocks", () => {
+    const items: StreamItem[] = [
+      message("user_1", "user", "继续"),
+      tool("planner_1", "openai.chat.tools"),
+      emptyAssistant("assistant_empty"),
+      tool("tool_1", "send_file")
+    ];
+
+    expect(groupStreamItemsForDisplay(items).map((block) => block.id)).toEqual(["user_1", "process_tool_1"]);
+  });
 });
 
 function message(id: string, role: "user" | "assistant", content: string): StreamItem {
@@ -83,6 +110,26 @@ function file(id: string): StreamItem {
     artifactId: `${id}_artifact`,
     name: "方案.docx",
     fileKind: "docx",
+    createdAt: "2026-05-23T00:00:00.000Z"
+  };
+}
+
+function stage(id: string, title: string): StreamItem {
+  return {
+    id,
+    kind: "stage",
+    title,
+    createdAt: "2026-05-23T00:00:00.000Z"
+  };
+}
+
+function emptyAssistant(id: string): StreamItem {
+  return {
+    id,
+    kind: "message",
+    role: "assistant",
+    content: "",
+    isFinished: true,
     createdAt: "2026-05-23T00:00:00.000Z"
   };
 }

@@ -90,7 +90,7 @@ import type {
   StreamItem
 } from "../../../shared/types";
 import { getErrorMessage, resolvePwdSafeAgentApi } from "../bridge";
-import { orderStreamItemsForDisplay } from "../streamOrdering";
+import { groupStreamItemsForDisplay, orderStreamItemsForDisplay, type ProcessStreamItem } from "../streamOrdering";
 import { filesToAttachmentPayload } from "./attachmentPayload";
 
 const LazyArtifactPreviewPanel = lazy(() => import("./ArtifactPreviewPanel"));
@@ -413,7 +413,7 @@ function MessagePane({
 }): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
   const orderedItems = session ? orderStreamItemsForDisplay(session.items) : [];
-  const visibleItems = orderedItems.filter(shouldRenderStreamItem);
+  const displayBlocks = session ? groupStreamItemsForDisplay(session.items) : [];
   const shouldShowPendingThinking = Boolean(
     session?.status === "running" && !orderedItems.some(isUnfinishedAssistantMessage)
   );
@@ -433,8 +433,24 @@ function MessagePane({
           </div>
         ) : (
           <>
-            {visibleItems.map((item) => (
-              <StreamRow key={item.id} api={api} item={item} onPreviewArtifact={onPreviewArtifact} onError={onError} />
+            {displayBlocks.map((block) => (
+              block.kind === "message" ? (
+                <StreamRow
+                  key={block.id}
+                  api={api}
+                  item={block.item}
+                  onPreviewArtifact={onPreviewArtifact}
+                  onError={onError}
+                />
+              ) : (
+                <ProcessCard
+                  key={block.id}
+                  api={api}
+                  items={block.items}
+                  onPreviewArtifact={onPreviewArtifact}
+                  onError={onError}
+                />
+              )
             ))}
             {shouldShowPendingThinking ? <PendingAssistantRow /> : null}
           </>
@@ -615,11 +631,6 @@ function isUnfinishedAssistantMessage(item: StreamItem): boolean {
   return item.kind === "message" && item.role === "assistant" && !item.isFinished;
 }
 
-function shouldRenderStreamItem(item: StreamItem): boolean {
-  if (item.kind === "scheme_progress") return false;
-  return !(item.kind === "message" && item.role === "assistant" && item.isFinished && !item.content.trim());
-}
-
 function PendingAssistantRow(): JSX.Element {
   return (
     <article className="message-row assistant thinking-row">
@@ -633,16 +644,91 @@ function PendingAssistantRow(): JSX.Element {
   );
 }
 
+function ProcessCard({
+  api,
+  items,
+  onPreviewArtifact,
+  onError
+}: {
+  api: PwdSafeAgentApi;
+  items: ProcessStreamItem[];
+  onPreviewArtifact: (artifactId: string) => void;
+  onError: (message: string) => void;
+}): JSX.Element {
+  const status = resolveProcessCardStatus(items);
+
+  return (
+    <Collapsible.Root className={`process-card ${status}`} defaultOpen>
+      <div className="process-card-toolbar">
+        <ProcessCardStatusIcon status={status} />
+        <span className="process-card-title">过程记录</span>
+        <span className="process-card-count">{formatProcessCardCounts(items)}</span>
+        <span className="process-card-summary">{formatProcessCardSummary(items)}</span>
+        <Collapsible.Trigger asChild>
+          <button type="button" className="process-card-toggle" aria-label="展开或折叠过程记录">
+            <ChevronDown size={14} />
+          </button>
+        </Collapsible.Trigger>
+      </div>
+      <Collapsible.Content className="process-card-body">
+        {items.map((processItem) => (
+          <StreamRow
+            key={processItem.id}
+            api={api}
+            item={processItem}
+            onPreviewArtifact={onPreviewArtifact}
+            onError={onError}
+            embedded
+          />
+        ))}
+      </Collapsible.Content>
+    </Collapsible.Root>
+  );
+}
+
+function ProcessCardStatusIcon({ status }: { status: "running" | "success" | "failed" }): JSX.Element {
+  if (status === "running") return <Loader2 size={14} className="spin" />;
+  if (status === "failed") return <XCircle size={14} />;
+  return <CheckCircle2 size={14} />;
+}
+
+function resolveProcessCardStatus(items: ProcessStreamItem[]): "running" | "success" | "failed" {
+  if (items.some((item) => item.kind === "tool" && item.status === "failed")) return "failed";
+  if (items.some((item) => item.kind === "tool" && item.status === "running")) return "running";
+  return "success";
+}
+
+function formatProcessCardCounts(items: ProcessStreamItem[]): string {
+  const toolCount = items.filter((item) => item.kind === "tool").length;
+  const fileCount = items.filter((item) => item.kind === "file").length;
+  const stageCount = items.filter((item) => item.kind === "stage").length;
+  return [
+    toolCount ? `${toolCount} 个工具` : "",
+    stageCount ? `${stageCount} 条过程` : "",
+    fileCount ? `${fileCount} 个文件` : ""
+  ].filter(Boolean).join(" · ");
+}
+
+function formatProcessCardSummary(items: ProcessStreamItem[]): string {
+  const latest = items.at(-1);
+  if (!latest) return "等待执行";
+  if (latest.kind === "file") return `已生成 ${latest.name}`;
+  if (latest.kind === "stage") return [latest.title, latest.detail].filter(Boolean).join(" · ");
+  return latest.summary || `工具 ${latest.toolName}`;
+}
+
 function StreamRow({
   api,
   item,
   onPreviewArtifact,
-  onError
+  onError,
+  embedded = false
 }: {
   api: PwdSafeAgentApi;
   item: StreamItem;
   onPreviewArtifact: (artifactId: string) => void;
   onError: (message: string) => void;
+  embedded?: boolean;
 }): JSX.Element {
   if (item.kind === "message") {
     const isUser = item.role === "user";
@@ -668,12 +754,12 @@ function StreamRow({
   }
 
   if (item.kind === "tool") {
-    return <ToolRow item={item} />;
+    return <ToolRow item={item} embedded={embedded} />;
   }
 
   if (item.kind === "file") {
     return (
-      <div className="file-row">
+      <div className={embedded ? "file-row embedded" : "file-row"}>
         {isImageKind(item.fileKind) ? <Image size={16} /> : <File size={16} />}
         <span>{item.name}</span>
         <span className="file-kind">{item.fileKind}</span>
@@ -688,7 +774,7 @@ function StreamRow({
   }
 
   return (
-    <div className="stage-row">
+    <div className={embedded ? "stage-row embedded" : "stage-row"}>
       <span>{item.title}</span>
       {item.detail ? <small>{item.detail}</small> : null}
     </div>
@@ -708,11 +794,11 @@ function ThinkingIndicator(): JSX.Element {
   );
 }
 
-function ToolRow({ item }: { item: Extract<StreamItem, { kind: "tool" }> }): JSX.Element {
+function ToolRow({ item, embedded = false }: { item: Extract<StreamItem, { kind: "tool" }>; embedded?: boolean }): JSX.Element {
   const hasDetails = Boolean(item.inputPreview || item.outputPreview || item.errorPreview);
 
   return (
-    <Collapsible.Root className={`tool-row ${item.status}`}>
+    <Collapsible.Root className={`tool-row ${item.status}${embedded ? " embedded" : ""}`}>
       <div className="tool-row-main">
         {item.status === "running" ? (
           <Loader2 size={14} className="spin" />
