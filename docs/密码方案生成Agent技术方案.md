@@ -351,7 +351,7 @@ stateDiagram-v2
 
 1. Word 读取：Open XML 解析或 `mammoth` 做文本抽取。
 2. Word 输出：模板归一化后走 Open XML 段落级渲染；`docx-templates` 仅处理短字段。
-3. 整篇方案生成：`read_file(template.json)` 返回规范化任务清单，`plan_scheme_batches` 规划批次，`draft_scheme_sections` 并行起草，`write_word.sections` 按不可见 SDT 锚批量写入正文，之后 `plan_scheme_assets` 规划表格/图示任务并统一补齐。
+3. 整篇方案生成：`read_file(template.json)` 返回规范化任务清单，`plan_scheme_batches` 规划批次和 `paragraph_tasks`，`draft_scheme_sections` 按段落任务并行起草，`write_word.sections` 按不可见 SDT 锚批量写入正文，之后 `plan_scheme_assets` 分页规划表格单元格和图示任务，并按 `next_plan_scheme_assets_call` 补齐所有批次。
 4. PDF 读取：`pdfjs-dist` 或同类解析方案。
 5. PDF 导出：优先通过本地 LibreOffice / Office 自动化受控导出。
 

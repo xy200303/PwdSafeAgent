@@ -702,8 +702,10 @@ function formatProcessCardCounts(items: ProcessStreamItem[]): string {
   const toolCount = items.filter((item) => item.kind === "tool").length;
   const fileCount = items.filter((item) => item.kind === "file").length;
   const stageCount = items.filter((item) => item.kind === "stage").length;
+  const messageCount = items.filter((item) => item.kind === "message").length;
   return [
     toolCount ? `${toolCount} 个工具` : "",
+    messageCount ? `${messageCount} 条说明` : "",
     stageCount ? `${stageCount} 条过程` : "",
     fileCount ? `${fileCount} 个文件` : ""
   ].filter(Boolean).join(" · ");
@@ -712,9 +714,15 @@ function formatProcessCardCounts(items: ProcessStreamItem[]): string {
 function formatProcessCardSummary(items: ProcessStreamItem[]): string {
   const latest = items.at(-1);
   if (!latest) return "等待执行";
+  if (latest.kind === "message") return compactInlineText(latest.content) || "过程说明";
   if (latest.kind === "file") return `已生成 ${latest.name}`;
   if (latest.kind === "stage") return [latest.title, latest.detail].filter(Boolean).join(" · ");
   return latest.summary || `工具 ${latest.toolName}`;
+}
+
+function compactInlineText(value: string, maxLength = 48): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
 function StreamRow({
@@ -731,6 +739,21 @@ function StreamRow({
   embedded?: boolean;
 }): JSX.Element {
   if (item.kind === "message") {
+    if (embedded && item.role === "assistant") {
+      return (
+        <div className="process-message-row">
+          <Bot size={14} />
+          <div className="process-message-body">
+            {item.content.trim() ? (
+              <IncremarkContent content={item.content} isFinished={item.isFinished} />
+            ) : item.isFinished ? null : (
+              <ThinkingIndicator />
+            )}
+          </div>
+        </div>
+      );
+    }
+
     const isUser = item.role === "user";
     return (
       <article className={`message-row ${item.role}`}>

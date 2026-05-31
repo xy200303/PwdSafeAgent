@@ -156,6 +156,7 @@ describe("agentToolRegistry", () => {
     expect(result.content).toContain("draft_scheme_sections 每批尽量传 20 个 section");
     expect(result.content).toContain("sec_2_2_2 | 2.2.2 网络环境");
     expect(result.content).toContain("task: 正文：描述网络整体结构");
+    expect(result.content).toContain("段落：说明本节范围和已确认对象");
     expect(result.content).toContain("表格：table_4_2_2_1");
     expect(result.content).toContain("图示：fig_1_2_2_2_1");
     expect(result.content).not.toContain("\"schemaVersion\"");
@@ -176,6 +177,7 @@ describe("agentToolRegistry", () => {
     expect(result.content).toContain("first_draft_call");
     expect(result.content).toContain("\"max_parallel\": 5");
     expect(result.content).toContain("\"section\": \"sec_2_2_2\"");
+    expect(result.content).toContain("\"paragraph_tasks\"");
     expect(result.content).not.toContain("\"section\": \"sec_2_2_2_1\"");
     expect(result.content).toContain("BATCH 1 (5)");
   });
@@ -256,11 +258,31 @@ describe("agentToolRegistry", () => {
     expect(result.toolName).toBe("plan_scheme_assets");
     expect(result.summary).toContain("表格 3 个、图示 2 个");
     expect(result.content).toContain("template_cells_plan");
+    expect(result.content).toContain("本批单元格");
     expect(result.content).toContain("\"table_id\": \"table_30_5_4_9_4\"");
     expect(result.content).toContain("\"caption\": \"表 5-15 数据存储的保护对象\"");
     expect(result.content).toContain("\"figure_id\": \"fig_12_5_4_9_4\"");
     expect(result.content).toContain("\"label\": \"重要数据存储保护流程图\"");
     expect(result.content).toContain("write_word_diagrams_plan");
+  });
+
+  it("paginates full template table cell planning to avoid truncating later tables", async () => {
+    const result = await executeAgentToolCall(
+      createToolCall("plan_scheme_assets", {
+        include_figures: false,
+        max_cells: 25,
+        max_figures: 0
+      }),
+      createContext(process.cwd())
+    );
+
+    expect(result.toolName).toBe("plan_scheme_assets");
+    expect(result.content).toContain("可填单元格：825 个；本批单元格：25 个");
+    expect(result.content).toContain("next_plan_scheme_assets_call");
+    expect(result.content).toContain("\"cell_offset\": 25");
+    expect(result.content).toContain("\"include_tables\": true");
+    expect(result.content).toContain("\"include_figures\": false");
+    expect(result.content).not.toContain("内容过长，已截断");
   });
 
   it("rejects asset planning for unknown sections", async () => {
@@ -295,8 +317,10 @@ describe("agentToolRegistry", () => {
     expect(result.toolName).toBe("draft_scheme_sections");
     expect(result.summary).toContain("已并行起草 2");
     expect(result.artifactPath).toBeUndefined();
+    expect(result.content).toContain("按 paragraph_tasks 分段后的正文草稿");
     expect(result.content).toContain("## 2.1 基本情况");
     expect(result.content).toContain("## 2.2.2 网络环境");
+    expect(result.content).toContain("本节结论将为");
     expect(result.schemeProgressUpdates).toEqual([
       expect.objectContaining({ section: "2.1", status: "drafted" }),
       expect.objectContaining({ section: "2.2.2", status: "drafted" })

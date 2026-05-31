@@ -142,12 +142,20 @@ w:sdtPr / w:tag[@w:val="ps:section:sec_2_2_1:body"]
 5. 只替换样板段落中的 `w:t` 文本。
 6. 保留 `w:pPr`、`w:rPr`、样式 ID、缩进、行距、编号属性等格式。
 
+生成侧段落规则：
+
+1. `plan_scheme_batches` 为每个真实 section 派生 `paragraph_tasks`，不新增虚拟章节。
+2. `draft_scheme_sections` 按 `paragraph_tasks` 输出多个自然段，一项任务对应一个段落。
+3. 起草时带入上一节和下一节信息，首段承接上文，末段引出下文，避免段落孤立。
+4. 表格和图片只作为后续任务引用，不在正文草稿中直接生成。
+
 表格渲染规则：
 
 1. 固定结构表格保留原 `w:tbl`，只替换单元格文本。
 2. 动态行表格复制样板行 `w:tr`。
 3. 保留单元格边框、底纹、宽度、合并、段落样式。
 4. 只替换单元格中的文本或图片关系。
+5. 表格单元格任务量较大时，`plan_scheme_assets` 必须按 `cell_offset/max_cells` 分批返回；调用方按 `next_plan_scheme_assets_call` 循环写入，直到没有后续批次，避免只填前半部分表格。
 
 图片渲染规则：
 

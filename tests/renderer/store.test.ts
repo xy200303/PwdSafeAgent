@@ -180,6 +180,66 @@ describe("renderer store", () => {
     ]);
   });
 
+  it("moves a refreshed file card to the latest session position", () => {
+    const session = {
+      ...makeSession("session_a", "A"),
+      items: [
+        {
+          id: "file_1",
+          kind: "file",
+          artifactId: "artifact_1",
+          name: "旧方案.docx",
+          fileKind: "docx",
+          createdAt: "2026-05-23T00:01:00.000Z"
+        },
+        {
+          id: "tool_1",
+          kind: "tool",
+          toolCallId: "call_1",
+          toolName: "write_word",
+          status: "success",
+          summary: "已生成旧方案.docx",
+          createdAt: "2026-05-23T00:01:01.000Z"
+        }
+      ] satisfies ChatSession["items"]
+    };
+    const refreshedFile = {
+      id: "file_1",
+      kind: "file",
+      artifactId: "artifact_1",
+      name: "新方案.docx",
+      fileKind: "docx",
+      createdAt: "2026-05-23T00:02:01.000Z"
+    } satisfies ChatSession["items"][number];
+    const sendTool = {
+      id: "tool_2",
+      kind: "tool",
+      toolCallId: "call_2",
+      toolName: "send_file",
+      status: "success",
+      summary: "已发送 新方案.docx",
+      createdAt: "2026-05-23T00:02:00.000Z"
+    } satisfies ChatSession["items"][number];
+
+    store.dispatch(setSessions([session]));
+    store.dispatch(
+      applyRendererEvent({
+        id: "event_5",
+        type: "session.updated",
+        payload: {
+          ...session,
+          items: [session.items[1], sendTool, refreshedFile]
+        }
+      })
+    );
+
+    expect(store.getState().chat.sessions[0]?.items.map((item) => item.id)).toEqual(["tool_1", "tool_2", "file_1"]);
+    expect(store.getState().chat.sessions[0]?.items.at(-1)).toMatchObject({
+      kind: "file",
+      name: "新方案.docx"
+    });
+  });
+
   it("preserves tool detail previews from stream events", () => {
     const session = makeSession("session_a", "A");
     const event: RendererEvent = {

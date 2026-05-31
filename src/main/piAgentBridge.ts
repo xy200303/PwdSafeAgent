@@ -179,6 +179,7 @@ async function runPiPrompt(
   let assistantItem: MessageStreamItem | undefined;
   const toolItems = new Map<string, StreamItem>();
   const toolArgs = new Map<string, unknown>();
+  const sealedAssistantTexts: string[] = [];
   const abort = () => {
     void state.session.abort();
   };
@@ -191,6 +192,7 @@ async function runPiPrompt(
       state,
       toolItems,
       toolArgs,
+      sealedAssistantTexts,
       getAssistantItem: () => assistantItem,
       setAssistantItem: (item) => {
         assistantItem = item;
@@ -204,11 +206,11 @@ async function runPiPrompt(
       source: "interactive"
     });
 
+    const finalText = stripSealedAssistantText(state.session.getLastAssistantText(), sealedAssistantTexts);
     if (!assistantItem) {
       assistantItem = host.createAssistantMessage(input.sessionId);
       input.onAssistantCreated(assistantItem);
     }
-    const finalText = state.session.getLastAssistantText();
     if (finalText && assistantItem.content !== finalText) {
       assistantItem.content = finalText;
       host.updateItem(input.sessionId, assistantItem);
@@ -230,8 +232,9 @@ function handlePiSessionEvent(
     state: PiSessionState;
     toolItems: Map<string, StreamItem>;
     toolArgs: Map<string, unknown>;
+    sealedAssistantTexts: string[];
     getAssistantItem: () => MessageStreamItem | undefined;
-    setAssistantItem: (item: MessageStreamItem) => void;
+    setAssistantItem: (item: MessageStreamItem | undefined) => void;
   }
 ): void {
   switch (event.type) {
@@ -245,7 +248,7 @@ function handlePiSessionEvent(
     }
     case "message_end": {
       if (event.message.role !== "assistant") return;
-      const text = extractAssistantText(event.message);
+      const text = stripSealedAssistantText(extractAssistantText(event.message), context.sealedAssistantTexts);
       if (!text) return;
       const assistantItem = ensureAssistantItem(context);
       assistantItem.content = text;
@@ -253,6 +256,7 @@ function handlePiSessionEvent(
       return;
     }
     case "tool_execution_start": {
+      sealCurrentAssistantAsProcessNote(context);
       const item = context.host.startToolCall(
         context.input.sessionId,
         event.toolName,
@@ -433,7 +437,7 @@ function ensureAssistantItem(context: {
   host: AgentRuntimeHost;
   input: AgentRuntimeTurnInput;
   getAssistantItem: () => MessageStreamItem | undefined;
-  setAssistantItem: (item: MessageStreamItem) => void;
+  setAssistantItem: (item: MessageStreamItem | undefined) => void;
 }): MessageStreamItem {
   const existing = context.getAssistantItem();
   if (existing) return existing;
@@ -442,6 +446,32 @@ function ensureAssistantItem(context: {
   context.input.onAssistantCreated(item);
   context.setAssistantItem(item);
   return item;
+}
+
+function sealCurrentAssistantAsProcessNote(context: {
+  host: AgentRuntimeHost;
+  input: AgentRuntimeTurnInput;
+  sealedAssistantTexts: string[];
+  getAssistantItem: () => MessageStreamItem | undefined;
+  setAssistantItem: (item: MessageStreamItem | undefined) => void;
+}): void {
+  const assistantItem = context.getAssistantItem();
+  if (!assistantItem?.content.trim()) return;
+  assistantItem.isFinished = true;
+  context.host.updateItem(context.input.sessionId, assistantItem);
+  context.sealedAssistantTexts.push(assistantItem.content);
+  context.setAssistantItem(undefined);
+}
+
+function stripSealedAssistantText(text: string | undefined, sealedTexts: string[]): string {
+  let nextText = (text || "").trim();
+  for (const sealedText of sealedTexts) {
+    const prefix = sealedText.trim();
+    if (prefix && nextText.startsWith(prefix)) {
+      nextText = nextText.slice(prefix.length).trimStart();
+    }
+  }
+  return nextText.trim();
 }
 
 function createPwdSafePiTools(

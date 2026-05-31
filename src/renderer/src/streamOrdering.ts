@@ -1,7 +1,8 @@
 import type { StreamItem } from "../../shared/types";
 
-export type ProcessStreamItem = Extract<StreamItem, { kind: "tool" | "file" | "stage" }>;
 export type MessageStreamItem = Extract<StreamItem, { kind: "message" }>;
+export type ToolProcessStreamItem = Extract<StreamItem, { kind: "tool" | "file" | "stage" }>;
+export type ProcessStreamItem = ToolProcessStreamItem | MessageStreamItem;
 
 export type StreamDisplayBlock =
   | {
@@ -53,35 +54,62 @@ export function orderStreamItemsForDisplay(items: StreamItem[]): StreamItem[] {
 
 export function groupStreamItemsForDisplay(items: StreamItem[]): StreamDisplayBlock[] {
   const blocks: StreamDisplayBlock[] = [];
-  let processItems: ProcessStreamItem[] = [];
+  let turnItems: StreamItem[] = [];
 
-  const flushProcessItems = (): void => {
+  const flushProcessItems = (processItems: ProcessStreamItem[]): void => {
     if (!processItems.length) return;
     blocks.push({
       id: `process_${processItems[0].id}`,
       kind: "process",
       items: processItems
     });
-    processItems = [];
   };
 
-  for (const item of orderStreamItemsForDisplay(items)) {
-    if (item.kind === "message") {
-      flushProcessItems();
+  const flushTurn = (): void => {
+    if (!turnItems.length) return;
+
+    const userMessages = turnItems.filter(
+      (item): item is MessageStreamItem => item.kind === "message" && item.role === "user"
+    );
+    const nonUserItems = turnItems.filter((item) => !(item.kind === "message" && item.role === "user"));
+    const assistantMessages = nonUserItems.filter(
+      (item): item is MessageStreamItem => item.kind === "message" && item.role === "assistant"
+    );
+    const finalAssistant = assistantMessages.at(-1);
+    const processItems = nonUserItems.filter((item): item is ProcessStreamItem => {
+      if (finalAssistant && item.id === finalAssistant.id) return false;
+      return item.kind === "tool" || item.kind === "file" || item.kind === "stage" || item.kind === "message";
+    });
+
+    for (const item of userMessages) {
       blocks.push({
         id: item.id,
         kind: "message",
         item
       });
-      continue;
     }
 
-    if (item.kind === "tool" || item.kind === "file" || item.kind === "stage") {
-      processItems.push(item);
+    flushProcessItems(processItems);
+
+    if (finalAssistant) {
+      blocks.push({
+        id: finalAssistant.id,
+        kind: "message",
+        item: finalAssistant
+      });
     }
+
+    turnItems = [];
+  };
+
+  for (const item of items.filter(shouldDisplayStreamItem)) {
+    if (item.kind === "message" && item.role === "user" && turnItems.length) {
+      flushTurn();
+    }
+    turnItems.push(item);
   }
 
-  flushProcessItems();
+  flushTurn();
   return blocks;
 }
 

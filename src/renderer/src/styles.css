@@ -874,6 +874,30 @@ button {
   padding: 9px 0;
 }
 
+.process-message-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  margin: 0;
+  color: #52687c;
+  padding: 9px 0;
+}
+
+.process-message-row > svg {
+  margin-top: 4px;
+  color: #6a7d90;
+}
+
+.process-message-body {
+  min-width: 0;
+  line-height: 1.65;
+}
+
+.process-message-body p {
+  margin: 0;
+}
+
 .tool-row-main {
   display: flex;
   align-items: center;

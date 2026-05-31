@@ -68,6 +68,26 @@ describe("streamOrdering", () => {
     ]);
   });
 
+  it("keeps intermediate assistant notes inside the process card", () => {
+    const items: StreamItem[] = [
+      message("user_1", "user", "生成方案"),
+      message("assistant_note", "assistant", "我先读取模板并规划章节。"),
+      tool("tool_1", "read_file"),
+      stage("stage_1", "章节批次已规划"),
+      message("assistant_final", "assistant", "阶段性文件已发送")
+    ];
+
+    expect(groupStreamItemsForDisplay(items)).toMatchObject([
+      { kind: "message", id: "user_1" },
+      {
+        kind: "process",
+        id: "process_assistant_note",
+        items: [{ id: "assistant_note" }, { id: "tool_1" }, { id: "stage_1" }]
+      },
+      { kind: "message", id: "assistant_final" }
+    ]);
+  });
+
   it("does not render hidden planning or empty assistant blocks", () => {
     const items: StreamItem[] = [
       message("user_1", "user", "继续"),

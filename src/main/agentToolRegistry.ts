@@ -25,7 +25,7 @@ import {
   type SchemeDiagramAsset,
   type TemplateCellReplacementInput
 } from "./schemeDocument";
-import { loadSchemeTemplateSections, type SchemeProgressUpdateInput } from "./schemeProgress";
+import type { SchemeProgressUpdateInput } from "./schemeProgress";
 import {
   DRAFT_SECTION_PARALLELISM_MAX,
   clampDraftSectionParallelism,
@@ -289,7 +289,30 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             },
             max_items: {
               type: "integer",
-              description: "最多返回多少个表格/图示任务，默认 40。"
+              description: "兼容参数。最多选择多少个表格/图示任务，默认 120；表格单元格仍由 max_cells 分页返回。"
+            },
+            table_ids: {
+              type: "array",
+              description: "可选。只规划指定表格 id，必须来自 template.json。为空时按 section_ids 关联表格规划。",
+              items: {
+                type: "string"
+              }
+            },
+            cell_offset: {
+              type: "integer",
+              description: "可选。表格单元格分页起点，默认 0。"
+            },
+            max_cells: {
+              type: "integer",
+              description: "可选。最多返回多少个可填表格单元格，默认 120，范围 1-200。"
+            },
+            figure_offset: {
+              type: "integer",
+              description: "可选。图示任务分页起点，默认 0。"
+            },
+            max_figures: {
+              type: "integer",
+              description: "可选。最多返回多少个图示任务，默认 20，范围 1-50；如果 include_figures=false，则不返回图示。"
             }
           },
           additionalProperties: false
@@ -304,6 +327,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
           "并行起草多个 Word 模板章节的正文草稿，但不写入 Word。",
           "用于加速正式方案生成：先按模板 JSON 顺序选取待生成小节调用本工具并行生成正文；再把返回草稿合并到 write_word.sections，按章节顺序批量写入同一个 docx。",
           "sections[].section 必须来自 docs/密码应用方案.template.json 的真实 sections 条目，优先传 id，例如 sec_2_2_2；不要自行拆分或编造模板中不存在的 7.2、sec_7_2 等虚拟章节。",
+          "每个章节会按 paragraph_tasks 生成 2-4 个连续段落；如果 plan_scheme_batches 返回了 paragraph_tasks，必须原样传入。",
           "本工具只生成正文段落和必要列表，不生成 Markdown 表格，不生成图片，不修改模板表格单元格；表格 template_cells 和配图 image_generate/diagrams 应在所有正文写入后由 Agent 统一处理。",
           "草稿必须贴合 section 的 writingHint、placeholders、relatedTables、relatedFigures 和已确认项目事实；资料不足处写待补充，不编造关键事实。"
         ].join("\n"),
@@ -328,6 +352,13 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
                   writing_hint: {
                     type: "string",
                     description: "该章节写作提示，可省略，工具会从模板 JSON 尝试补全。"
+                  },
+                  paragraph_tasks: {
+                    type: "array",
+                    description: "可选。该章节内要按顺序展开的段落任务，通常直接使用 plan_scheme_batches 返回的 paragraph_tasks。",
+                    items: {
+                      type: "string"
+                    }
                   }
                 },
                 required: ["section"],
@@ -984,7 +1015,8 @@ function buildSchemeTemplateTaskSummary(filePath: string, context: AgentToolExec
     "使用规则：",
     `- draft_scheme_sections 每批尽量传 ${batchSize} 个 section，严格按下方 sections 顺序放入 sections 数组；不要只传 1 个，除非用户明确要求局部更新。`,
     "- section 必须使用下方真实 id，例如 sec_2_2_2；不要编造不存在的章节。",
-    "- 每节正文按 task 编写；tables/figures 只记录后续任务，正文阶段不要生成 Markdown 表格或图片。",
+    "- 每节正文按 paragraph_plan 分段编写，一项任务对应一个自然段；段落之间要承接上文，不能各写各的。",
+    "- tables/figures 只记录后续任务，正文阶段不要生成 Markdown 表格或图片。",
     "- 正文草稿完成后，用 write_word.sections 按相同顺序批量写入 Word；随后调用 plan_scheme_assets 规划表格和图片任务。",
     "- 表格按 plan_scheme_assets 返回的 template_cells_plan 改写 value 后写入；图片按 image_generate_plan 生成，再用 diagrams.figure_id 精确嵌入。",
     "",
@@ -1121,8 +1153,10 @@ function formatTemplateTaskSection(
   tableMap: Map<string, SchemeTemplateTaskTable>,
   figureMap: Map<string, SchemeTemplateTaskFigure>
 ): string {
+  const paragraphPlan = buildSectionParagraphTasks(section);
   const tasks = [
     `正文：${section.writingHint || `围绕“${section.title}”编写项目化正文，资料不足处写待补充。`}`,
+    `段落：${paragraphPlan.join("；")}`,
     section.placeholders?.length ? `字段：${section.placeholders.join("、")}` : "",
     section.relatedTables?.length ? `表格：${section.relatedTables.map((id) => formatRelatedTable(id, tableMap.get(id))).join("；")}` : "",
     section.relatedFigures?.length ? `图示：${section.relatedFigures.map((id) => formatRelatedFigure(id, figureMap.get(id))).join("；")}` : ""
@@ -1141,6 +1175,32 @@ function formatRelatedFigure(id: string, figure?: SchemeTemplateTaskFigure): str
   const label = figure.recommendedLabel || figure.caption;
   const details = [label, figure.purpose].filter(Boolean);
   return `${id}${details.length ? `（${details.join("；")}）` : ""}`;
+}
+
+function buildSectionParagraphTasks(section: Pick<SchemeTemplateTaskSection, "title" | "writingHint" | "relatedTables" | "relatedFigures">): string[] {
+  const text = `${section.title} ${section.writingHint || ""}`;
+  const tasks: string[] = [];
+
+  if (/风险|威胁|不足|问题/.test(text)) {
+    tasks.push("承接现状说明本节分析对象和边界", "分析主要风险来源、影响路径和业务后果", "归纳需通过密码技术或管理措施控制的重点");
+  } else if (/需求|适用|要求/.test(text)) {
+    tasks.push("承接风险结论说明本节需求来源", "按保护对象提炼密码技术需求", "说明管理、运维或审计配套要求");
+  } else if (/设计|实现|保护|措施|建设|部署|应用/.test(text)) {
+    tasks.push("说明保护对象和建设目标", "描述密码措施、产品位置和调用路径", "说明与业务流程、运维管理或后续表格图示的衔接");
+  } else if (/环境|现状|情况|概述|基本|组成|框架|拓扑/.test(text)) {
+    tasks.push("说明本节范围和已确认对象", "描述组成、位置、边界、责任主体或数据流向", "指出资料缺口并引出后续风险或设计分析");
+  } else {
+    tasks.push("承接上一节说明本节主题和范围", "结合项目事实展开关键对象、关系和约束", "总结本节结论并自然引出下一节");
+  }
+
+  if (section.relatedTables?.length) {
+    tasks.push(`为后续 ${section.relatedTables.join("、")} 表格填充提供文字依据，不在正文中生成表格`);
+  }
+  if (section.relatedFigures?.length) {
+    tasks.push(`为后续 ${section.relatedFigures.join("、")} 图示生成提供场景说明，不在正文中生成图片`);
+  }
+
+  return tasks.slice(0, 5);
 }
 
 function readRecordString(record: Record<string, unknown>, key: string): string {
@@ -1274,7 +1334,8 @@ function formatSchemeBatchPlan(input: {
     sections: firstBatch.map((section) => ({
       section: section.id,
       title: section.title,
-      writing_hint: section.writingHint
+      writing_hint: section.writingHint,
+      paragraph_tasks: buildSectionParagraphTasks(section)
     })),
     max_parallel: input.batchSize
   };
@@ -1296,7 +1357,12 @@ function formatSchemeBatchPlan(input: {
   input.batches.forEach((batch, index) => {
     lines.push(
       `BATCH ${index + 1} (${batch.length}): ${batch.map((section) => section.id).join(", ")}`,
-      ...batch.map((section) => `- ${section.id} | ${section.number} ${section.title} | ${section.writingHint || "按模板章节主题编写正文。"}`)
+      ...batch.map((section) =>
+        [
+          `- ${section.id} | ${section.number} ${section.title} | ${section.writingHint || "按模板章节主题编写正文。"}`,
+          `  paragraph_tasks: ${buildSectionParagraphTasks(section).join("；")}`
+        ].join("\n")
+      )
     );
   });
 
@@ -1331,11 +1397,33 @@ function executePlanSchemeAssets(
 
   const includeTables = readBooleanArg(args, "include_tables", true);
   const includeFigures = readBooleanArg(args, "include_figures", true);
-  const maxItems = Math.min(Math.max(Math.trunc(readNumberArg(args, "max_items", 40)), 1), 120);
+  const maxItems = Math.min(Math.max(Math.trunc(readNumberArg(args, "max_items", 120)), 1), 120);
+  const cellOffset = Math.min(Math.max(Math.trunc(readNumberArg(args, "cell_offset", 0)), 0), 100000);
+  const maxCells = Math.min(Math.max(Math.trunc(readNumberArg(args, "max_cells", 120)), 1), 200);
+  const figureOffset = Math.min(Math.max(Math.trunc(readNumberArg(args, "figure_offset", 0)), 0), 100000);
+  const requestedMaxFigures = Math.trunc(readNumberArg(args, "max_figures", 20));
+  const maxFigures = includeFigures ? Math.min(Math.max(requestedMaxFigures, 1), 50) : 0;
   const selectedSections = resolvedSections.map((item) => item.section).filter((section): section is SchemeTemplateTaskSection => Boolean(section));
-  const plannedTables = includeTables ? uniqueTemplateIds(selectedSections.flatMap((section) => section.relatedTables ?? [])).map((id) => tableMap.get(id)).filter((table): table is SchemeTemplateTaskTable => Boolean(table)).slice(0, maxItems) : [];
-  const remainingSlots = Math.max(0, maxItems - plannedTables.length);
-  const plannedFigures = includeFigures ? uniqueTemplateIds(selectedSections.flatMap((section) => section.relatedFigures ?? [])).map((id) => figureMap.get(id)).filter((figure): figure is SchemeTemplateTaskFigure => Boolean(figure)).slice(0, remainingSlots || maxItems) : [];
+  const requestedTableIds = readStringListArg(args, "table_ids");
+  const unknownTableIds = requestedTableIds.filter((id) => !tableMap.has(id));
+  if (unknownTableIds.length) {
+    return {
+      toolName: "plan_scheme_assets",
+      summary: "表格不在模板中",
+      content: `plan_scheme_assets failed: unknown table_ids ${unknownTableIds.join("、")}; use existing tables[].id values from docs/密码应用方案.template.json`
+    };
+  }
+
+  const tableIds = requestedTableIds.length
+    ? requestedTableIds
+    : uniqueTemplateIds(selectedSections.flatMap((section) => section.relatedTables ?? []));
+  const plannedTables = includeTables
+    ? tableIds.map((id) => tableMap.get(id)).filter((table): table is SchemeTemplateTaskTable => Boolean(table)).slice(0, maxItems)
+    : [];
+  const figureIds = uniqueTemplateIds(selectedSections.flatMap((section) => section.relatedFigures ?? []));
+  const plannedFigures = includeFigures
+    ? figureIds.map((id) => figureMap.get(id)).filter((figure): figure is SchemeTemplateTaskFigure => Boolean(figure)).slice(0, maxItems)
+    : [];
 
   return {
     toolName: "plan_scheme_assets",
@@ -1344,7 +1432,10 @@ function executePlanSchemeAssets(
       sections: selectedSections,
       tables: plannedTables,
       figures: plannedFigures,
-      maxItems
+      cellOffset,
+      maxCells,
+      figureOffset,
+      maxFigures
     })
   };
 }
@@ -1357,26 +1448,50 @@ function formatSchemeAssetPlan(input: {
   sections: SchemeTemplateTaskSection[];
   tables: SchemeTemplateTaskTable[];
   figures: SchemeTemplateTaskFigure[];
-  maxItems: number;
+  cellOffset: number;
+  maxCells: number;
+  figureOffset: number;
+  maxFigures: number;
 }): string {
-  const tableCells = input.tables.flatMap((table) => buildTemplateCellPlan(table));
-  const imageCalls = input.figures.map((figure) => buildImageGeneratePlan(figure));
-  const diagramRefs = input.figures.map((figure) => ({
+  const allTableCells = input.tables.flatMap((table) => buildTemplateCellPlan(table));
+  const tableCells = allTableCells.slice(input.cellOffset, input.cellOffset + input.maxCells);
+  const figurePage = input.figures.slice(input.figureOffset, input.figureOffset + input.maxFigures);
+  const imageCalls = figurePage.map((figure) => buildImageGeneratePlan(figure));
+  const diagramRefs = figurePage.map((figure) => ({
     figure_id: figure.id,
     label: figure.recommendedLabel || normalizeFigureCaption(figure.caption) || figure.id,
     kind: inferFigureKind(figure),
     path: "使用对应 image_generate completed 路径"
   }));
+  const hasMoreCells = input.cellOffset + tableCells.length < allTableCells.length;
+  const hasMoreFigures = input.figureOffset + figurePage.length < input.figures.length;
+  const nextCall = hasMoreCells || hasMoreFigures
+    ? {
+        section_ids: input.sections.map((section) => section.id),
+        include_tables: hasMoreCells,
+        include_figures: hasMoreFigures,
+        table_ids: input.tables.map((table) => table.id),
+        cell_offset: hasMoreCells ? input.cellOffset + tableCells.length : input.cellOffset,
+        max_cells: input.maxCells,
+        figure_offset: hasMoreFigures ? input.figureOffset + figurePage.length : input.figureOffset,
+        max_figures: input.maxFigures
+      }
+    : undefined;
   const lines = [
     "plan_scheme_assets completed",
     `章节：${input.sections.map((section) => `${section.id}(${section.number})`).join("、") || "全部关联章节"}`,
-    `表格任务：${input.tables.length}`,
-    `图示任务：${input.figures.length}`,
+    `表格任务：${input.tables.length} 个；可填单元格：${allTableCells.length} 个；本批单元格：${tableCells.length} 个（offset=${input.cellOffset}, limit=${input.maxCells}）`,
+    `图示任务：${input.figures.length} 个；本批图示：${figurePage.length} 个（offset=${input.figureOffset}, limit=${input.maxFigures}）`,
+    `是否还有后续：${hasMoreCells || hasMoreFigures ? "是" : "否"}`,
     "",
     "使用规则：",
-    "- 先根据 project_context/项目档案把下方 value 建议改成具体值，再通过 write_word.template_cells 写入。",
+    "- 先根据 project_context/项目档案把本批 template_cells_plan 的 value 建议改成具体值，再通过 write_word.template_cells 写入。",
+    "- 如果 next_plan_scheme_assets_call 不为空，必须继续调用并写入下一批，直到“是否还有后续：否”。",
     "- table_id、row_index、column_index/cell_index 必须原样保留；不要自行新增行列坐标。",
     "- 对 figures 先并行调用 image_generate；再在 write_word.diagrams 中传 figure_id、label、kind、path，按不可见图片锚精确嵌入。",
+    "",
+    "next_plan_scheme_assets_call:",
+    JSON.stringify(nextCall, null, 2),
     "",
     "template_cells_plan:",
     JSON.stringify(tableCells, null, 2),
@@ -1387,7 +1502,7 @@ function formatSchemeAssetPlan(input: {
     "write_word_diagrams_plan:",
     JSON.stringify(diagramRefs, null, 2)
   ];
-  return compactText(lines.join("\n"), 60000);
+  return compactText(lines.join("\n"), 120000);
 }
 
 function buildTemplateCellPlan(table: SchemeTemplateTaskTable): Array<Record<string, unknown>> {
@@ -1452,6 +1567,7 @@ interface DraftSchemeSectionInput {
   section: string;
   title?: string;
   writingHint?: string;
+  paragraphTasks?: string[];
 }
 
 interface ResolvedDraftSchemeSection {
@@ -1460,6 +1576,10 @@ interface ResolvedDraftSchemeSection {
   number: string;
   title: string;
   writingHint?: string;
+  paragraphTasks: string[];
+  previousSection?: Pick<SchemeTemplateTaskSection, "id" | "number" | "title">;
+  nextSection?: Pick<SchemeTemplateTaskSection, "id" | "number" | "title">;
+  placeholders?: string[];
   relatedTables?: string[];
   relatedFigures?: string[];
 }
@@ -1489,7 +1609,8 @@ async function executeDraftSchemeSections(
   const maxParallel = Number.isFinite(requestedParallel)
     ? clampDraftSectionParallelism(requestedParallel)
     : configuredParallel;
-  const templateSections = loadSchemeTemplateSections(context.docsDir);
+  const parsedTemplate = JSON.parse(readFileSync(join(context.docsDir, "密码应用方案.template.json"), "utf-8")) as SchemeTemplateTaskJson;
+  const templateSections = readTemplateTaskSections(parsedTemplate.sections);
   const sections = requestedSections
     .slice(0, DRAFT_SECTION_PARALLELISM_MAX)
     .map((section) => resolveDraftSchemeSection(section, templateSections));
@@ -1544,7 +1665,8 @@ function readDraftSectionsArg(args: Record<string, unknown>): DraftSchemeSection
       return {
         section,
         title: typeof record.title === "string" ? record.title.trim() : undefined,
-        writingHint: typeof record.writing_hint === "string" ? record.writing_hint.trim() : undefined
+        writingHint: typeof record.writing_hint === "string" ? record.writing_hint.trim() : undefined,
+        paragraphTasks: readRecordStringArray(record, "paragraph_tasks")
       };
     })
     .filter((item): item is DraftSchemeSectionInput => Boolean(item?.section));
@@ -1552,7 +1674,7 @@ function readDraftSectionsArg(args: Record<string, unknown>): DraftSchemeSection
 
 function resolveDraftSchemeSection(
   input: DraftSchemeSectionInput,
-  templateSections: ReturnType<typeof loadSchemeTemplateSections>
+  templateSections: SchemeTemplateTaskSection[]
 ): ResolvedDraftSchemeSection {
   const normalizedInput = normalizeDraftSectionLookup(input.section);
   const matches = templateSections.filter((section) =>
@@ -1574,6 +1696,9 @@ function resolveDraftSchemeSection(
     );
   }
   const matched = matches[0];
+  const matchedIndex = templateSections.findIndex((section) => section.id === matched.id);
+  const previousSection = matchedIndex > 0 ? templateSections[matchedIndex - 1] : undefined;
+  const nextSection = matchedIndex >= 0 && matchedIndex < templateSections.length - 1 ? templateSections[matchedIndex + 1] : undefined;
 
   return {
     section: input.section,
@@ -1581,6 +1706,10 @@ function resolveDraftSchemeSection(
     number: matched.number,
     title: input.title || matched.title,
     writingHint: input.writingHint || matched.writingHint,
+    paragraphTasks: input.paragraphTasks?.length ? input.paragraphTasks : buildSectionParagraphTasks(matched),
+    previousSection,
+    nextSection,
+    placeholders: matched.placeholders,
     relatedTables: matched.relatedTables,
     relatedFigures: matched.relatedFigures
   };
@@ -1632,6 +1761,8 @@ function buildDraftSchemeSectionMessages(
       content: [
         "你是密码应用方案章节正文起草器，只负责起草一个模板章节的正文。",
         "输出要求：只输出可直接传给 write_word(content) 的 Markdown 正文，不要输出章节标题，不要输出代码块，不要解释你的思路。",
+        "必须按 paragraph_tasks 顺序分段输出：每个任务写 1 个自然段，段落之间用空行分隔；不要把整节写成一整坨。",
+        "第一段要自然承接 previous_section，最后一段要为 next_section 留出过渡；没有上下文时也要写清本段与本节主题的关系。",
         "本阶段只写正文段落和必要列表；不要生成 Markdown 表格，不要生成图片，不要写 Mermaid/SVG，不要编造表格单元格。",
         "如该节关联表格或图示，只写引入性正文，具体表格和配图将在最后由 Agent 用 template_cells、image_generate 和 diagrams 统一生成。",
         "降低 AI 味：围绕本节事实写短而具体的句子，说明对象、位置、算法/产品/调用路径/安全效果；避免万能套话、重复政策背景和空泛排比。",
@@ -1642,7 +1773,12 @@ function buildDraftSchemeSectionMessages(
       role: "user",
       content: [
         `章节：${section.number} ${section.title}`,
+        section.previousSection ? `上一节：${section.previousSection.number} ${section.previousSection.title}` : "",
+        section.nextSection ? `下一节：${section.nextSection.number} ${section.nextSection.title}` : "",
         section.writingHint ? `写作提示：${section.writingHint}` : "",
+        section.placeholders?.length ? `可用字段：${section.placeholders.join("、")}` : "",
+        "paragraph_tasks:",
+        ...section.paragraphTasks.map((task, index) => `${index + 1}. ${task}`),
         section.relatedTables?.length ? `关联表格：${section.relatedTables.join("、")}（最后统一填充，此处不生成表格）` : "",
         section.relatedFigures?.length ? `关联图示：${section.relatedFigures.join("、")}（最后统一生成，此处不生成图片）` : "",
         "",
@@ -1661,10 +1797,24 @@ function buildFallbackDraftSchemeSection(
   projectContext: string
 ): string {
   const contextText = compactText([context.userPrompt, projectContext, context.memory].filter(Boolean).join("\n"), 900);
+  const bridgePrefix = section.previousSection
+    ? `承接“${section.previousSection.number} ${section.previousSection.title}”，`
+    : "";
+  const nextSuffix = section.nextSection
+    ? `本节结论将为“${section.nextSection.number} ${section.nextSection.title}”提供输入。`
+    : "";
+  const taskParagraphs = section.paragraphTasks.map((task, index) => {
+    if (index === 0) {
+      return `${bridgePrefix}本节围绕“${section.title}”展开，重点是${task}。${section.writingHint ? `应结合模板要求补充：${section.writingHint}` : "应结合已确认项目事实补充具体对象、边界、产品、算法和调用路径。"}`;
+    }
+    if (index === section.paragraphTasks.length - 1) {
+      return `围绕“${task}”，当前资料应继续核实系统边界、设备清单、产品型号和责任主体；资料不足处应在后续补充/确认。${nextSuffix}`;
+    }
+    return `围绕“${task}”，应使用已确认事实说明对象、位置、调用路径和安全效果，避免脱离本系统场景的泛化描述。`;
+  });
   return [
-    `本节围绕“${section.title}”说明${context.sessionTitle}在该部分的现状、建设要求和密码应用安排。`,
-    section.writingHint ? `应重点补充：${section.writingHint}` : "应结合已确认项目事实补充具体对象、边界、产品、算法和调用路径。",
-    contextText ? `已确认上下文摘要：${contextText}` : "当前项目资料不足，具体系统边界、设备清单、产品型号和责任主体待补充/需确认。",
+    ...taskParagraphs,
+    contextText ? `已确认上下文摘要：${contextText}` : "",
     section.relatedTables?.length ? `本节关联模板表格 ${section.relatedTables.join("、")}，表格单元格将在最后统一补充。` : "",
     section.relatedFigures?.length ? `本节关联模板图示 ${section.relatedFigures.join("、")}，配图将在最后统一生成并嵌入。` : ""
   ]
@@ -1682,7 +1832,7 @@ function formatDraftSchemeSectionResults(
     options.truncated
       ? `本批超过 ${DRAFT_SECTION_PARALLELISM_MAX} 个章节，已只处理前 ${DRAFT_SECTION_PARALLELISM_MAX} 个；请继续分批起草。`
       : "",
-    "注意：以下为正文草稿，不含 Markdown 表格和配图；写入 Word 时请按章节顺序合并到 write_word.sections 批量写入。"
+    "注意：以下为按 paragraph_tasks 分段后的正文草稿，不含 Markdown 表格和配图；写入 Word 时请按章节顺序合并到 write_word.sections 批量写入。"
   ].filter(Boolean);
 
   for (const result of results) {

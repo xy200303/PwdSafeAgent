@@ -860,6 +860,7 @@ export interface PlanSchemeBatchesResult {
       section: string;
       title?: string;
       writing_hint?: string;
+      paragraph_tasks?: string[];
     }>;
     max_parallel: number;
   };
@@ -873,7 +874,8 @@ export interface PlanSchemeBatchesResult {
 2. 批次顺序严格保持模板 `sections` 顺序。
 3. 会跳过已完成、已起草、运行中或显式传入 `completed_sections` 的章节。
 4. `start_section` 和 `completed_sections` 必须能在 `template.json` 中唯一匹配；未知或歧义输入直接失败。
-5. 整篇生成时应先调用本工具，再按 `first_draft_call` 调用 `draft_scheme_sections`。
+5. `paragraph_tasks` 是段落级写作计划，一项对应一个自然段，后续应原样传给 `draft_scheme_sections`。
+6. 整篇生成时应先调用本工具，再按 `first_draft_call` 调用 `draft_scheme_sections`。
 
 ### 11.10 `plan_scheme_assets`
 
@@ -884,9 +886,14 @@ export interface PlanSchemeBatchesResult {
 ```ts
 export interface PlanSchemeAssetsInput {
   section_ids?: string[];
+  table_ids?: string[];
   include_tables?: boolean;
   include_figures?: boolean;
   max_items?: number;
+  cell_offset?: number;
+  max_cells?: number;
+  figure_offset?: number;
+  max_figures?: number; // include_figures=true 时范围 1-50
 }
 ```
 
@@ -894,6 +901,7 @@ export interface PlanSchemeAssetsInput {
 
 ```ts
 export interface PlanSchemeAssetsResult {
+  next_plan_scheme_assets_call?: PlanSchemeAssetsInput;
   template_cells_plan: Array<{
     table_id: string;
     row_index: number;
@@ -915,7 +923,8 @@ export interface PlanSchemeAssetsResult {
 
 1. 正文章节写入后调用，用于补齐 `【待填写】` 表格和 `【图片占位】`。
 2. `table_id`、`row_index`、`column_index`、`cell_index` 必须来自工具返回值，不允许模型自造。
-3. 图片先按 `image_generate_plan` 并行生成，再在 `write_word.diagrams` 中传 `figure_id`、`label`、`kind`、`path`。
+3. 表格单元格按 `cell_offset/max_cells` 分页返回；如果存在 `next_plan_scheme_assets_call`，必须继续调用并写入下一批，直到没有后续。
+4. 图片先按 `image_generate_plan` 并行生成，再在 `write_word.diagrams` 中传 `figure_id`、`label`、`kind`、`path`。
 
 ### 11.11 `draft_scheme_sections`
 
@@ -929,6 +938,7 @@ export interface DraftSchemeSectionsInput {
     section: string;
     title?: string;
     writing_hint?: string;
+    paragraph_tasks?: string[];
   }>;
   project_context?: string;
   max_parallel?: number;
@@ -947,6 +957,12 @@ export interface DraftSchemeSectionsResult {
   }>;
 }
 ```
+
+行为规范：
+
+1. 每个章节按 `paragraph_tasks` 输出多个自然段，不输出章节标题。
+2. 首段承接上一节，末段自然引出下一节；资料不足处写待补充/需确认。
+3. 不在本工具中生成表格、图片、Mermaid 或 SVG。
 
 行为规范：
 
