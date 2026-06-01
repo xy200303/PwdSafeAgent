@@ -16,6 +16,7 @@ export interface SchemeDocumentInput {
   renderMode?: SchemeDocumentRenderMode;
   templateJsonPath?: string;
   templateCells?: TemplateCellReplacementInput[];
+  contentControls?: ContentControlReplacementInput[];
 }
 
 export type SchemeTemplateFieldInput = Record<string, unknown> | Array<Record<string, unknown>>;
@@ -38,6 +39,7 @@ export interface SchemeDocumentResult {
   embeddedDiagrams: string[];
   templateReplacementCount: number;
   templateCellReplacementCount: number;
+  contentControlReplacementCount: number;
   renderMode: SchemeDocumentRenderMode;
   templateAnchorsUsed: string[];
 }
@@ -47,6 +49,7 @@ export interface TemplateWordDocumentInput {
   templateFields?: SchemeTemplateFieldInput;
   templateJsonPath?: string;
   templateCells?: TemplateCellReplacementInput[];
+  contentControls?: ContentControlReplacementInput[];
 }
 
 export interface TemplateWordDocumentResult {
@@ -55,6 +58,15 @@ export interface TemplateWordDocumentResult {
   filledFields: string[];
   templateReplacementCount: number;
   templateCellReplacementCount: number;
+  contentControlReplacementCount: number;
+}
+
+export interface WordTemplateUpdateInput extends TemplateWordDocumentInput {
+  diagrams?: SchemeDiagramAsset[];
+}
+
+export interface WordTemplateUpdateResult extends TemplateWordDocumentResult {
+  embeddedDiagrams: string[];
 }
 
 export interface WordSectionReplacementInput extends TemplateWordDocumentInput {
@@ -83,6 +95,7 @@ export interface WordSectionReplacementResult {
   replacementCount: number;
   templateReplacementCount: number;
   templateCellReplacementCount: number;
+  contentControlReplacementCount: number;
   embeddedDiagrams: string[];
   templateAnchorId?: string;
 }
@@ -98,6 +111,7 @@ export interface WordSectionBatchReplacementResult {
   }>;
   templateReplacementCount: number;
   templateCellReplacementCount: number;
+  contentControlReplacementCount: number;
   embeddedDiagrams: string[];
 }
 
@@ -108,6 +122,13 @@ export interface TemplateCellReplacementInput {
   cellIndex?: number;
   columnIndex?: number;
   value: string;
+}
+
+export interface ContentControlReplacementInput {
+  tag: string;
+  value: string;
+  alias?: string;
+  aliases?: string[];
 }
 
 export interface SchemeCompletenessResult {
@@ -145,6 +166,8 @@ interface WordTemplateJson {
   sections?: WordTemplateSection[];
   tables?: WordTemplateTable[];
   figures?: WordTemplateFigure[];
+  fieldBlocks?: WordTemplateFieldBlock[];
+  textBlocks?: WordTemplateTextBlock[];
 }
 
 interface WordTemplateSection {
@@ -196,6 +219,7 @@ interface WordTemplateFigure {
 interface WordTemplateAnchor {
   tag: string;
   alias?: string;
+  aliases?: string[];
 }
 
 const PLACEHOLDER_KEYS = [
@@ -403,6 +427,7 @@ export async function createWordDocxFromTemplate(
 ): Promise<TemplateWordDocumentResult> {
   await mkdir(dirname(outputPath), { recursive: true });
   const templateCells = input.templateCells ?? [];
+  const contentControls = input.contentControls ?? [];
   const explicitFields = buildExplicitTemplateFieldOverrides({
     prompt: "",
     memory: "",
@@ -412,14 +437,15 @@ export async function createWordDocxFromTemplate(
   });
   const filledFields = Object.keys(explicitFields).filter((key) => !key.startsWith("$"));
 
-  if (!filledFields.length && !templateCells.length) {
+  if (!filledFields.length && !templateCells.length && !contentControls.length) {
     await copyFile(templatePath, outputPath);
     return {
       outputPath,
       fileName: sanitizeFileName(outputPath.split(/[\\/]/).at(-1) || "密码应用方案.docx"),
       filledFields,
       templateReplacementCount: 0,
-      templateCellReplacementCount: 0
+      templateCellReplacementCount: 0,
+      contentControlReplacementCount: 0
     };
   }
 
@@ -428,6 +454,7 @@ export async function createWordDocxFromTemplate(
   const templateJson = await loadWordTemplateJson(input.templateJsonPath ?? inferTemplateJsonPath(templatePath));
   const templateReplacementCount = await replaceTemplatePlaceholders(zip, explicitFields);
   const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, templateCells);
+  const contentControlReplacementCount = replaceContentControlsByTag(zip, contentControls, templateJson);
   const buffer = zip.generate({ type: "nodebuffer", compression: "DEFLATE" });
   await writeFile(outputPath, buffer);
 
@@ -436,7 +463,67 @@ export async function createWordDocxFromTemplate(
     fileName: sanitizeFileName(outputPath.split(/[\\/]/).at(-1) || "密码应用方案.docx"),
     filledFields,
     templateReplacementCount,
-    templateCellReplacementCount
+    templateCellReplacementCount,
+    contentControlReplacementCount
+  };
+}
+
+interface WordTemplateFieldBlock {
+  id: string;
+  block: number;
+  text: string;
+  placeholders?: string[];
+  section?: string;
+  sectionNumber?: string;
+  anchors?: {
+    block?: WordTemplateAnchor;
+  };
+}
+
+interface WordTemplateTextBlock {
+  id: string;
+  section: string;
+  sectionNumber?: string;
+  order: number;
+  blockRange: [number, number];
+  text?: string;
+  anchors?: {
+    block?: WordTemplateAnchor;
+  };
+}
+
+export async function updateWordTemplateContent(
+  sourcePath: string,
+  outputPath: string,
+  input: WordTemplateUpdateInput = {}
+): Promise<WordTemplateUpdateResult> {
+  const content = await readFile(sourcePath, "binary");
+  const zip = new PizZip(content);
+  const explicitFields = buildExplicitTemplateFieldOverrides({
+    prompt: "",
+    memory: "",
+    generatedMarkdown: "",
+    fields: input.fields,
+    templateFields: input.templateFields
+  });
+  const templateJson = await loadWordTemplateJson(input.templateJsonPath);
+  const templateReplacementCount = await replaceTemplatePlaceholders(zip, explicitFields);
+  const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, input.templateCells ?? []);
+  const contentControlReplacementCount = replaceContentControlsByTag(zip, input.contentControls ?? [], templateJson);
+  const embeddedDiagrams = await appendGeneratedDiagrams(zip, input.diagrams ?? [], templateJson);
+
+  await mkdir(dirname(outputPath), { recursive: true });
+  const buffer = zip.generate({ type: "nodebuffer", compression: "DEFLATE" });
+  await writeFile(outputPath, buffer);
+
+  return {
+    outputPath,
+    fileName: sanitizeFileName(outputPath.split(/[\\/]/).at(-1) || "密码应用方案.docx"),
+    filledFields: Object.keys(explicitFields).filter((key) => !key.startsWith("$")),
+    templateReplacementCount,
+    templateCellReplacementCount,
+    contentControlReplacementCount,
+    embeddedDiagrams
   };
 }
 
@@ -463,6 +550,7 @@ export async function replaceWordSectionContent(
   if (!replacement) {
     throw new Error(`未找到 Word 章节：${input.section}`);
   }
+  const contentControlReplacementCount = replaceContentControlsByTag(zip, input.contentControls ?? [], templateJson);
   const embeddedDiagrams = await appendGeneratedDiagrams(zip, input.diagrams ?? [], templateJson);
 
   await mkdir(dirname(outputPath), { recursive: true });
@@ -477,6 +565,7 @@ export async function replaceWordSectionContent(
     replacementCount: replacement.replacementCount,
     templateReplacementCount,
     templateCellReplacementCount,
+    contentControlReplacementCount,
     embeddedDiagrams,
     templateAnchorId: replacement.templateAnchorId
   };
@@ -509,6 +598,7 @@ export async function replaceWordSectionsContent(
   );
   const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, input.templateCells ?? []);
   const replacements = replaceDocumentSectionsWithMarkdown(zip, sections, templateJson);
+  const contentControlReplacementCount = replaceContentControlsByTag(zip, input.contentControls ?? [], templateJson);
 
   const embeddedDiagrams = await appendGeneratedDiagrams(zip, input.diagrams ?? [], templateJson);
 
@@ -522,6 +612,7 @@ export async function replaceWordSectionsContent(
     sections: replacements,
     templateReplacementCount,
     templateCellReplacementCount,
+    contentControlReplacementCount,
     embeddedDiagrams
   };
 }
@@ -555,6 +646,7 @@ export async function writeSchemeDocxFromTemplate(
     appendedMarkdown = appendGeneratedMarkdown(renderedZip, input.generatedMarkdown, facts);
   }
   const embeddedDiagrams = await appendGeneratedDiagrams(renderedZip, input.diagrams ?? [], templateJson);
+  const contentControlReplacementCount = replaceContentControlsByTag(renderedZip, input.contentControls ?? [], templateJson);
   await mkdir(dirname(outputPath), { recursive: true });
   const buffer = renderedZip.generate({ type: "nodebuffer", compression: "DEFLATE" });
   await writeFile(outputPath, buffer);
@@ -571,6 +663,7 @@ export async function writeSchemeDocxFromTemplate(
     embeddedDiagrams,
     templateReplacementCount,
     templateCellReplacementCount,
+    contentControlReplacementCount,
     renderMode,
     templateAnchorsUsed
   };
@@ -1038,6 +1131,8 @@ interface SectionReplacementAnchor {
   insertEndOffset?: number;
   sdtBlock?: WordBodyBlock;
   templateSection?: WordTemplateSection;
+  contentControlTag?: string;
+  candidateContentControlTags?: string[];
 }
 
 function replaceDocumentSectionWithMarkdown(
@@ -1157,7 +1252,7 @@ function replaceDocumentSectionsWithMarkdown(
     if (!compactedMarkdown.trim()) continue;
 
     const anchor = findSectionReplacementAnchor(blocks, item.section, templateJson);
-    if (!anchor) throw new Error(`未找到 Word 章节：${item.section}`);
+    if (!anchor) throw new Error(`未找到 Word 章节锚点：${item.section}${getTemplateSectionAnchorTagHint(templateJson, item.section)}`);
 
     const insertStart = anchor.insertStartOffset ?? blocks[anchor.replacementStartIndex]?.start ?? anchor.target.end;
     const insertEnd = anchor.insertEndOffset ?? blocks[anchor.replacementEndIndex]?.start ?? bodyXml.length;
@@ -1450,15 +1545,19 @@ function readBalancedWordElement(
 function extractSdtTag(xml: string): string {
   const contentStart = xml.indexOf("<w:sdtContent");
   const propertiesXml = contentStart >= 0 ? xml.slice(0, contentStart) : xml;
-  return propertiesXml.match(/<w:tag\b[^>]*\bw:val="([^"]+)"/)?.[1] ?? "";
+  const rawTag = propertiesXml.match(/<w:tag\b[^>]*\bw:val="([^"]+)"/)?.[1] ?? "";
+  return normalizeContentControlTag(rawTag);
 }
 
-function findSdtElementByTag(
+function findSdtElementByTags(
   xml: string,
-  tag: string,
+  tags: string[],
   baseOffset = 0
-): { xml: string; start: number; end: number } | undefined {
-  if (!tag) return undefined;
+): { xml: string; start: number; end: number; matchedTag: string } | undefined {
+  const tagCandidates = normalizeContentControlTagCandidates(tags);
+  if (!tagCandidates.length) return undefined;
+  const tagSet = new Set(tagCandidates);
+  const lowerTagSet = new Set(tagCandidates.map((item) => item.toLowerCase()));
   let cursor = 0;
 
   while (cursor < xml.length) {
@@ -1467,19 +1566,21 @@ function findSdtElementByTag(
 
     const element = readBalancedWordElement(xml, start, "w:sdt");
     if (!element) return undefined;
-    if (extractSdtTag(element.xml) === tag) {
+    const elementTag = extractSdtTag(element.xml);
+    if (tagSet.has(elementTag) || lowerTagSet.has(elementTag.toLowerCase())) {
       return {
         xml: element.xml,
         start: baseOffset + element.start,
-        end: baseOffset + element.end
+        end: baseOffset + element.end,
+        matchedTag: elementTag
       };
     }
 
     const contentRange = getSdtContentRange(element.xml);
     const nested = contentRange
-      ? findSdtElementByTag(
+      ? findSdtElementByTags(
           element.xml.slice(contentRange.start, contentRange.end),
-          tag,
+          tagCandidates,
           baseOffset + element.start + contentRange.start
         )
       : undefined;
@@ -1573,7 +1674,8 @@ function buildTemplateSectionReplacementAnchor(
 ): SectionReplacementAnchor | undefined {
   const sectionNumber = parseSectionNumberFromTemplateId(templateSection.id) || templateSection.number;
   const headingLevel = templateSection.headingLevel ?? (sectionNumber.split(".").filter(Boolean).length || 1);
-  const sdtBlock = findSdtBlockByTag(blocks, getSectionBodyAnchorTag(templateSection));
+  const candidateTags = getSectionBodyAnchorTags(templateSection);
+  const sdtBlock = findSdtBlockByTags(blocks, candidateTags);
   if (!sdtBlock) return undefined;
 
   const target = findPreviousHeadingBlock(blocks, sdtBlock.index, headingLevel) ?? {
@@ -1596,17 +1698,129 @@ function buildTemplateSectionReplacementAnchor(
     insertStartOffset: sdtBlock.start,
     insertEndOffset: sdtBlock.end,
     sdtBlock,
-    templateSection
+    templateSection,
+    contentControlTag: sdtBlock.sdtTag,
+    candidateContentControlTags: candidateTags
   };
 }
 
-function getSectionBodyAnchorTag(section: WordTemplateSection): string {
-  return section.anchors?.body?.tag || `ps:section:${section.id}:body`;
+function getSectionBodyAnchorTags(section: WordTemplateSection): string[] {
+  const sectionNumber = parseSectionNumberFromTemplateId(section.id) || section.number;
+  return buildContentControlTagCandidates(section.anchors?.body, [
+    `ps:section:${section.id}:body`,
+    ...buildSectionLegacyAnchorAliases(section.id, sectionNumber)
+  ]);
 }
 
-function findSdtBlockByTag(blocks: WordBodyBlock[], tag: string): WordBodyBlock | undefined {
-  if (!tag) return undefined;
-  return blocks.find((block) => block.tagName === "sdt" && block.sdtTag === tag);
+function buildSectionLegacyAnchorAliases(sectionId: string, sectionNumber?: string): string[] {
+  const upperSectionId = sectionId.toUpperCase();
+  const numberToken = sectionNumber?.replace(/\./g, "_") ?? "";
+  return normalizeContentControlTagCandidates([
+    `STD_${sectionId}`,
+    `STD_${sectionId}_BODY`,
+    `STD_${upperSectionId}`,
+    `STD_${upperSectionId}_BODY`,
+    numberToken ? `STD_${numberToken}` : "",
+    numberToken ? `STD_${numberToken}_BODY` : ""
+  ]);
+}
+
+function buildTableLegacyAnchorAliases(tableId: string): string[] {
+  const upperTableId = tableId.toUpperCase();
+  return normalizeContentControlTagCandidates([
+    `STD_${tableId}`,
+    `STD_${tableId}_TABLE`,
+    `STD_${upperTableId}`,
+    `STD_${upperTableId}_TABLE`,
+    `STD_TABLE_${tableId}`
+  ]);
+}
+
+function buildTableCaptionLegacyAnchorAliases(tableId: string): string[] {
+  const upperTableId = tableId.toUpperCase();
+  return normalizeContentControlTagCandidates([
+    `STD_${tableId}_CAPTION`,
+    `STD_${upperTableId}_CAPTION`,
+    `STD_TABLE_${tableId}_CAPTION`
+  ]);
+}
+
+function buildFigureImageLegacyAnchorAliases(figureId: string): string[] {
+  const upperFigureId = figureId.toUpperCase();
+  return normalizeContentControlTagCandidates([
+    `STD_${figureId}`,
+    `STD_${figureId}_IMAGE`,
+    `STD_${upperFigureId}`,
+    `STD_${upperFigureId}_IMAGE`,
+    `STD_FIGURE_${figureId}_IMAGE`
+  ]);
+}
+
+function buildFigureCaptionLegacyAnchorAliases(figureId: string): string[] {
+  const upperFigureId = figureId.toUpperCase();
+  return normalizeContentControlTagCandidates([
+    `STD_${figureId}_CAPTION`,
+    `STD_${upperFigureId}_CAPTION`,
+    `STD_FIGURE_${figureId}_CAPTION`
+  ]);
+}
+
+function buildFieldBlockLegacyAnchorAliases(fieldBlockId: string): string[] {
+  const upperFieldBlockId = fieldBlockId.toUpperCase();
+  return normalizeContentControlTagCandidates([`STD_${fieldBlockId}`, `STD_${upperFieldBlockId}`]);
+}
+
+function buildSectionTextBlockLegacyAnchorAliases(
+  sectionId: string,
+  order: number,
+  sectionNumber?: string,
+  textBlockId?: string
+): string[] {
+  const upperSectionId = sectionId.toUpperCase();
+  const numberToken = sectionNumber?.replace(/\./g, "_") ?? "";
+  const textBlockUpperId = textBlockId?.toUpperCase() ?? "";
+  return normalizeContentControlTagCandidates([
+    textBlockId ? `STD_${textBlockId}` : "",
+    textBlockUpperId ? `STD_${textBlockUpperId}` : "",
+    `STD_${sectionId}_TEXT_${order}`,
+    `STD_${upperSectionId}_TEXT_${order}`,
+    numberToken ? `STD_${numberToken}_TEXT_${order}` : ""
+  ]);
+}
+
+function findSdtBlockByTags(blocks: WordBodyBlock[], tags: string[]): WordBodyBlock | undefined {
+  const tagCandidates = normalizeContentControlTagCandidates(tags);
+  if (!tagCandidates.length) return undefined;
+  const tagSet = new Set(tagCandidates);
+  const lowerTagSet = new Set(tagCandidates.map((item) => item.toLowerCase()));
+  return blocks.find((block) => {
+    if (block.tagName !== "sdt" || !block.sdtTag) return false;
+    return tagSet.has(block.sdtTag) || lowerTagSet.has(block.sdtTag.toLowerCase());
+  });
+}
+
+function getTemplateSectionAnchorTagHint(templateJson: WordTemplateJson | undefined, section: string): string {
+  const templateSection = findTemplateSection(templateJson, section);
+  if (!templateSection) return "";
+  const tags = getSectionBodyAnchorTags(templateSection);
+  return tags.length ? `（尝试 Content Control tag：${tags.join("、")}）` : "";
+}
+
+function buildContentControlTagCandidates(anchor: WordTemplateAnchor | undefined, fallbackTags: string[]): string[] {
+  return normalizeContentControlTagCandidates([
+    anchor?.tag,
+    anchor?.alias,
+    ...(anchor?.aliases ?? []),
+    ...fallbackTags
+  ]);
+}
+
+function normalizeContentControlTagCandidates(tags: Array<string | undefined>): string[] {
+  return unique(tags.map((tag) => normalizeContentControlTag(tag ?? "")).filter(Boolean));
+}
+
+function normalizeContentControlTag(tag: string): string {
+  return decodeXmlText(tag).trim();
 }
 
 function findPreviousHeadingBlock(
@@ -1637,6 +1851,180 @@ function replaceTemplateTableCells(
   return replacementCount;
 }
 
+function replaceContentControlsByTag(
+  zip: PizZip,
+  replacements: ContentControlReplacementInput[],
+  templateJson?: WordTemplateJson
+): number {
+  const validReplacements = replacements
+    .map((replacement) => ({
+      tags: resolveContentControlReplacementTags(replacement, templateJson),
+      value: replacement.value.trim()
+    }))
+    .filter((replacement) => replacement.tags.length && replacement.value);
+  if (!validReplacements.length) return 0;
+
+  const documentFile = zip.file("word/document.xml");
+  const documentXml = documentFile?.asText();
+  if (!documentXml) return 0;
+
+  const bodyOpen = documentXml.match(/<w:body\b[^>]*>/);
+  const bodyEnd = documentXml.lastIndexOf("</w:body>");
+  if (!bodyOpen || bodyOpen.index === undefined || bodyEnd < 0) return 0;
+
+  const bodyStart = bodyOpen.index + bodyOpen[0].length;
+  let bodyXml = documentXml.slice(bodyStart, bodyEnd);
+  let replacementCount = 0;
+
+  for (const replacement of validReplacements) {
+    const anchoredControl = findSdtElementByTags(bodyXml, replacement.tags);
+    if (!anchoredControl) {
+      throw new Error(`未找到 Word Content Control tag：${replacement.tags.join("、")}`);
+    }
+    const replacementXml = replaceSdtContentXml(
+      anchoredControl.xml,
+      buildContentControlReplacementContentXml(anchoredControl.xml, replacement.value)
+    );
+    bodyXml = `${bodyXml.slice(0, anchoredControl.start)}${replacementXml}${bodyXml.slice(anchoredControl.end)}`;
+    replacementCount += 1;
+  }
+
+  zip.file("word/document.xml", `${documentXml.slice(0, bodyStart)}${bodyXml}${documentXml.slice(bodyEnd)}`);
+  return replacementCount;
+}
+
+function resolveContentControlReplacementTags(
+  replacement: ContentControlReplacementInput,
+  templateJson?: WordTemplateJson
+): string[] {
+  const directTags = normalizeContentControlTagCandidates([replacement.tag, replacement.alias, ...(replacement.aliases ?? [])]);
+  if (!templateJson) return directTags;
+  return unique([...directTags, ...resolveTemplateContentControlTags(templateJson, directTags)]);
+}
+
+function resolveTemplateContentControlTags(templateJson: WordTemplateJson, lookupTags: string[]): string[] {
+  const requestedTags = normalizeContentControlTagCandidates(lookupTags);
+  if (!requestedTags.length) return [];
+
+  const requestedLookupSet = new Set(requestedTags.map((tag) => tag.toLowerCase()));
+  const resolved: string[] = [];
+
+  for (const anchor of collectTemplateContentControlAnchors(templateJson)) {
+    if (anchor.lookupKeys.some((key) => requestedLookupSet.has(key.toLowerCase()))) {
+      resolved.push(...anchor.tags);
+    }
+  }
+
+  return unique(resolved);
+}
+
+function collectTemplateContentControlAnchors(templateJson: WordTemplateJson): Array<{ lookupKeys: string[]; tags: string[] }> {
+  const anchors: Array<{ lookupKeys: string[]; tags: string[] }> = [];
+
+  for (const section of templateJson.sections ?? []) {
+    const sectionKeys = normalizeContentControlTagCandidates([
+      section.id,
+      section.number,
+      section.title,
+      `${section.number} ${section.title}`,
+      `${section.number}.${section.title}`
+    ]);
+    anchors.push({
+      lookupKeys: unique([...sectionKeys, ...getSectionBodyAnchorTags(section)]),
+      tags: getSectionBodyAnchorTags(section)
+    });
+  }
+
+  for (const table of templateJson.tables ?? []) {
+    const tableKeys = normalizeContentControlTagCandidates([table.id, table.caption]);
+    anchors.push({
+      lookupKeys: unique([...tableKeys, ...getTableAnchorTags(table)]),
+      tags: getTableAnchorTags(table)
+    });
+
+    if (table.anchors?.caption) {
+      const captionTags = getTableCaptionAnchorTags(table);
+      anchors.push({
+        lookupKeys: unique([...tableKeys, `${table.caption ?? table.id} 题注`, ...captionTags]),
+        tags: captionTags
+      });
+    }
+  }
+
+  for (const figure of templateJson.figures ?? []) {
+    const figureKeys = normalizeContentControlTagCandidates([figure.id, figure.caption]);
+    if (figure.anchors?.image) {
+      anchors.push({
+        lookupKeys: unique([...figureKeys, `${figure.caption} 图片`, ...getFigureImageAnchorTags(figure)]),
+        tags: getFigureImageAnchorTags(figure)
+      });
+    }
+
+    if (figure.anchors?.caption) {
+      const captionTags = getFigureCaptionAnchorTags(figure);
+      anchors.push({
+        lookupKeys: unique([...figureKeys, `${figure.caption} 题注`, ...captionTags]),
+        tags: captionTags
+      });
+    }
+  }
+
+  for (const fieldBlock of templateJson.fieldBlocks ?? []) {
+    const fieldBlockTags = getFieldBlockAnchorTags(fieldBlock);
+    anchors.push({
+      lookupKeys: unique([fieldBlock.id, ...fieldBlockTags]),
+      tags: fieldBlockTags
+    });
+  }
+
+  for (const textBlock of templateJson.textBlocks ?? []) {
+    const textBlockTags = getSectionTextBlockAnchorTags(textBlock);
+    anchors.push({
+      lookupKeys: unique([
+        textBlock.id,
+        `${textBlock.section}:text:${textBlock.order}`,
+        textBlock.sectionNumber ? `${textBlock.sectionNumber}:text:${textBlock.order}` : "",
+        ...textBlockTags
+      ]),
+      tags: textBlockTags
+    });
+  }
+
+  return anchors;
+}
+
+function buildContentControlReplacementContentXml(sdtXml: string, value: string): string {
+  const anchorBlocks = collectWordBodyBlocks(extractSdtContentXml(sdtXml), new Map());
+  const paragraphTemplate = findBodyParagraphTemplate(anchorBlocks, -1) ?? buildDefaultBodyParagraphTemplate();
+  const tableTemplate = findTableTemplate(anchorBlocks, -1);
+  const blocks: string[] = [];
+  const lines = value.split(/\r?\n/);
+  let inCodeBlock = false;
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex].trim();
+    if (/^```/.test(line)) {
+      inCodeBlock = !inCodeBlock;
+      continue;
+    }
+    if (!line) continue;
+
+    if (!inCodeBlock) {
+      const table = parseMarkdownTable(lines, lineIndex);
+      if (table) {
+        blocks.push(buildWordTableFromMarkdown(table.rows, paragraphTemplate, tableTemplate));
+        lineIndex = table.nextIndex - 1;
+        continue;
+      }
+    }
+
+    const text = line.replace(/^#{1,6}\s+/, "");
+    blocks.push(buildWordParagraphFromTemplate(paragraphTemplate, cleanMarkdownInline(text)));
+  }
+
+  return blocks.length ? blocks.join("") : buildWordParagraphFromTemplate(paragraphTemplate, "");
+}
+
 function replaceSingleTemplateTableCell(
   zip: PizZip,
   templateJson: WordTemplateJson,
@@ -1658,7 +2046,7 @@ function replaceSingleTemplateTableCell(
 
   const bodyStart = bodyOpen.index + bodyOpen[0].length;
   const bodyXml = documentXml.slice(bodyStart, bodyEnd);
-  const anchoredTable = findSdtElementByTag(bodyXml, table.anchors?.table?.tag || `ps:table:${table.id}`);
+  const anchoredTable = findSdtElementByTags(bodyXml, getTableAnchorTags(table));
   if (!anchoredTable) return false;
 
   const nextTableXml = replaceTableCellXml(anchoredTable.xml, replacement.rowIndex, cellIndex, replacement.value);
@@ -1682,6 +2070,20 @@ function findTemplateTable(
   const caption = normalizeHeadingLookup(replacement.caption ?? "");
   if (!caption) return undefined;
   return templateJson.tables?.find((item) => normalizeHeadingLookup(item.caption ?? "") === caption);
+}
+
+function getTableAnchorTags(table: WordTemplateTable): string[] {
+  return buildContentControlTagCandidates(table.anchors?.table, [
+    `ps:table:${table.id}`,
+    ...buildTableLegacyAnchorAliases(table.id)
+  ]);
+}
+
+function getTableCaptionAnchorTags(table: WordTemplateTable): string[] {
+  return buildContentControlTagCandidates(table.anchors?.caption, [
+    `ps:table:${table.id}:caption`,
+    ...buildTableCaptionLegacyAnchorAliases(table.id)
+  ]);
 }
 
 function resolveTemplateCellIndex(table: WordTemplateTable, replacement: TemplateCellReplacementInput): number {
@@ -2206,7 +2608,7 @@ function replaceTemplateFigureImage(zip: PizZip, figure: WordTemplateFigure, med
 
   const bodyStart = bodyOpen.index + bodyOpen[0].length;
   const bodyXml = documentXml.slice(bodyStart, bodyEnd);
-  const anchoredImage = findSdtElementByTag(bodyXml, figure.anchors?.image?.tag || `ps:figure:${figure.id}:image`);
+  const anchoredImage = findSdtElementByTags(bodyXml, getFigureImageAnchorTags(figure));
   if (anchoredImage) {
     const imageXml = buildWordImageParagraph(media);
     const replacementXml = replaceSdtContentXml(anchoredImage.xml, imageXml);
@@ -2217,7 +2619,7 @@ function replaceTemplateFigureImage(zip: PizZip, figure: WordTemplateFigure, med
   }
 
   const blocks = collectWordBodyBlocks(bodyXml, buildStyleHeadingLevels(zip));
-  const imageBlock = findSdtBlockByTag(blocks, figure.anchors?.image?.tag || `ps:figure:${figure.id}:image`);
+  const imageBlock = findSdtBlockByTags(blocks, getFigureImageAnchorTags(figure));
   if (!imageBlock) return false;
   const imageXml = buildWordImageParagraph(media);
   const insertStart = imageBlock.start;
@@ -2227,6 +2629,34 @@ function replaceTemplateFigureImage(zip: PizZip, figure: WordTemplateFigure, med
   const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
   zip.file("word/document.xml", nextXml);
   return true;
+}
+
+function getFigureImageAnchorTags(figure: WordTemplateFigure): string[] {
+  return buildContentControlTagCandidates(figure.anchors?.image, [
+    `ps:figure:${figure.id}:image`,
+    ...buildFigureImageLegacyAnchorAliases(figure.id)
+  ]);
+}
+
+function getFigureCaptionAnchorTags(figure: WordTemplateFigure): string[] {
+  return buildContentControlTagCandidates(figure.anchors?.caption, [
+    `ps:figure:${figure.id}:caption`,
+    ...buildFigureCaptionLegacyAnchorAliases(figure.id)
+  ]);
+}
+
+function getFieldBlockAnchorTags(fieldBlock: WordTemplateFieldBlock): string[] {
+  return buildContentControlTagCandidates(fieldBlock.anchors?.block, [
+    `ps:field-block:${fieldBlock.id}`,
+    ...buildFieldBlockLegacyAnchorAliases(fieldBlock.id)
+  ]);
+}
+
+function getSectionTextBlockAnchorTags(textBlock: WordTemplateTextBlock): string[] {
+  return buildContentControlTagCandidates(textBlock.anchors?.block, [
+    `ps:section:${textBlock.section}:text:${textBlock.order}`,
+    ...buildSectionTextBlockLegacyAnchorAliases(textBlock.section, textBlock.order, textBlock.sectionNumber, textBlock.id)
+  ]);
 }
 
 function normalizeFigureLookup(value: string): string {

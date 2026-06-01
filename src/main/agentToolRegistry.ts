@@ -20,7 +20,9 @@ import {
   createWordDocxFromTemplate,
   replaceWordSectionContent,
   replaceWordSectionsContent,
+  updateWordTemplateContent,
   writeSchemeDocxFromTemplate,
+  type ContentControlReplacementInput,
   type SchemeCompletenessResult,
   type SchemeDiagramAsset,
   type TemplateCellReplacementInput
@@ -384,7 +386,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       function: {
         name: "create_word",
         description:
-          "根据内置 docs/密码应用方案.docx 模板创建一个 Word 文件。默认直接复制模板，内容和格式与模板保持一致；可选 template_fields 使用 docx-templates 替换模板中的 {字段名} 占位。",
+          "根据内置 docs/密码应用方案.docx 模板创建一个 Word 文件。默认直接复制模板，内容和格式与模板保持一致；可选 template_fields 替换 {字段名} 占位，content_controls 按 Word Content Control tag/STD_* 精确替换模板控件内容。",
         parameters: {
           type: "object",
           properties: {
@@ -414,6 +416,38 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
                   }
                 },
                 required: ["key", "value"],
+                additionalProperties: false
+              }
+            },
+            content_controls: {
+              type: "array",
+              description:
+                "可选 Content Control tag 精准替换。用于按 Word 模板里的 w:tag/STD_* 标签直接替换某个固定字段、局部正文块或模板块，保留该控件外层样式和结构。",
+              items: {
+                type: "object",
+                properties: {
+                  tag: {
+                    type: "string",
+                    description:
+                      "Word Content Control 的 tag；也可直接传 template.json 中的 block id，例如 sec_2_2_2_text_1、field_block_front_9、ps:section:sec_1:body、STD_SYSTEM_NAME。"
+                  },
+                  value: {
+                    type: "string",
+                    description: "写入内容；可包含多行文本或简单 Markdown 表格。"
+                  },
+                  alias: {
+                    type: "string",
+                    description: "可选候选 tag；用于兼容另一个命名。"
+                  },
+                  aliases: {
+                    type: "array",
+                    description: "可选候选 tag；用于同时兼容 STD_* 和 ps:* 命名。",
+                    items: {
+                      type: "string"
+                    }
+                  }
+                },
+                required: ["tag", "value"],
                 additionalProperties: false
               }
             },
@@ -468,9 +502,11 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
           "正式生成优先使用 sections 批量写入多个已起草章节：一次打开 docx、替换多个不可见锚、一次保存，明显快于多次调用 write_word。",
           "正文可先由 draft_scheme_sections 并行起草，再把多个草稿合并到 sections 数组中按模板顺序一次性写入同一个 docx。",
           "表格 template_cells 和配图 diagrams 必须放在所有正文章节写入后统一补充：先调用 plan_scheme_assets 获取 table_id/row/column 和 figure_id，再写表格、生图并嵌入。",
+          "固定字段、小段模板内容或旧 STD_* 标签内容，可用 content_controls 按 Word Content Control tag 精确替换；这适合 AI 对已有 Word 做局部编辑。",
+          "如果 template.json 某节已经列出局部正文块 textBlocks，而需求只是补一句、改一段或细化局部说明，优先使用 write_word.content_controls；这样更稳定，也更利于保留后续图表锚点。",
           "兼容模式：不传 section 时可用 template_sections 按 Markdown 编号拆分章节，但正式交付不推荐一次性写入整篇长文。",
           "传入 section 时，section 必须精确匹配 template.json 中已存在的章节 id 或 number，推荐传 id，例如 sec_7；不要传模板中不存在的 7.2、sec_7_2 等虚拟章节。",
-          "Word 内部定位只使用该章节 anchors.body.tag 对应的不可见 SDT 锚，并只替换 w:sdtContent，保留模板其他章节、页眉页脚、样式和编号。",
+          "Word 内部定位优先使用该章节 anchors.body.tag/alias 对应的 Content Control tag（不可见 SDT 锚），也兼容常见 STD_* tag 命名；只替换 w:sdtContent，保留模板其他章节、页眉页脚、样式和编号。",
           "Markdown 表格会渲染为真实 Word 表格；可用 render_mode=full_document 强制重建正文，或 append 追加到文末。"
         ].join("\n"),
         parameters: {
@@ -578,6 +614,38 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
                   }
                 },
                 required: ["row_index", "value"],
+                additionalProperties: false
+              }
+            },
+            content_controls: {
+              type: "array",
+              description:
+                "可选 Content Control tag 精准替换。用于按 Word 模板里的 w:tag/STD_* 标签直接替换某个固定字段、局部正文块或模板块，保留该控件外层样式和结构。",
+              items: {
+                type: "object",
+                properties: {
+                  tag: {
+                    type: "string",
+                    description:
+                      "Word Content Control 的 tag；也可直接传 template.json 中的 block id，例如 sec_2_2_2_text_1、field_block_front_9、ps:section:sec_1:body、STD_SYSTEM_NAME。"
+                  },
+                  value: {
+                    type: "string",
+                    description: "写入内容；可包含多行文本或简单 Markdown 表格。"
+                  },
+                  alias: {
+                    type: "string",
+                    description: "可选候选 tag；用于兼容另一个命名。"
+                  },
+                  aliases: {
+                    type: "array",
+                    description: "可选候选 tag；用于同时兼容 STD_* 和 ps:* 命名。",
+                    items: {
+                      type: "string"
+                    }
+                  }
+                },
+                required: ["tag", "value"],
                 additionalProperties: false
               }
             },
@@ -951,6 +1019,8 @@ interface SchemeTemplateTaskJson {
   sections?: unknown[];
   tables?: unknown[];
   figures?: unknown[];
+  fieldBlocks?: unknown[];
+  textBlocks?: unknown[];
 }
 
 interface SchemeTemplateTaskSection {
@@ -983,6 +1053,36 @@ interface SchemeTemplateTaskFigure {
   purpose?: string;
 }
 
+interface SchemeTemplateTaskFieldBlock {
+  id: string;
+  text: string;
+  section?: string;
+  sectionNumber?: string;
+  placeholders?: string[];
+  anchors?: {
+    block?: {
+      tag: string;
+      alias?: string;
+      aliases?: string[];
+    };
+  };
+}
+
+interface SchemeTemplateTaskTextBlock {
+  id: string;
+  section: string;
+  sectionNumber?: string;
+  order: number;
+  text?: string;
+  anchors?: {
+    block?: {
+      tag: string;
+      alias?: string;
+      aliases?: string[];
+    };
+  };
+}
+
 interface SchemeTemplateTaskRow {
   index: number;
   cells: SchemeTemplateTaskCell[];
@@ -1005,8 +1105,11 @@ function buildSchemeTemplateTaskSummary(filePath: string, context: AgentToolExec
   const sections = readTemplateTaskSections(parsed.sections);
   const tables = readTemplateTaskTables(parsed.tables);
   const figures = readTemplateTaskFigures(parsed.figures);
+  const fieldBlocks = readTemplateTaskFieldBlocks(parsed.fieldBlocks);
+  const textBlocks = readTemplateTaskTextBlocks(parsed.textBlocks);
   const tableMap = new Map(tables.map((table) => [table.id, table]));
   const figureMap = new Map(figures.map((figure) => [figure.id, figure]));
+  const textBlockMap = groupTemplateTaskTextBlocksBySection(textBlocks);
   const batchSize = clampDraftSectionParallelism(context.settings.agent.draftSectionParallelism);
 
   const lines = [
@@ -1019,15 +1122,22 @@ function buildSchemeTemplateTaskSummary(filePath: string, context: AgentToolExec
     "- tables/figures 只记录后续任务，正文阶段不要生成 Markdown 表格或图片。",
     "- 正文草稿完成后，用 write_word.sections 按相同顺序批量写入 Word；随后调用 plan_scheme_assets 规划表格和图片任务。",
     "- 表格按 plan_scheme_assets 返回的 template_cells_plan 改写 value 后写入；图片按 image_generate_plan 生成，再用 diagrams.figure_id 精确嵌入。",
+    "- content_controls[].tag 可直接传 fieldBlocks/textBlocks 的 id，例如 field_block_front_9、sec_2_2_2_text_1；工具会自动映射到真实 ps:* / STD_* tag。",
+    "- 如果只想改某节中的一小段正文，优先使用该节的 textBlocks / write_word.content_controls 做局部替换，不必重写整节。",
+    "- 某节若已列出“局部正文块”，补一句、改一段、细化说明时都先用局部块；只有需要整体改写多段结构时再用 write_word.sections。",
     "",
     "字段占位任务：",
-    formatFieldGuide(parsed.fieldGuide),
-    "",
-    "章节起草任务（按模板顺序）："
+    formatFieldGuide(parsed.fieldGuide)
   ];
 
+  if (fieldBlocks.length) {
+    lines.push("", "固定模板块：", formatTemplateTaskFieldBlocks(fieldBlocks));
+  }
+
+  lines.push("", "章节起草任务（按模板顺序）：");
+
   sections.forEach((section, index) => {
-    lines.push(formatTemplateTaskSection(section, index + 1, tableMap, figureMap));
+    lines.push(formatTemplateTaskSection(section, index + 1, tableMap, figureMap, textBlockMap));
   });
 
   return compactText(lines.join("\n"), 60000);
@@ -1098,6 +1208,78 @@ function readTemplateTaskFigures(value: unknown): SchemeTemplateTaskFigure[] {
   return figures;
 }
 
+function readTemplateTaskFieldBlocks(value: unknown): SchemeTemplateTaskFieldBlock[] {
+  if (!Array.isArray(value)) return [];
+  const fieldBlocks: SchemeTemplateTaskFieldBlock[] = [];
+
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const id = readRecordString(record, "id");
+    const text = readRecordString(record, "text");
+    if (!id || !text) continue;
+
+    const anchors = readTemplateTaskFieldBlockAnchors(record.anchors);
+    fieldBlocks.push({
+      id,
+      text,
+      section: readRecordString(record, "section") || undefined,
+      sectionNumber: readRecordString(record, "sectionNumber") || undefined,
+      placeholders: readRecordStringArray(record, "placeholders"),
+      ...(anchors ? { anchors } : {})
+    });
+  }
+
+  return fieldBlocks;
+}
+
+function readTemplateTaskTextBlocks(value: unknown): SchemeTemplateTaskTextBlock[] {
+  if (!Array.isArray(value)) return [];
+  const textBlocks: SchemeTemplateTaskTextBlock[] = [];
+
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const id = readRecordString(record, "id");
+    const section = readRecordString(record, "section");
+    const order = readRecordNumber(record, "order", Number.NaN);
+    if (!id || !section || !Number.isInteger(order)) continue;
+
+    const anchors = readTemplateTaskFieldBlockAnchors(record.anchors);
+    textBlocks.push({
+      id,
+      section,
+      sectionNumber: readRecordString(record, "sectionNumber") || undefined,
+      order,
+      text: readRecordString(record, "text") || undefined,
+      ...(anchors ? { anchors } : {})
+    });
+  }
+
+  return textBlocks;
+}
+
+function readTemplateTaskFieldBlockAnchors(value: unknown): SchemeTemplateTaskFieldBlock["anchors"] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const block = readTemplateTaskAnchor(record.block);
+  return block ? { block } : undefined;
+}
+
+function readTemplateTaskAnchor(
+  value: unknown
+): { tag: string; alias?: string; aliases?: string[] } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const tag = readRecordString(record, "tag");
+  if (!tag) return undefined;
+  return {
+    tag,
+    alias: readRecordString(record, "alias") || undefined,
+    aliases: readRecordStringArray(record, "aliases")
+  };
+}
+
 function readTemplateTaskRows(value: unknown): SchemeTemplateTaskRow[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const rows: SchemeTemplateTaskRow[] = [];
@@ -1133,6 +1315,27 @@ function readTemplateTaskCells(value: unknown): SchemeTemplateTaskCell[] {
   return cells;
 }
 
+function formatTemplateTaskFieldBlocks(fieldBlocks: SchemeTemplateTaskFieldBlock[]): string {
+  const lines = fieldBlocks.slice(0, 12).map((fieldBlock) => {
+    const scope = fieldBlock.section ?? fieldBlock.sectionNumber ?? "front";
+    const placeholders = fieldBlock.placeholders?.length ? ` | 字段：${fieldBlock.placeholders.join("、")}` : "";
+    const blockTags = [
+      fieldBlock.anchors?.block?.tag,
+      ...(fieldBlock.anchors?.block?.aliases ?? [])
+    ]
+      .filter(Boolean)
+      .slice(0, 3)
+      .join(" / ");
+    return `- ${fieldBlock.id} | ${scope} | 文本：${fieldBlock.text}${placeholders}${blockTags ? ` | tag：${blockTags}` : ""}`;
+  });
+
+  if (fieldBlocks.length > 12) {
+    lines.push(`- 其余 ${fieldBlocks.length - 12} 个模板块见 template.json 的 fieldBlocks。`);
+  }
+
+  return lines.length ? lines.join("\n") : "- 无";
+}
+
 function formatFieldGuide(value: unknown): string {
   if (!Array.isArray(value)) return "- 无";
   const items = value
@@ -1151,17 +1354,52 @@ function formatTemplateTaskSection(
   section: SchemeTemplateTaskSection,
   index: number,
   tableMap: Map<string, SchemeTemplateTaskTable>,
-  figureMap: Map<string, SchemeTemplateTaskFigure>
+  figureMap: Map<string, SchemeTemplateTaskFigure>,
+  textBlockMap: Map<string, SchemeTemplateTaskTextBlock[]>
 ): string {
   const paragraphPlan = buildSectionParagraphTasks(section);
+  const textBlocks = textBlockMap.get(section.id) ?? [];
   const tasks = [
     `正文：${section.writingHint || `围绕“${section.title}”编写项目化正文，资料不足处写待补充。`}`,
     `段落：${paragraphPlan.join("；")}`,
+    textBlocks.length ? `局部正文块：${formatTemplateTaskTextBlocks(textBlocks)}` : "",
     section.placeholders?.length ? `字段：${section.placeholders.join("、")}` : "",
     section.relatedTables?.length ? `表格：${section.relatedTables.map((id) => formatRelatedTable(id, tableMap.get(id))).join("；")}` : "",
     section.relatedFigures?.length ? `图示：${section.relatedFigures.map((id) => formatRelatedFigure(id, figureMap.get(id))).join("；")}` : ""
   ].filter(Boolean);
   return `${index}. ${section.id} | ${section.number} ${section.title}\n   task: ${tasks.join(" / ")}`;
+}
+
+function formatTemplateTaskTextBlocks(textBlocks: SchemeTemplateTaskTextBlock[]): string {
+  const items = textBlocks.slice(0, 3).map((block) => {
+    const tag = block.anchors?.block?.tag?.trim() || "";
+    return tag ? `${block.id}（tag：${tag}）` : block.id;
+  });
+  if (textBlocks.length > 3) {
+    items.push(`其余 ${textBlocks.length - 3} 个见 template.json`);
+  }
+  return items.join("、");
+}
+
+function groupTemplateTaskTextBlocksBySection(
+  textBlocks: SchemeTemplateTaskTextBlock[]
+): Map<string, SchemeTemplateTaskTextBlock[]> {
+  const grouped = new Map<string, SchemeTemplateTaskTextBlock[]>();
+
+  for (const textBlock of textBlocks) {
+    const items = grouped.get(textBlock.section) ?? [];
+    items.push(textBlock);
+    grouped.set(textBlock.section, items);
+  }
+
+  for (const [section, items] of grouped) {
+    grouped.set(
+      section,
+      [...items].sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+    );
+  }
+
+  return grouped;
 }
 
 function formatRelatedTable(id: string, table?: SchemeTemplateTaskTable): string {
@@ -1893,7 +2131,8 @@ async function executeCreateWord(
     fields: readObjectArg(args, "fields"),
     templateFields: readTemplateFieldsArg(args),
     templateJsonPath,
-    templateCells: readTemplateCellsArg(args)
+    templateCells: readTemplateCellsArg(args),
+    contentControls: readContentControlsArg(args)
   });
 
   return {
@@ -1906,6 +2145,7 @@ async function executeCreateWord(
       `create_word completed: ${result.outputPath}`,
       `模板占位符替换次数：${result.templateReplacementCount}`,
       `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
+      `Content Control 替换次数：${result.contentControlReplacementCount}`,
       `显式字段：${result.filledFields.join("、") || "无"}`
     ].join("\n"),
     artifactPath: result.outputPath
@@ -1924,15 +2164,24 @@ async function executeWriteWord(
   const templateJsonPath = join(context.docsDir, "密码应用方案.template.json");
   const diagrams = readDiagramAssetsArg(args, context);
   const section = readSectionArg(args);
+  const fields = readObjectArg(args, "fields");
+  const templateFields = readTemplateFieldsArg(args);
+  const templateCells = readTemplateCellsArg(args);
+  const contentControls = readContentControlsArg(args);
+  const hasFieldOverrides = Boolean(fields && Object.keys(fields).length);
+  const hasDirectTemplateUpdates = Boolean(
+    hasFieldOverrides || templateFields?.length || templateCells?.length || contentControls.length || diagrams.length
+  );
 
   if (sectionBatch.length) {
     const sourcePath = readWordSourcePath(args, context, templatePath);
     const outputPath = resolveWordOutputPath(args, context, sourcePath);
     const result = await replaceWordSectionsContent(sourcePath, outputPath, {
       sections: sectionBatch,
-      fields: readObjectArg(args, "fields"),
-      templateFields: readTemplateFieldsArg(args),
-      templateCells: readTemplateCellsArg(args),
+      fields,
+      templateFields,
+      templateCells,
+      contentControls,
       diagrams,
       templateJsonPath
     });
@@ -1947,25 +2196,27 @@ async function executeWriteWord(
         `替换原内容块：${result.sections.reduce((total, item) => total + item.replacementCount, 0)}`,
         `模板占位符替换次数：${result.templateReplacementCount}`,
         `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
+        `Content Control 替换次数：${result.contentControlReplacementCount}`,
         `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`
       ].join("\n"),
       artifactPath: result.outputPath
     };
   }
 
-  if (!content) {
+  if (!content && !hasDirectTemplateUpdates) {
     return { toolName: "write_word", summary: "缺少写入正文", content: "write_word failed: missing content" };
   }
 
-  if (section) {
+  if (section && content) {
     const sourcePath = readWordSourcePath(args, context, templatePath);
     const outputPath = resolveWordOutputPath(args, context, sourcePath);
     const result = await replaceWordSectionContent(sourcePath, outputPath, {
       section,
       content,
-      fields: readObjectArg(args, "fields"),
-      templateFields: readTemplateFieldsArg(args),
-      templateCells: readTemplateCellsArg(args),
+      fields,
+      templateFields,
+      templateCells,
+      contentControls,
       diagrams,
       templateJsonPath
     });
@@ -1980,6 +2231,7 @@ async function executeWriteWord(
         `替换原内容块：${result.replacementCount}`,
         `模板占位符替换次数：${result.templateReplacementCount}`,
         `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
+        `Content Control 替换次数：${result.contentControlReplacementCount}`,
         `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`
       ].join("\n"),
       artifactPath: result.outputPath
@@ -1988,16 +2240,44 @@ async function executeWriteWord(
 
   const rawName = readStringArg(args, "name") || `${context.sessionTitle}-密码应用方案.docx`;
   const safeName = sanitizeFileName(rawName.endsWith(".docx") ? rawName : `${rawName}.docx`);
-  const outputPath = join(context.outputDir, `${Date.now().toString(36)}-${safeName}`);
   const renderMode = readRenderModeArg(args);
+
+  if (!content && hasDirectTemplateUpdates) {
+    const sourcePath = readWordSourcePath(args, context, templatePath);
+    const outputPath = resolveWordOutputPath(args, context, sourcePath);
+    const result = await updateWordTemplateContent(sourcePath, outputPath, {
+      fields,
+      templateFields,
+      templateCells,
+      contentControls,
+      diagrams,
+      templateJsonPath
+    });
+
+    return {
+      toolName: "write_word",
+      summary: `已更新 Word ${result.fileName} 的模板字段/控件`,
+      content: [
+        `write_word completed: ${result.outputPath}`,
+        `模板占位符替换次数：${result.templateReplacementCount}`,
+        `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
+        `Content Control 替换次数：${result.contentControlReplacementCount}`,
+        `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`
+      ].join("\n"),
+      artifactPath: result.outputPath
+    };
+  }
+
+  const outputPath = join(context.outputDir, `${Date.now().toString(36)}-${safeName}`);
 
   const result = await writeSchemeDocxFromTemplate(templatePath, outputPath, {
     prompt: prompt || context.sessionTitle,
     memory: context.memory,
     generatedMarkdown: content,
-    fields: readObjectArg(args, "fields"),
-    templateFields: readTemplateFieldsArg(args),
-    templateCells: readTemplateCellsArg(args),
+    fields,
+    templateFields,
+    templateCells,
+    contentControls,
     diagrams,
     renderMode,
     templateJsonPath
@@ -2011,6 +2291,7 @@ async function executeWriteWord(
       `填充字段：${result.filledFields.join("、") || "无"}`,
       `模板锚点：${result.templateAnchorsUsed.join("、") || "未使用"}`,
       `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
+      `Content Control 替换次数：${result.contentControlReplacementCount}`,
       `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`,
       `写入模式：${result.renderMode}`
     ].join("\n"),
@@ -2378,6 +2659,32 @@ function readTemplateCellsArg(args: Record<string, unknown>): TemplateCellReplac
     .map((item) => normalizeTemplateCellReplacement(item))
     .filter((item): item is TemplateCellReplacementInput => Boolean(item));
   return cells.length ? cells : undefined;
+}
+
+function readContentControlsArg(args: Record<string, unknown>): ContentControlReplacementInput[] {
+  const value = args.content_controls ?? args.contentControls;
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => normalizeContentControlReplacement(item))
+    .filter((item): item is ContentControlReplacementInput => Boolean(item));
+}
+
+function normalizeContentControlReplacement(item: unknown): ContentControlReplacementInput | undefined {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+  const record = item as Record<string, unknown>;
+  const tag = typeof record.tag === "string" ? record.tag.trim() : "";
+  const value = typeof record.value === "string" ? record.value.trim() : "";
+  const alias = typeof record.alias === "string" ? record.alias.trim() : "";
+  const aliases = Array.isArray(record.aliases)
+    ? record.aliases.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean)
+    : [];
+  if (!tag || !value) return undefined;
+  return {
+    tag,
+    value,
+    ...(alias ? { alias } : {}),
+    ...(aliases.length ? { aliases } : {})
+  };
 }
 
 function normalizeTemplateCellReplacement(item: unknown): TemplateCellReplacementInput | undefined {

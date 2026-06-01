@@ -36,6 +36,7 @@ describe("agentToolRegistry", () => {
   it("builds tool definitions and keeps exec_bash opt-in", () => {
     const safeTools = buildAgentChatTools({ includeExecBash: false });
     const fullTools = buildAgentChatTools({ includeExecBash: true });
+    const writeWordTool = safeTools.find((tool) => tool.function.name === "write_word");
 
     expect(safeTools.map((tool) => tool.function.name)).toContain("remember_project");
     expect(safeTools.map((tool) => tool.function.name)).toContain("web_search");
@@ -49,6 +50,8 @@ describe("agentToolRegistry", () => {
     expect(safeTools.map((tool) => tool.function.name)).not.toContain("exec_bash");
     expect(fullTools.map((tool) => tool.function.name)).toContain("exec_bash");
     expect(fullTools.every((tool) => tool.type === "function" && tool.function.strict === true)).toBe(true);
+    expect(writeWordTool?.function.description).toContain("局部正文块 textBlocks");
+    expect(JSON.stringify(writeWordTool)).toContain("sec_2_2_2_text_1");
   });
 
   it("can hide final artifact tools while collecting project information", () => {
@@ -154,11 +157,15 @@ describe("agentToolRegistry", () => {
     expect(result.toolName).toBe("read_file");
     expect(result.summary).toContain("规划任务清单");
     expect(result.content).toContain("draft_scheme_sections 每批尽量传 20 个 section");
+    expect(result.content).toContain("content_controls[].tag 可直接传 fieldBlocks/textBlocks 的 id");
     expect(result.content).toContain("sec_2_2_2 | 2.2.2 网络环境");
     expect(result.content).toContain("task: 正文：描述网络整体结构");
+    expect(result.content).toContain("局部正文块：sec_2_2_2_text_1（tag：ps:section:sec_2_2_2:text:1）");
     expect(result.content).toContain("段落：说明本节范围和已确认对象");
     expect(result.content).toContain("表格：table_4_2_2_1");
     expect(result.content).toContain("图示：fig_1_2_2_2_1");
+    expect(result.content).toContain("固定模板块");
+    expect(result.content).toContain("field_block_front_9");
     expect(result.content).not.toContain("\"schemaVersion\"");
   });
 
@@ -635,6 +642,44 @@ describe("agentToolRegistry", () => {
       expect(extracted.value).toContain("系统建设规划");
       expect(extracted.value).toContain("统一身份认证系统的系统建设规划增量内容");
       expect(extracted.value).toContain("法律法规要求");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("updates template fields without requiring generated section content", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-field-word-"));
+
+    try {
+      const created = await executeAgentToolCall(
+        createToolCall("create_word", {
+          name: "字段直改方案.docx"
+        }),
+        {
+          ...createContext(process.cwd()),
+          outputDir: dir
+        }
+      );
+      const result = await executeAgentToolCall(
+        createToolCall("write_word", {
+          path: created.artifactPath,
+          fields: {
+            应用系统: "字段直改统一身份认证系统",
+            建设单位: "字段直改示例政务服务中心"
+          }
+        }),
+        {
+          ...createContext(process.cwd()),
+          outputDir: dir
+        }
+      );
+      const extracted = await mammoth.extractRawText({ path: result.artifactPath! });
+
+      expect(result.toolName).toBe("write_word");
+      expect(result.summary).toContain("模板字段/控件");
+      expect(result.artifactPath).toBe(created.artifactPath);
+      expect(extracted.value).toContain("字段直改统一身份认证系统");
+      expect(extracted.value).toContain("字段直改示例政务服务中心");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

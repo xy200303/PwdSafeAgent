@@ -22,10 +22,12 @@ interface TemplateTable {
     table: {
       tag: string;
       alias?: string;
+      aliases?: string[];
     };
     caption?: {
       tag: string;
       alias?: string;
+      aliases?: string[];
     };
   };
   rows: Array<{
@@ -49,10 +51,44 @@ interface TemplateFigure {
     image?: {
       tag: string;
       alias?: string;
+      aliases?: string[];
     };
     caption: {
       tag: string;
       alias?: string;
+      aliases?: string[];
+    };
+  };
+}
+
+interface TemplateFieldBlock {
+  id: string;
+  block: number;
+  text: string;
+  placeholders?: string[];
+  section?: string;
+  sectionNumber?: string;
+  anchors?: {
+    block?: {
+      tag: string;
+      alias?: string;
+      aliases?: string[];
+    };
+  };
+}
+
+interface TemplateTextBlock {
+  id: string;
+  section: string;
+  sectionNumber?: string;
+  order: number;
+  blockRange: [number, number];
+  text?: string;
+  anchors?: {
+    block?: {
+      tag: string;
+      alias?: string;
+      aliases?: string[];
     };
   };
 }
@@ -91,6 +127,7 @@ interface TemplateJson {
       body: {
         tag: string;
         alias?: string;
+        aliases?: string[];
       };
     };
     relatedTables?: string[];
@@ -98,6 +135,8 @@ interface TemplateJson {
   }>;
   tables: TemplateTable[];
   figures: TemplateFigure[];
+  fieldBlocks: TemplateFieldBlock[];
+  textBlocks: TemplateTextBlock[];
 }
 
 describe("scheme template json", () => {
@@ -116,6 +155,30 @@ describe("scheme template json", () => {
     expect(template.fieldAnchors.find((anchor) => anchor.key === "应用系统")).toMatchObject({
       marker: "{应用系统}"
     });
+    expect(template.fieldBlocks.length).toBeGreaterThanOrEqual(2);
+    expect(template.fieldBlocks.find((fieldBlock) => fieldBlock.id === "field_block_front_9")).toMatchObject({
+      block: 9,
+      text: "{应用系统}密码应用方案",
+      placeholders: ["应用系统"],
+      anchors: {
+        block: {
+          tag: "ps:field-block:field_block_front_9",
+          aliases: expect.arrayContaining(["STD_FIELD_BLOCK_FRONT_9"])
+        }
+      }
+    });
+    expect(template.textBlocks.length).toBeGreaterThanOrEqual(150);
+    expect(template.textBlocks.find((textBlock) => textBlock.id === "sec_2_2_2_text_1")).toMatchObject({
+      section: "sec_2_2_2",
+      sectionNumber: "2.2.2",
+      order: 1,
+      anchors: {
+        block: {
+          tag: "ps:section:sec_2_2_2:text:1",
+          aliases: expect.arrayContaining(["STD_SEC_2_2_2_TEXT_1", "STD_2_2_2_TEXT_1"])
+        }
+      }
+    });
 
     const networkSection = template.sections.find((section) => section.id === "sec_2_2_2");
     expect(networkSection).toMatchObject({
@@ -124,7 +187,8 @@ describe("scheme template json", () => {
       writingHint: expect.stringContaining("网络"),
       anchors: {
         body: {
-          tag: "ps:section:sec_2_2_2:body"
+          tag: "ps:section:sec_2_2_2:body",
+          aliases: expect.arrayContaining(["STD_SEC_2_2_2_BODY", "STD_2_2_2_BODY"])
         }
       }
     });
@@ -144,10 +208,12 @@ describe("scheme template json", () => {
     });
     expect(basicTable?.anchors).toMatchObject({
       table: {
-        tag: "ps:table:table_3_2_1"
+        tag: "ps:table:table_3_2_1",
+        aliases: expect.arrayContaining(["STD_TABLE_3_2_1", "STD_table_3_2_1_TABLE"])
       },
       caption: {
-        tag: "ps:table:table_3_2_1:caption"
+        tag: "ps:table:table_3_2_1:caption",
+        aliases: expect.arrayContaining(["STD_TABLE_3_2_1_CAPTION"])
       }
     });
     expect("visibleMarkers" in (basicTable ?? {})).toBe(false);
@@ -174,10 +240,12 @@ describe("scheme template json", () => {
       placeholderText: "【图片占位】",
       anchors: {
         image: {
-          tag: "ps:figure:fig_1_2_2_2_1:image"
+          tag: "ps:figure:fig_1_2_2_2_1:image",
+          aliases: expect.arrayContaining(["STD_FIG_1_2_2_2_1_IMAGE", "STD_FIGURE_fig_1_2_2_2_1_IMAGE"])
         },
         caption: {
-          tag: "ps:figure:fig_1_2_2_2_1:caption"
+          tag: "ps:figure:fig_1_2_2_2_1:caption",
+          aliases: expect.arrayContaining(["STD_FIG_1_2_2_2_1_CAPTION"])
         }
       },
       recommendedLabel: "网络框架图",
@@ -200,6 +268,8 @@ describe("scheme template json", () => {
 
     expect(documentXml).toContain('w:val="ps:section:sec_1_1:body"');
     expect(documentXml).toContain('w:val="ps:table:table_3_2_1"');
+    expect(documentXml).toContain('w:val="ps:field-block:field_block_front_9"');
+    expect(documentXml).toContain('w:val="ps:section:sec_2_2_2:text:1"');
     expect(documentXml).toContain("【图片占位】");
     expect(documentXml).not.toContain("密码是保障网络与信息安全的核心技术和基础支撑");
     expect(documentXml).not.toContain("网络运营者开展经营和服务活动");

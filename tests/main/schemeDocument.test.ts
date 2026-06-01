@@ -12,6 +12,7 @@ import {
   replaceWordSectionContent,
   replaceWordSectionsContent,
   renderFactSummaryMarkdown,
+  updateWordTemplateContent,
   writeSchemeDocxFromTemplate
 } from "../../src/main/schemeDocument";
 
@@ -128,6 +129,99 @@ describe("schemeDocument", () => {
       expect(runXml).not.toMatch(/<w:b(?:\s|\/|>)/);
       expect(paragraphXml).not.toContain("【待填写】");
       expect(documentXml).not.toContain("密码应用措施");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves STD content control tags through the template mapping while preserving the outer Word control", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-content-control-"));
+    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const outputPath = join(dir, "控件局部替换.docx");
+
+    try {
+      const result = await updateWordTemplateContent(templatePath, outputPath, {
+        contentControls: [
+          {
+            tag: "STD_SEC_1_1_BODY",
+            value: [
+              "统一身份认证系统通过 Content Control 完成局部替换。",
+              "| 控件 | 说明 |",
+              "| --- | --- |",
+              "| STD | 兼容旧标签 |"
+            ].join("\n")
+          }
+        ]
+      });
+      const documentXml = await readDocumentXml(outputPath);
+      const sdtXml = findSdtXmlContaining(documentXml, "ps:section:sec_1_1:body");
+      const paragraphXml = findParagraphXmlContaining(documentXml, "统一身份认证系统通过 Content Control 完成局部替换");
+
+      expect(result.contentControlReplacementCount).toBe(1);
+      expect(result.templateReplacementCount).toBe(0);
+      expect(result.templateCellReplacementCount).toBe(0);
+      expectTemplateBodyParagraphStyle(paragraphXml);
+      expect(sdtXml).toContain("ps:section:sec_1_1:body");
+      expect(sdtXml).toContain("统一身份认证系统通过 Content Control 完成局部替换");
+      expect(sdtXml).toContain("<w:tbl>");
+      expect(sdtXml).toContain("兼容旧标签");
+      expect(documentXml).toContain("法律法规要求");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves template field block ids through the template mapping for precise front-matter edits", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-field-block-"));
+    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const outputPath = join(dir, "模板块局部替换.docx");
+
+    try {
+      const result = await updateWordTemplateContent(templatePath, outputPath, {
+        contentControls: [
+          {
+            tag: "field_block_front_9",
+            value: "统一身份认证系统商用密码应用方案"
+          }
+        ]
+      });
+      const documentXml = await readDocumentXml(outputPath);
+      const sdtXml = findSdtXmlContaining(documentXml, "ps:field-block:field_block_front_9");
+
+      expect(result.contentControlReplacementCount).toBe(1);
+      expect(sdtXml).toContain("ps:field-block:field_block_front_9");
+      expect(sdtXml).toContain("统一身份认证系统商用密码应用方案");
+      expect(documentXml).toContain("统一身份认证系统商用密码应用方案");
+      expect(sdtXml).not.toContain("{应用系统}密码应用方案");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("updates a section text block without removing the section's nested figure anchors", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-text-block-"));
+    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const outputPath = join(dir, "章节正文块局部替换.docx");
+
+    try {
+      const result = await updateWordTemplateContent(templatePath, outputPath, {
+        contentControls: [
+          {
+            tag: "sec_2_2_2_text_1",
+            value: "本节局部正文块已单独更新，保留网络框架图和其他嵌套控件。"
+          }
+        ]
+      });
+      const documentXml = await readDocumentXml(outputPath);
+      const sdtXml = findSdtXmlContaining(documentXml, "ps:section:sec_2_2_2:text:1");
+      const paragraphXml = findParagraphXmlContaining(documentXml, "本节局部正文块已单独更新");
+
+      expect(result.contentControlReplacementCount).toBe(1);
+      expectTemplateBodyParagraphStyle(paragraphXml);
+      expect(sdtXml).toContain("ps:section:sec_2_2_2:text:1");
+      expect(sdtXml).toContain("本节局部正文块已单独更新");
+      expect(documentXml).toContain('w:val="ps:figure:fig_1_2_2_2_1:image"');
+      expect(documentXml).toContain('w:val="ps:section:sec_2_2_2:body"');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -33,7 +33,7 @@ if (cleanedDocumentXml !== documentXml) {
   model = buildTemplateModel(cleanedDocumentXml);
   markedDocumentXml = model.markedDocumentXml;
 }
-const { styles, blocks, sections, tables, figures, placeholders, fieldAnchors, drawingCount } = model;
+const { styles, blocks, sections, tables, figures, placeholders, fieldAnchors, fieldBlocks, textBlocks, drawingCount } = model;
 
 if (markedDocumentXml !== originalDocumentXml) {
   zip.file("word/document.xml", markedDocumentXml);
@@ -64,6 +64,9 @@ const templateJson = {
     ],
     notes: [
       "anchors 是写入 Word 的不可见 SDT tag，是章节、表格、图片的主定位依据。",
+      "anchors.*.aliases 记录旧 STD_* 兼容标签，便于旧模板命名和真实 Content Control tag 并存。",
+      "fieldBlocks 记录非表格顶层短段落模板块，可通过 content_controls 做更细粒度的局部替换。",
+      "textBlocks 记录章节内可独立改写的正文段块，适合只改局部说明而不重写整节。",
       "headingBlock、bodyRange、captionBlock 是模板结构快照，仅用于分析、校验和回归对比，不作为运行时主定位。",
       "sections.number/title/writingHint 用于 Agent 写作提示和人工审阅，不能作为可靠定位条件。",
       "fieldAnchors 只记录 {字段名} 短文本占位；复杂正文、表格、图片不得通过字段占位承载。",
@@ -82,6 +85,8 @@ const templateJson = {
   },
   placeholders,
   fieldAnchors,
+  fieldBlocks,
+  textBlocks,
   styles: styles
     .filter((style) => style.headingLevel || isUsefulStyleName(style.name))
     .map(({ id, name, headingLevel }) => ({ id, name, ...(headingLevel ? { headingLevel } : {}) })),
@@ -116,7 +121,10 @@ function buildTemplateModel(sourceDocumentXml) {
 
   const tables = buildTables(blocks, sections);
   const figures = buildFigures(blocks, sections, relationships);
-  addTemplateInvisibleAnchors(blocks, sections, tables, figures);
+  assignSectionDirectBodyRanges(sections, blocks);
+  const fieldBlocks = buildFieldBlocks(blocks);
+  const textBlocks = buildSectionTextBlocks(blocks, sections, tables, figures);
+  addTemplateInvisibleAnchors(blocks, sections, tables, figures, fieldBlocks, textBlocks);
   applyTemplateGuidance(sections, tables, figures);
 
   return {
@@ -126,10 +134,14 @@ function buildTemplateModel(sourceDocumentXml) {
     sections,
     tables,
     figures,
+    fieldBlocks,
+    textBlocks,
     placeholders: uniqueSorted(blocks.flatMap((block) => block.placeholders ?? [])),
     fieldAnchors: buildFieldAnchors(blocks),
     drawingCount: blocks.reduce((sum, block) => sum + (block.drawingCount ?? 0), 0),
-    markedDocumentXml: cleanTemplateSourceText(insertTemplateInvisibleAnchors(sourceDocumentXml, blocks, sections, tables, figures))
+    markedDocumentXml: cleanTemplateSourceText(
+      insertTemplateInvisibleAnchors(sourceDocumentXml, blocks, sections, tables, figures, fieldBlocks, textBlocks)
+    )
   };
 }
 
@@ -444,19 +456,28 @@ function buildFigures(blocks, _sections, relationships) {
   return figures;
 }
 
-function addTemplateInvisibleAnchors(blocks, sections, tables, figures) {
+function addTemplateInvisibleAnchors(blocks, sections, tables, figures, fieldBlocks, textBlocks) {
   for (const section of sections) {
-    section.directBodyRange = getSectionDirectBodyRange(section, sections, blocks);
     section.anchors = {
-      body: makeSdtAnchor(`ps:section:${section.id}:body`, `${section.number} ${section.title} 正文`)
+      body: makeSdtAnchor(
+        `ps:section:${section.id}:body`,
+        `${section.number} ${section.title} 正文`,
+        buildSectionLegacyAnchorAliases(section)
+      )
     };
   }
 
   for (const table of tables) {
     table.anchors = {
-      table: makeSdtAnchor(`ps:table:${table.id}`, table.caption || table.id),
+      table: makeSdtAnchor(`ps:table:${table.id}`, table.caption || table.id, buildTableLegacyAnchorAliases(table)),
       ...(typeof table.captionBlock === "number"
-        ? { caption: makeSdtAnchor(`ps:table:${table.id}:caption`, `${table.caption || table.id} 题注`) }
+        ? {
+            caption: makeSdtAnchor(
+              `ps:table:${table.id}:caption`,
+              `${table.caption || table.id} 题注`,
+              buildTableCaptionLegacyAnchorAliases(table)
+            )
+          }
         : {})
     };
   }
@@ -464,10 +485,124 @@ function addTemplateInvisibleAnchors(blocks, sections, tables, figures) {
   for (const figure of figures) {
     figure.anchors = {
       ...(typeof figure.imageBlock === "number"
-        ? { image: makeSdtAnchor(`ps:figure:${figure.id}:image`, `${figure.caption || figure.id} 图片`) }
+        ? {
+            image: makeSdtAnchor(
+              `ps:figure:${figure.id}:image`,
+              `${figure.caption || figure.id} 图片`,
+              buildFigureImageLegacyAnchorAliases(figure)
+            )
+          }
         : {}),
-      caption: makeSdtAnchor(`ps:figure:${figure.id}:caption`, `${figure.caption || figure.id} 题注`)
+      caption: makeSdtAnchor(
+        `ps:figure:${figure.id}:caption`,
+        `${figure.caption || figure.id} 题注`,
+        buildFigureCaptionLegacyAnchorAliases(figure)
+      )
     };
+  }
+
+  for (const fieldBlock of fieldBlocks) {
+    fieldBlock.anchors = {
+      block: makeSdtAnchor(
+        `ps:field-block:${fieldBlock.id}`,
+        fieldBlock.id,
+        buildFieldBlockLegacyAnchorAliases(fieldBlock)
+      )
+    };
+  }
+
+  for (const textBlock of textBlocks) {
+    textBlock.anchors = {
+      block: makeSdtAnchor(
+        `ps:section:${textBlock.section}:text:${textBlock.order}`,
+        textBlock.id,
+        buildSectionTextBlockLegacyAnchorAliases(textBlock)
+      )
+    };
+  }
+}
+
+function buildSectionLegacyAnchorAliases(section) {
+  const sectionId = section.id || "";
+  const sectionIdUpper = sectionId.toUpperCase();
+  const sectionNumberToken = (section.number || "").replaceAll(".", "_");
+  return uniqueSorted([
+    `STD_${sectionId}`,
+    `STD_${sectionId}_BODY`,
+    `STD_${sectionIdUpper}`,
+    `STD_${sectionIdUpper}_BODY`,
+    sectionNumberToken ? `STD_${sectionNumberToken}` : "",
+    sectionNumberToken ? `STD_${sectionNumberToken}_BODY` : ""
+  ]).filter(Boolean);
+}
+
+function buildTableLegacyAnchorAliases(table) {
+  const tableId = table.id || "";
+  const tableIdUpper = tableId.toUpperCase();
+  return uniqueSorted([
+    `STD_${tableId}`,
+    `STD_${tableId}_TABLE`,
+    `STD_${tableIdUpper}`,
+    `STD_${tableIdUpper}_TABLE`,
+    `STD_TABLE_${tableId}`
+  ]).filter(Boolean);
+}
+
+function buildTableCaptionLegacyAnchorAliases(table) {
+  const tableId = table.id || "";
+  const tableIdUpper = tableId.toUpperCase();
+  return uniqueSorted([
+    `STD_${tableId}_CAPTION`,
+    `STD_${tableIdUpper}_CAPTION`,
+    `STD_TABLE_${tableId}_CAPTION`
+  ]).filter(Boolean);
+}
+
+function buildFigureImageLegacyAnchorAliases(figure) {
+  const figureId = figure.id || "";
+  const figureIdUpper = figureId.toUpperCase();
+  return uniqueSorted([
+    `STD_${figureId}`,
+    `STD_${figureId}_IMAGE`,
+    `STD_${figureIdUpper}`,
+    `STD_${figureIdUpper}_IMAGE`,
+    `STD_FIGURE_${figureId}_IMAGE`
+  ]).filter(Boolean);
+}
+
+function buildFigureCaptionLegacyAnchorAliases(figure) {
+  const figureId = figure.id || "";
+  const figureIdUpper = figureId.toUpperCase();
+  return uniqueSorted([
+    `STD_${figureId}_CAPTION`,
+    `STD_${figureIdUpper}_CAPTION`,
+    `STD_FIGURE_${figureId}_CAPTION`
+  ]).filter(Boolean);
+}
+
+function buildFieldBlockLegacyAnchorAliases(fieldBlock) {
+  const fieldBlockId = fieldBlock.id || "";
+  const fieldBlockIdUpper = fieldBlockId.toUpperCase();
+  return uniqueSorted([`STD_${fieldBlockId}`, `STD_${fieldBlockIdUpper}`]).filter(Boolean);
+}
+
+function buildSectionTextBlockLegacyAnchorAliases(textBlock) {
+  const sectionId = textBlock.section || "";
+  const upperSectionId = sectionId.toUpperCase();
+  const sectionNumberToken = (textBlock.sectionNumber || "").replaceAll(".", "_");
+  const order = textBlock.order;
+  return uniqueSorted([
+    `STD_${textBlock.id}`,
+    `STD_${textBlock.id.toUpperCase()}`,
+    sectionId ? `STD_${sectionId}_TEXT_${order}` : "",
+    sectionId ? `STD_${upperSectionId}_TEXT_${order}` : "",
+    sectionNumberToken ? `STD_${sectionNumberToken}_TEXT_${order}` : ""
+  ]).filter(Boolean);
+}
+
+function assignSectionDirectBodyRanges(sections, blocks) {
+  for (const section of sections) {
+    section.directBodyRange = getSectionDirectBodyRange(section, sections, blocks);
   }
 }
 
@@ -487,7 +622,7 @@ function getSectionDirectBodyRange(section, sections, blocks) {
   return [section.headingBlock + 1, Math.max(section.headingBlock, bodyEnd)];
 }
 
-function insertTemplateInvisibleAnchors(documentXml, blocks, sections, tables, figures) {
+function insertTemplateInvisibleAnchors(documentXml, blocks, sections, tables, figures, fieldBlocks, textBlocks) {
   const bodyOpen = documentXml.match(/<w:body\b[^>]*>/);
   const bodyEnd = documentXml.lastIndexOf("</w:body>");
   if (!bodyOpen || bodyOpen.index === undefined || bodyEnd < 0) return documentXml;
@@ -539,6 +674,21 @@ function insertTemplateInvisibleAnchors(documentXml, blocks, sections, tables, f
     const captionBlock = blocks[figure.captionBlock];
     if (captionBlock) {
       addWrapper(figure.anchors?.caption, captionBlock._start, captionBlock._end, "block");
+    }
+  }
+
+  for (const fieldBlock of fieldBlocks) {
+    const block = blocks[fieldBlock.block];
+    if (block?.type === "p") {
+      addWrapper(fieldBlock.anchors?.block, block._start, block._end, "block");
+    }
+  }
+
+  for (const textBlock of textBlocks) {
+    const startBlock = blocks[textBlock.blockRange?.[0]];
+    const endBlock = blocks[textBlock.blockRange?.[1]];
+    if (startBlock && endBlock) {
+      addWrapper(textBlock.anchors?.block, startBlock._start, endBlock._end, "block");
     }
   }
 
@@ -689,6 +839,17 @@ function cleanTemplateSdt(sdtXml) {
     );
   }
 
+  if (/^ps:section:sec_\d+(?:_\d+)*:text:\d+$/.test(tag)) {
+    return replaceSdtContent(
+      sdtXml,
+      buildTemplatePlaceholderParagraphFromXml(
+        extractSdtContent(sdtXml),
+        SECTION_BODY_PLACEHOLDER_TEXT,
+        buildDefaultTemplateBodyPlaceholderParagraph(SECTION_BODY_PLACEHOLDER_TEXT)
+      )
+    );
+  }
+
   return sdtXml;
 }
 
@@ -711,7 +872,10 @@ function cleanSectionBodyContent(contentXml) {
 
     if (candidate.tagName === "w:sdt") {
       const tag = getSingleAttrElement(element.xml, "w:tag", "w:val") ?? "";
-      if (/^ps:(?:table|figure):/.test(tag)) {
+      if (/^ps:section:sec_\d+(?:_\d+)*:text:\d+$/.test(tag)) {
+        preserved.push(cleanTemplateSdt(element.xml));
+        hasBodyPlaceholder = true;
+      } else if (/^ps:(?:table|figure|field-block):/.test(tag)) {
         preserved.push(cleanTemplateSdt(element.xml));
       }
     } else if (candidate.tagName === "w:tbl") {
@@ -853,10 +1017,11 @@ function isManagedBookmarkName(name) {
   return /^(ps_sec_|ps_table_|ps_fig_)/.test(name ?? "");
 }
 
-function makeSdtAnchor(tag, alias = tag) {
+function makeSdtAnchor(tag, alias = tag, aliases = []) {
   return {
     tag,
-    alias
+    alias,
+    ...(aliases.length ? { aliases: uniqueSorted(aliases.filter(Boolean)) } : {})
   };
 }
 
@@ -1048,6 +1213,87 @@ function buildFieldAnchors(blocks) {
   }
 
   return anchors;
+}
+
+function buildFieldBlocks(blocks) {
+  const fieldBlocks = [];
+
+  for (const block of blocks) {
+    if (block.type !== "p" || !block.text || !block.placeholders?.length) continue;
+    if (block.headingLevel || block.captionType || block.drawingCount) continue;
+
+    fieldBlocks.push({
+      id: `field_block_${block.section ?? "front"}_${block.index}`,
+      block: block.index,
+      text: block.text,
+      placeholders: block.placeholders,
+      ...(block.section ? { section: block.section } : {}),
+      ...(block.sectionNumber ? { sectionNumber: block.sectionNumber } : {})
+    });
+  }
+
+  return fieldBlocks;
+}
+
+function buildSectionTextBlocks(blocks, sections, tables, figures) {
+  const structuralBlocks = new Set();
+  for (const table of tables) {
+    structuralBlocks.add(table.block);
+    if (typeof table.captionBlock === "number") structuralBlocks.add(table.captionBlock);
+  }
+  for (const figure of figures) {
+    if (typeof figure.imageBlock === "number") structuralBlocks.add(figure.imageBlock);
+    structuralBlocks.add(figure.captionBlock);
+  }
+
+  const textBlocks = [];
+  for (const section of sections) {
+    const [rangeStart, rangeEnd] = section.directBodyRange ?? [section.headingBlock + 1, section.headingBlock];
+    let runStart = -1;
+    let runEnd = -1;
+    let order = 0;
+
+    const flushRun = () => {
+      if (runStart < 0 || runEnd < runStart) return;
+      order += 1;
+      const text = blocks
+        .slice(runStart, runEnd + 1)
+        .map((block) => block.text)
+        .filter(Boolean)
+        .join("\n");
+      textBlocks.push({
+        id: `${section.id}_text_${order}`,
+        section: section.id,
+        sectionNumber: section.number,
+        order,
+        blockRange: [runStart, runEnd],
+        ...(text ? { text } : {})
+      });
+      runStart = -1;
+      runEnd = -1;
+    };
+
+    for (let blockIndex = rangeStart; blockIndex <= rangeEnd; blockIndex += 1) {
+      const block = blocks[blockIndex];
+      if (!isSectionTextBlockCandidate(block, blockIndex, structuralBlocks)) {
+        flushRun();
+        continue;
+      }
+
+      if (runStart < 0) runStart = blockIndex;
+      runEnd = blockIndex;
+    }
+
+    flushRun();
+  }
+
+  return textBlocks;
+}
+
+function isSectionTextBlockCandidate(block, blockIndex, structuralBlocks) {
+  if (!block || block.type !== "p" || structuralBlocks.has(blockIndex)) return false;
+  if (block.headingLevel || block.captionType || block.drawingCount) return false;
+  return Boolean(block.text?.trim());
 }
 
 function extractFieldMarkers(text) {
