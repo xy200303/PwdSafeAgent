@@ -5,8 +5,8 @@ import process from "node:process";
 import PizZip from "pizzip";
 
 const ROOT = process.cwd();
-const DEFAULT_DOCX = join(ROOT, "docs", "密码应用方案.docx");
-const DEFAULT_OUTPUT = join(ROOT, "docs", "密码应用方案.template.json");
+const DEFAULT_DOCX = join(ROOT, "resources", "docs", "templates", "密码应用方案.docx");
+const DEFAULT_OUTPUT = join(ROOT, "resources", "docs", "templates", "密码应用方案.template.json");
 const SECTION_BODY_PLACEHOLDER_TEXT = "【正文占位】";
 const TABLE_CELL_PLACEHOLDER_TEXT = "【待填写】";
 const FIGURE_PLACEHOLDER_TEXT = "【图片占位】";
@@ -46,7 +46,7 @@ const templateJson = {
   schemaVersion: 1,
   templateId: "password-application-scheme-v1",
   source: {
-    docx: toProjectPath(docxPath),
+    docx: toRuntimeDocsPath(docxPath),
     generatedAt: new Date().toISOString(),
     documentSha256: createHash("sha256").update(content).digest("hex")
   },
@@ -58,7 +58,7 @@ const templateJson = {
       "Agent 根据 sections、tables、figures 的语义信息组织结构化内容，template.json 不作为 Word 重建模板。",
       "运行时只用 anchors 中的 Word Content Control / SDT tag 做机器定位，不依赖章节标题、编号或正文关键词搜索。",
       "章节正文替换只更新目标锚的 w:sdtContent，外层不可见锚保留，便于后续继续增量替换。",
-      "正文段落、表格行和图片槽位从 docs/密码应用方案.docx 的原始块克隆，样式、编号、缩进、边框和题注以 docx 为准。",
+      "正文段落、表格行和图片槽位从 docs/templates/密码应用方案.docx 的原始块克隆，样式、编号、缩进、边框和题注以 docx 为准。",
       "简单字段统一使用 docx-templates 的 {字段名} 短文本占位，不再保留 ${字段名} 和 [[PS:field:字段]] 兼容。",
       "表格和图片通过 ps:table:*、ps:figure:* 不可见锚定位；标题、编号、caption 和 recommendedLabel 只用于生成提示、匹配建议和异常校验。"
     ],
@@ -1760,4 +1760,9 @@ function uniqueSorted(values) {
 
 function toProjectPath(path) {
   return relative(ROOT, path).replaceAll("\\", "/");
+}
+
+function toRuntimeDocsPath(path) {
+  const projectPath = toProjectPath(path);
+  return projectPath.startsWith("resources/docs/") ? projectPath.replace(/^resources\/docs\//, "docs/") : projectPath;
 }

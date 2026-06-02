@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,9 +11,11 @@ import {
 describe("schemeProgress", () => {
   it("creates progress from template JSON and updates sections by number or anchor", () => {
     const docsDir = mkdtempSync(join(tmpdir(), "scheme-progress-"));
+    const templatesDir = join(docsDir, "templates");
     try {
+      mkdirSync(templatesDir, { recursive: true });
       writeFileSync(
-        join(docsDir, "密码应用方案.template.json"),
+        join(templatesDir, "密码应用方案.template.json"),
         JSON.stringify({
           sections: [
             { id: "sec_2", number: "2", title: "系统概述", headingLevel: 1, writingHint: "概述系统" },

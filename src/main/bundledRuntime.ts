@@ -28,13 +28,14 @@ export function getProcessResourcesDir(): string | undefined {
 export function resolveBundledResourceDir(
   rootDir: string,
   resourceName: string,
-  resourcesDir = getProcessResourcesDir()
+  resourcesDir = getProcessResourcesDir(),
+  projectRelativeFallback = resourceName
 ): string {
   const resourceCandidate = resourcesDir ? join(resourcesDir, resourceName) : "";
   if (resourceCandidate && existsSync(resourceCandidate)) {
     return resourceCandidate;
   }
-  return join(rootDir, resourceName);
+  return join(rootDir, projectRelativeFallback);
 }
 
 export function findBundledPythonRuntime(

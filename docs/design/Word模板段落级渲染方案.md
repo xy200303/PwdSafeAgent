@@ -13,11 +13,13 @@
 
 因此，本方案将定位和渲染分开：**定位靠不可见结构锚，格式靠原始 docx 模板，内容写入靠段落级/块级克隆渲染**。
 
+说明：源码仓库中的模板资源存放在 `resources/docs/templates/`；应用运行时仍通过逻辑路径 `docs/templates/...` 暴露给 Agent 和工具调用。
+
 ## 2. 核心目标
 
-1. `docs/密码应用方案.docx` 是唯一权威格式源。
+1. `resources/docs/templates/密码应用方案.docx`（运行时逻辑路径为 `docs/templates/密码应用方案.docx`）是唯一权威格式源。
 2. 生成后的 Word 在样式体系、段落格式、表格格式、标题编号、页眉页脚和整体版式上与原模板保持一致。
-3. `docs/密码应用方案.template.json` 只作为结构地图，不作为重建 Word 的模板本体。
+3. `resources/docs/templates/密码应用方案.template.json`（运行时逻辑路径为 `docs/templates/密码应用方案.template.json`）只作为结构地图，不作为重建 Word 的模板本体。
 4. 章节、表格、图片槽位通过不可见结构锚精确定位，不依赖标题编号搜索。
 5. 标题和编号只用于人工可读语义、模板校验和异常报告。
 6. 简单字段统一为 `{字段名}` 或内部字段 ID，不再保留 `${字段}`、`[[PS:field:字段]]` 兼容。

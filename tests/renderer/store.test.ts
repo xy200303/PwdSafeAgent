@@ -253,7 +253,7 @@ describe("renderer store", () => {
         toolName: "read_word",
         status: "success",
         summary: "已读取模板",
-        inputPreview: "{\"path\":\"docs/密码应用方案.docx\"}",
+        inputPreview: "{\"path\":\"docs/templates/密码应用方案.docx\"}",
         outputPreview: "模板正文摘要",
         createdAt: "2026-05-23T00:01:00.000Z"
       }
@@ -264,7 +264,7 @@ describe("renderer store", () => {
 
     expect(store.getState().chat.sessions[0]?.items[0]).toMatchObject({
       kind: "tool",
-      inputPreview: "{\"path\":\"docs/密码应用方案.docx\"}",
+      inputPreview: "{\"path\":\"docs/templates/密码应用方案.docx\"}",
       outputPreview: "模板正文摘要"
     });
   });

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { SchemeProgressItem, SchemeProgressSection, SchemeSectionStatus } from "../shared/types";
+import { getBuiltInTemplateJsonPath } from "./templatePaths";
 
 interface SchemeTemplateJson {
   sections?: unknown[];
@@ -38,7 +38,7 @@ export function createSchemeProgressItem(input: CreateSchemeProgressItemInput): 
 }
 
 export function loadSchemeTemplateSections(docsDir: string): SchemeProgressSection[] {
-  const templateJsonPath = join(docsDir, "密码应用方案.template.json");
+  const templateJsonPath = getBuiltInTemplateJsonPath(docsDir);
   if (!existsSync(templateJsonPath)) return [];
 
   const parsed = JSON.parse(readFileSync(templateJsonPath, "utf-8")) as SchemeTemplateJson;

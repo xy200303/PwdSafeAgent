@@ -5,6 +5,7 @@ import { createReport } from "docx-templates";
 import PizZip from "pizzip";
 import { compactText, getCurrentTimeText, sanitizeFileName } from "./agentTools";
 import { findMissingSchemeDiagrams, findMissingSchemeSections, REQUIRED_SCHEME_DIAGRAMS } from "./schemePlan";
+import { getBuiltInTemplateJsonPath, getProjectBundledDocsDir } from "./templatePaths";
 
 export interface SchemeDocumentInput {
   prompt: string;
@@ -399,9 +400,10 @@ export function buildSchemeTemplateData(input: SchemeDocumentInput): TemplateDat
 
 async function loadWordTemplateJson(templateJsonPath?: string): Promise<WordTemplateJson | undefined> {
   const candidatePaths = unique(
-    [templateJsonPath, join(process.cwd(), "docs", "密码应用方案.template.json")].filter((path): path is string =>
-      Boolean(path)
-    )
+    [
+      templateJsonPath,
+      getBuiltInTemplateJsonPath(getProjectBundledDocsDir(process.cwd()))
+    ].filter((path): path is string => Boolean(path))
   );
 
   for (const candidatePath of candidatePaths) {
@@ -1170,7 +1172,13 @@ function replaceDocumentSectionWithMarkdown(
   const insertStart = anchor.insertStartOffset ?? blocks[anchor.replacementStartIndex]?.start ?? anchor.target.end;
   const insertEnd = anchor.insertEndOffset ?? blocks[anchor.replacementEndIndex]?.start ?? bodyXml.length;
   const markdownBody = stripLeadingMatchingMarkdownHeading(compactedMarkdown, section, anchor.target.text);
-  const replacementXml = buildSectionReplacementXml(markdownBody, blocks, anchor.target, anchor.sdtBlock);
+  const replacementXml = buildSectionReplacementXml(
+    markdownBody,
+    blocks,
+    anchor.target,
+    anchor.sdtBlock,
+    anchor.templateSection
+  );
   const anchoredReplacementXml = anchor.sdtBlock ? replaceSdtContentXml(anchor.sdtBlock.xml, replacementXml) : replacementXml;
   const nextBodyXml = `${bodyXml.slice(0, insertStart)}${anchoredReplacementXml}${bodyXml.slice(insertEnd)}`;
   const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
@@ -1257,7 +1265,13 @@ function replaceDocumentSectionsWithMarkdown(
     const insertStart = anchor.insertStartOffset ?? blocks[anchor.replacementStartIndex]?.start ?? anchor.target.end;
     const insertEnd = anchor.insertEndOffset ?? blocks[anchor.replacementEndIndex]?.start ?? bodyXml.length;
     const markdownBody = stripLeadingMatchingMarkdownHeading(compactedMarkdown, item.section, anchor.target.text);
-    const replacementXml = buildSectionReplacementXml(markdownBody, blocks, anchor.target, anchor.sdtBlock);
+    const replacementXml = buildSectionReplacementXml(
+      markdownBody,
+      blocks,
+      anchor.target,
+      anchor.sdtBlock,
+      anchor.templateSection
+    );
     const anchoredReplacementXml = anchor.sdtBlock ? replaceSdtContentXml(anchor.sdtBlock.xml, replacementXml) : replacementXml;
     xmlReplacements.push({
       section: item.section,
@@ -1323,7 +1337,13 @@ function replaceSingleDocumentSectionWithMarkdown(
   const insertStart = anchor.insertStartOffset ?? blocks[anchor.replacementStartIndex]?.start ?? anchor.target.end;
   const insertEnd = anchor.insertEndOffset ?? blocks[anchor.replacementEndIndex]?.start ?? bodyXml.length;
   const markdownBody = stripLeadingMatchingMarkdownHeading(compactedMarkdown, section, anchor.target.text);
-  const replacementXml = buildSectionReplacementXml(markdownBody, blocks, anchor.target, anchor.sdtBlock);
+  const replacementXml = buildSectionReplacementXml(
+    markdownBody,
+    blocks,
+    anchor.target,
+    anchor.sdtBlock,
+    anchor.templateSection
+  );
   const anchoredReplacementXml = anchor.sdtBlock ? replaceSdtContentXml(anchor.sdtBlock.xml, replacementXml) : replacementXml;
   const nextBodyXml = `${bodyXml.slice(0, insertStart)}${anchoredReplacementXml}${bodyXml.slice(insertEnd)}`;
   const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
@@ -2166,8 +2186,15 @@ function buildSectionReplacementXml(
   markdown: string,
   blocks: WordBodyBlock[],
   target: WordBodyBlock,
-  sdtBlock?: WordBodyBlock
+  sdtBlock?: WordBodyBlock,
+  templateSection?: WordTemplateSection
 ): string {
+  const preservedStructuredSectionXml =
+    sdtBlock && templateSection ? buildStructuredSectionReplacementXml(markdown, sdtBlock, templateSection.id) : undefined;
+  if (preservedStructuredSectionXml !== undefined) {
+    return preservedStructuredSectionXml;
+  }
+
   const anchorBlocks = sdtBlock ? collectWordBodyBlocks(extractSdtContentXml(sdtBlock.xml), new Map()) : [];
   const headingStyleIds = collectHeadingStyleIds(blocks);
   const paragraphTemplate =
@@ -2211,6 +2238,83 @@ function buildSectionReplacementXml(
   }
 
   return paragraphs.join("");
+}
+
+function buildStructuredSectionReplacementXml(
+  markdown: string,
+  sdtBlock: WordBodyBlock,
+  sectionId: string
+): string | undefined {
+  const sectionContentXml = extractSdtContentXml(sdtBlock.xml);
+  if (!sectionContentXml.trim()) return undefined;
+
+  const sectionBlocks = collectWordBodyBlocks(sectionContentXml, new Map());
+  const textBlocks = sectionBlocks.filter((block) => isSectionTextBlockForSection(block, sectionId));
+  if (!textBlocks.length || !sectionBlocks.some((block) => isProtectedStructuredSectionBlock(block))) {
+    return undefined;
+  }
+
+  const markdownChunks = splitMarkdownAcrossSectionTextBlocks(markdown, textBlocks.length);
+  let nextContentXml = sectionContentXml;
+
+  for (let index = 0; index < textBlocks.length; index += 1) {
+    const textBlock = textBlocks[index];
+    const tag = textBlock.sdtTag;
+    if (!tag) continue;
+
+    const anchoredBlock = findSdtElementByTags(nextContentXml, [tag]);
+    if (!anchoredBlock) continue;
+
+    const replacementContentXml = buildContentControlReplacementContentXml(anchoredBlock.xml, markdownChunks[index] ?? "");
+    const replacementXml = replaceSdtContentXml(anchoredBlock.xml, replacementContentXml);
+    nextContentXml = `${nextContentXml.slice(0, anchoredBlock.start)}${replacementXml}${nextContentXml.slice(anchoredBlock.end)}`;
+  }
+
+  return nextContentXml;
+}
+
+function isSectionTextBlockForSection(block: WordBodyBlock, sectionId: string): boolean {
+  if (block.tagName !== "sdt" || !block.sdtTag) return false;
+  const normalizedTag = block.sdtTag.toLowerCase();
+  const normalizedSectionId = sectionId.toLowerCase();
+  return normalizedTag.startsWith(`ps:section:${normalizedSectionId}:text:`);
+}
+
+function isProtectedStructuredSectionBlock(block: WordBodyBlock): boolean {
+  if (block.tagName !== "sdt" || !block.sdtTag) return false;
+  const normalizedTag = block.sdtTag.toLowerCase();
+  return normalizedTag.startsWith("ps:table:") || normalizedTag.startsWith("ps:figure:");
+}
+
+function splitMarkdownAcrossSectionTextBlocks(markdown: string, blockCount: number): string[] {
+  const normalizedMarkdown = markdown.trim();
+  if (blockCount <= 1) return [normalizedMarkdown];
+  if (!normalizedMarkdown) return Array.from({ length: blockCount }, () => "");
+
+  const paragraphUnits = normalizedMarkdown
+    .split(/\n{2,}/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const lineUnits = normalizedMarkdown
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const units = paragraphUnits.length > 1 ? paragraphUnits : lineUnits.length ? lineUnits : [normalizedMarkdown];
+  const separator = paragraphUnits.length > 1 ? "\n\n" : "\n";
+  const chunks = Array.from({ length: blockCount }, () => "");
+  const baseSize = Math.floor(units.length / blockCount);
+  const remainder = units.length % blockCount;
+  let cursor = 0;
+
+  for (let index = 0; index < blockCount; index += 1) {
+    const chunkSize = baseSize + (index < remainder ? 1 : 0);
+    if (chunkSize <= 0) continue;
+    chunks[index] = units.slice(cursor, cursor + chunkSize).join(separator).trim();
+    cursor += chunkSize;
+  }
+
+  if (!chunks.some(Boolean)) chunks[0] = normalizedMarkdown;
+  return chunks;
 }
 
 function findBodyParagraphTemplate(
@@ -2549,9 +2653,14 @@ async function appendGeneratedDiagrams(
     }
 
     const media = await tryBuildDiagramMedia(zip, diagram, mediaIndex, nextDocPrId);
-    if (!media || !replaceTemplateFigureImage(zip, figure, media)) {
+    if (!media) {
       remainingDiagrams.push(diagram);
       continue;
+    }
+    if (!replaceTemplateFigureImage(zip, figure, media)) {
+      throw new Error(
+        `未找到模板图位锚点：${figure.id}（${figure.caption}）。这通常意味着章节正文替换时覆盖了嵌套的图片 Content Control。`
+      );
     }
 
     nextDocPrId += 1;
@@ -2620,8 +2729,8 @@ function replaceTemplateFigureImage(zip: PizZip, figure: WordTemplateFigure, med
 
   const blocks = collectWordBodyBlocks(bodyXml, buildStyleHeadingLevels(zip));
   const imageBlock = findSdtBlockByTags(blocks, getFigureImageAnchorTags(figure));
-  if (!imageBlock) return false;
   const imageXml = buildWordImageParagraph(media);
+  if (!imageBlock) return false;
   const insertStart = imageBlock.start;
   const insertEnd = imageBlock.end;
   const replacementXml = imageBlock.tagName === "sdt" ? replaceSdtContentXml(imageBlock.xml, imageXml) : imageXml;

@@ -6,7 +6,7 @@
 
 基于 `pi-agent + Electron + React + shadcn/ui + Redux Toolkit + electron-vite` 构建一个桌面客户端，用于生成专业的密码应用方案。系统应满足以下目标：
 
-1. 以 [密码应用方案.docx](./密码应用方案.docx) 为唯一权威模板，最终交付文档必须保持模板章节、样式、表格和排版结构。
+1. 以 [密码应用方案.docx](../../resources/docs/templates/密码应用方案.docx) 为唯一权威模板，最终交付文档必须保持模板章节、样式、表格和排版结构。
 2. 通过对话式交互持续采集项目资料，由模型按任务需要自主调用工具补全《密码应用方案》正文、表格、流程图和技术架构图。
 3. Agent 具备上下文记忆、工具调用、生成过程可视化、草稿迭代和文件交付能力。
 4. Electron 后端负责 Agent 运行、文档渲染、文件落盘和本地安全存储；React 前端负责会话流界面、过程回放和文件展示。
@@ -367,7 +367,7 @@ stateDiagram-v2
 4. 如果没有找到内置 Python，则保持系统 PATH 行为，继续使用用户本机已有的 Python。
 5. 设置页提供运行时自检入口，实际执行 `python --version` 和 `python -m pip --version`，用于确认随包运行时在当前用户电脑上可用。
 
-打包时通过 Electron Builder 的 `extraResources` 把 `runtime`、`docs` 和 `.env` 一起复制到安装包资源目录。`docs` 也作为打包资源处理，是为了保证 `docs/密码应用方案.docx` 在无源码目录的用户电脑上仍可被 `read_word` 和 `write_word` 使用；`.env` 用于提供默认模型配置。
+打包时通过 Electron Builder 的 `extraResources` 把 `runtime`、`resources/docs` 和 `.env` 一起复制到安装包资源目录。其中 `resources/docs` 在安装包内会落到 `docs` 目录，是为了保证 `docs/templates/密码应用方案.docx` 在无源码目录的用户电脑上仍可被 `read_word` 和 `write_word` 使用；`.env` 用于提供默认模型配置。
 
 ### 7.6 打包态数据目录
 
@@ -384,7 +384,7 @@ Windows 打包态需要避免写入安装目录，因此运行时路径分为两
 
 ### 8.1 现状判断
 
-对 `docs/密码应用方案.docx` 的结构检查表明，该模板是标准 Word `docx` 包结构，但占位符存在被多个 `w:r/w:t` 片段拆开的情况，例如 `${应用系统}` 在 XML 中可能被拆成多个文本 run。
+对 `docs/templates/密码应用方案.docx` 的结构检查表明，该模板是标准 Word `docx` 包结构，但占位符存在被多个 `w:r/w:t` 片段拆开的情况，例如 `${应用系统}` 在 XML 中可能被拆成多个文本 run。
 
 这意味着：
 
@@ -632,12 +632,12 @@ PwdSafeAgent/
 6. OpenAI Chat Completions 文档：<https://platform.openai.com/docs/api-reference/chat/create-chat-completion>
 7. OpenAI Text Generation / Chat Completions 指南：<https://platform.openai.com/docs/guides/text-generation/chat-completions-api>
 8. OpenAI Image Generation 指南：<https://platform.openai.com/docs/guides/image-generation?lang=javascript>
-9. 本项目模板：[密码应用方案.docx](./密码应用方案.docx)
-10. 本项目标准参考：[密码应用国家标准.md](./密码应用国家标准.md)
+9. 本项目模板：[密码应用方案.docx](../../resources/docs/templates/密码应用方案.docx)
+10. 本项目标准参考：[密码应用国家标准.md](../../resources/docs/references/密码应用国家标准.md)
 ## 当前实现基线（2026-05-23）
 
 - Electron 后端已接入本地工具层：`time`、`read_file`、`read_word`、`read_pdf`、`write_file`、`send_file`。
-- `read_word` 使用 `mammoth` 从 `.docx` 抽取正文；`docs/密码应用方案.docx` 会作为可读取资源暴露给 Agent，但不会在每轮对话开始时自动读取。
+- `read_word` 使用 `mammoth` 从 `.docx` 抽取正文；`docs/templates/密码应用方案.docx` 会作为可读取资源暴露给 Agent，但不会在每轮对话开始时自动读取。
 - `read_pdf` 使用 `pdf-parse` 抽取 PDF 文本；文本类附件支持 `.md`、`.txt`、`.json`、`.csv`、`.log`、`.yaml`、`.yml`。
 - 用户选择或粘贴的附件会作为可读取资源进入会话；只有当模型判断需要分析资料、生成方案或导出文件时，才调用 `read_word`、`read_pdf` 或 `read_file` 读取内容。
 - 仅上传附件的回合会在聊天流中显示附件名称，并作为用户消息进入模型上下文，但不会直接读取文件正文。

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,9 @@ import {
   type AppSettings,
   type SchemeProgressItem
 } from "../../src/shared/types";
+
+const BUILT_IN_TEMPLATE_DOCX_PATH = join(process.cwd(), "resources", "docs", "templates", "密码应用方案.docx");
+const BUILT_IN_TEMPLATE_JSON_PATH = join(process.cwd(), "resources", "docs", "templates", "密码应用方案.template.json");
 
 describe("agentToolRegistry", () => {
   it("defaults drafting to twenty parallel tasks and image generation to ten", () => {
@@ -150,7 +154,7 @@ describe("agentToolRegistry", () => {
 
   it("summarizes the built-in Word template JSON as section planning tasks", async () => {
     const result = await executeAgentToolCall(
-      createToolCall("read_file", { path: "docs/密码应用方案.template.json" }),
+      createToolCall("read_file", { path: "docs/templates/密码应用方案.template.json" }),
       createContext(process.cwd())
     );
 
@@ -167,6 +171,15 @@ describe("agentToolRegistry", () => {
     expect(result.content).toContain("固定模板块");
     expect(result.content).toContain("field_block_front_9");
     expect(result.content).not.toContain("\"schemaVersion\"");
+  });
+
+  it("does not support the legacy top-level template json path", async () => {
+    await expect(
+      executeAgentToolCall(
+        createToolCall("read_file", { path: "docs/密码应用方案.template.json" }),
+        createContext(process.cwd())
+      )
+    ).rejects.toThrow();
   });
 
   it("plans stable scheme section batches from the template json", async () => {
@@ -355,7 +368,7 @@ describe("agentToolRegistry", () => {
 
   it("drafts up to twenty sections in one batch", async () => {
     const template = JSON.parse(
-      await readFile(join(process.cwd(), "docs", "密码应用方案.template.json"), "utf-8")
+      await readFile(BUILT_IN_TEMPLATE_JSON_PATH, "utf-8")
     ) as { sections: Array<{ id: string }> };
     const sections = template.sections.slice(0, 21).map((section) => ({ section: section.id }));
 
@@ -602,7 +615,7 @@ describe("agentToolRegistry", () => {
       expect(result.toolName).toBe("create_word");
       expect(result.summary).toContain("已基于模板创建");
       expect(result.artifactPath).toBeTruthy();
-      expect(Buffer.from(await readFile(result.artifactPath!)).equals(Buffer.from(await readFile(join(process.cwd(), "docs", "密码应用方案.docx"))))).toBe(
+      expect(Buffer.from(await readFile(result.artifactPath!)).equals(Buffer.from(await readFile(BUILT_IN_TEMPLATE_DOCX_PATH)))).toBe(
         true
       );
     } finally {
@@ -750,9 +763,10 @@ function createToolCall(name: string, args: Record<string, unknown>): ChatComple
 }
 
 function createContext(dir: string): AgentToolExecutionContext {
+  const bundledDocsDir = join(dir, "resources", "docs");
   return {
     rootDir: dir,
-    docsDir: join(dir, "docs"),
+    docsDir: existsSync(bundledDocsDir) ? bundledDocsDir : join(dir, "docs"),
     outputDir: join(dir, "output"),
     sessionTitle: "统一身份认证系统",
     memory: "",

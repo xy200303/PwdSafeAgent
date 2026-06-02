@@ -29,6 +29,13 @@ import {
 } from "./schemeDocument";
 import type { SchemeProgressUpdateInput } from "./schemeProgress";
 import {
+  BUILT_IN_TEMPLATE_DOCX_RELATIVE_PATH,
+  BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH,
+  getBuiltInTemplateDocxPath,
+  getBuiltInTemplateJsonPath,
+  isBuiltInTemplateJsonPath
+} from "./templatePaths";
+import {
   DRAFT_SECTION_PARALLELISM_MAX,
   clampDraftSectionParallelism,
   clampImageGenerationParallelism
@@ -158,7 +165,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       function: {
         name: "read_file",
         description:
-          "读取 docs、data/input、data/output 范围内的文本文件内容；Word/PDF 优先使用 read_word/read_pdf。读取 docs/密码应用方案.template.json 时返回规范化的章节规划任务清单，而不是原始 JSON。",
+          `读取 docs、data/input、data/output 范围内的文本文件内容；Word/PDF 优先使用 read_word/read_pdf。读取 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 时返回规范化的章节规划任务清单，而不是原始 JSON。`,
         parameters: {
           type: "object",
           properties: {
@@ -235,7 +242,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       function: {
         name: "plan_scheme_batches",
         description: [
-          "根据 docs/密码应用方案.template.json 生成稳定的章节起草批次计划，不写 Word、不生成正文。",
+          `根据 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 生成稳定的章节起草批次计划，不写 Word、不生成正文。`,
           "正式生成整篇方案时，先调用本工具获得批次，再按返回的 first_draft_call 直接调用 draft_scheme_sections。这样避免模型每次只传 1 个章节。",
           "批次严格使用模板 JSON 中真实存在的 section id，并保持模板顺序；可通过 completed_sections 跳过已完成章节，通过 start_section 从指定章节继续。"
         ].join("\n"),
@@ -267,7 +274,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       function: {
         name: "plan_scheme_assets",
         description: [
-          "根据 docs/密码应用方案.template.json 规划某些章节关联的表格单元格和图片生成任务，不写 Word、不生成图片。",
+          `根据 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 规划某些章节关联的表格单元格和图片生成任务，不写 Word、不生成图片。`,
           "用于正文写入后补齐表格和图位：输入 section_ids 后，返回可填的 template_cells 坐标清单，以及需要调用 image_generate 的 figure_id/label/prompt。",
           "只使用模板 JSON 中真实存在的 sections/tables/figures；不要自行编造 table_id、figure_id、行列号。"
         ].join("\n"),
@@ -328,7 +335,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
         description: [
           "并行起草多个 Word 模板章节的正文草稿，但不写入 Word。",
           "用于加速正式方案生成：先按模板 JSON 顺序选取待生成小节调用本工具并行生成正文；再把返回草稿合并到 write_word.sections，按章节顺序批量写入同一个 docx。",
-          "sections[].section 必须来自 docs/密码应用方案.template.json 的真实 sections 条目，优先传 id，例如 sec_2_2_2；不要自行拆分或编造模板中不存在的 7.2、sec_7_2 等虚拟章节。",
+          `sections[].section 必须来自 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 的真实 sections 条目，优先传 id，例如 sec_2_2_2；不要自行拆分或编造模板中不存在的 7.2、sec_7_2 等虚拟章节。`,
           "每个章节会按 paragraph_tasks 生成 2-4 个连续段落；如果 plan_scheme_batches 返回了 paragraph_tasks，必须原样传入。",
           "本工具只生成正文段落和必要列表，不生成 Markdown 表格，不生成图片，不修改模板表格单元格；表格 template_cells 和配图 image_generate/diagrams 应在所有正文写入后由 Agent 统一处理。",
           "草稿必须贴合 section 的 writingHint、placeholders、relatedTables、relatedFigures 和已确认项目事实；资料不足处写待补充，不编造关键事实。"
@@ -339,7 +346,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             sections: {
               type: "array",
               description:
-                "要并行起草的模板章节，必须按 docs/密码应用方案.template.json 的 sections 顺序传入。建议每批数量与设置中的章节并行数接近。",
+                `要并行起草的模板章节，必须按 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 的 sections 顺序传入。建议每批数量与设置中的章节并行数接近。`,
               items: {
                 type: "object",
                 properties: {
@@ -386,7 +393,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       function: {
         name: "create_word",
         description:
-          "根据内置 docs/密码应用方案.docx 模板创建一个 Word 文件。默认直接复制模板，内容和格式与模板保持一致；可选 template_fields 替换 {字段名} 占位，content_controls 按 Word Content Control tag/STD_* 精确替换模板控件内容。",
+          `根据内置 ${BUILT_IN_TEMPLATE_DOCX_RELATIVE_PATH} 模板创建一个 Word 文件。默认直接复制模板，内容和格式与模板保持一致；可选 template_fields 替换 {字段名} 占位，content_controls 按 Word Content Control tag/STD_* 精确替换模板控件内容。`,
         parameters: {
           type: "object",
           properties: {
@@ -454,7 +461,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             template_cells: {
               type: "array",
               description:
-                "可选模板表格单元格替换。按 docs/密码应用方案.template.json 的 table_id 找到表格模板锚点，再按 0 基行列坐标精准替换单元格，保留单元格格式。",
+                `可选模板表格单元格替换。按 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 的 table_id 找到表格模板锚点，再按 0 基行列坐标精准替换单元格，保留单元格格式。`,
               items: {
                 type: "object",
                 properties: {
@@ -498,7 +505,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
         name: "write_word",
         description: [
           "增量写入 Word 文档，并登记为前端文件卡片。",
-          "标准流程：先读取 docs/密码应用方案.template.json 获取真实 sections、tables、figures 和 anchors；再调用 create_word 基于 docs/密码应用方案.docx 创建模板副本；随后把多个章节草稿放入 sections 批量写入。",
+          `标准流程：先读取 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 获取真实 sections、tables、figures 和 anchors；再调用 create_word 基于 ${BUILT_IN_TEMPLATE_DOCX_RELATIVE_PATH} 创建模板副本；随后把多个章节草稿放入 sections 批量写入。`,
           "正式生成优先使用 sections 批量写入多个已起草章节：一次打开 docx、替换多个不可见锚、一次保存，明显快于多次调用 write_word。",
           "正文可先由 draft_scheme_sections 并行起草，再把多个草稿合并到 sections 数组中按模板顺序一次性写入同一个 docx。",
           "表格 template_cells 和配图 diagrams 必须放在所有正文章节写入后统一补充：先调用 plan_scheme_assets 获取 table_id/row/column 和 figure_id，再写表格、生图并嵌入。",
@@ -522,7 +529,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             },
             section: {
               type: "string",
-              description: "要替换的章节，必须存在于 docs/密码应用方案.template.json 的 sections 中。推荐传 id，例如 sec_1_2_1；也可传已存在的编号，例如 7。不存在的 7.2/sec_7_2 会失败。"
+              description: `要替换的章节，必须存在于 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 的 sections 中。推荐传 id，例如 sec_1_2_1；也可传已存在的编号，例如 7。不存在的 7.2/sec_7_2 会失败。`
             },
             section_title: {
               type: "string",
@@ -584,7 +591,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             template_cells: {
               type: "array",
               description:
-                "可选模板表格单元格替换。按 docs/密码应用方案.template.json 的 table_id 找到表格模板锚点，再按 0 基行列坐标精准替换单元格，适合只更新模板表格中的个别单元格。",
+                `可选模板表格单元格替换。按 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 的 table_id 找到表格模板锚点，再按 0 基行列坐标精准替换单元格，适合只更新模板表格中的个别单元格。`,
               items: {
                 type: "object",
                 properties: {
@@ -1097,7 +1104,7 @@ interface SchemeTemplateTaskCell {
 }
 
 function isBuiltInTemplateJson(filePath: string, context: AgentToolExecutionContext): boolean {
-  return resolve(filePath).toLowerCase() === resolve(context.docsDir, "密码应用方案.template.json").toLowerCase();
+  return isBuiltInTemplateJsonPath(filePath, context.docsDir);
 }
 
 function buildSchemeTemplateTaskSummary(filePath: string, context: AgentToolExecutionContext): string {
@@ -1462,7 +1469,7 @@ function executePlanSchemeBatches(
   args: Record<string, unknown>,
   context: AgentToolExecutionContext
 ): AgentToolExecutionResult {
-  const templateJsonPath = join(context.docsDir, "密码应用方案.template.json");
+  const templateJsonPath = getBuiltInTemplateJsonPath(context.docsDir);
   const parsed = JSON.parse(readFileSync(templateJsonPath, "utf-8")) as SchemeTemplateTaskJson;
   const allSections = readTemplateTaskSections(parsed.sections);
   const startSection = readStringArg(args, "start_section");
@@ -1471,7 +1478,7 @@ function executePlanSchemeBatches(
     return {
       toolName: "plan_scheme_batches",
       summary: "起始章节不在模板中",
-      content: `plan_scheme_batches failed: unknown start_section ${startSection}; use an existing sections[].id from docs/密码应用方案.template.json`
+      content: `plan_scheme_batches failed: unknown start_section ${startSection}; use an existing sections[].id from ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH}`
     };
   }
 
@@ -1480,7 +1487,7 @@ function executePlanSchemeBatches(
     return {
       toolName: "plan_scheme_batches",
       summary: "跳过章节不在模板中",
-      content: `plan_scheme_batches failed: unknown completed_sections ${skippedPlan.unknown.join("、")}; use existing sections[].id values from docs/密码应用方案.template.json`
+      content: `plan_scheme_batches failed: unknown completed_sections ${skippedPlan.unknown.join("、")}; use existing sections[].id values from ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH}`
     };
   }
 
@@ -1611,7 +1618,7 @@ function executePlanSchemeAssets(
   args: Record<string, unknown>,
   context: AgentToolExecutionContext
 ): AgentToolExecutionResult {
-  const templateJsonPath = join(context.docsDir, "密码应用方案.template.json");
+  const templateJsonPath = getBuiltInTemplateJsonPath(context.docsDir);
   const parsed = JSON.parse(readFileSync(templateJsonPath, "utf-8")) as SchemeTemplateTaskJson;
   const sections = readTemplateTaskSections(parsed.sections);
   const tables = readTemplateTaskTables(parsed.tables);
@@ -1629,7 +1636,7 @@ function executePlanSchemeAssets(
     return {
       toolName: "plan_scheme_assets",
       summary: "章节不在模板中",
-      content: `plan_scheme_assets failed: unknown section_ids ${unknownSections.join("、")}; use existing sections[].id values from docs/密码应用方案.template.json`
+      content: `plan_scheme_assets failed: unknown section_ids ${unknownSections.join("、")}; use existing sections[].id values from ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH}`
     };
   }
 
@@ -1648,7 +1655,7 @@ function executePlanSchemeAssets(
     return {
       toolName: "plan_scheme_assets",
       summary: "表格不在模板中",
-      content: `plan_scheme_assets failed: unknown table_ids ${unknownTableIds.join("、")}; use existing tables[].id values from docs/密码应用方案.template.json`
+      content: `plan_scheme_assets failed: unknown table_ids ${unknownTableIds.join("、")}; use existing tables[].id values from ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH}`
     };
   }
 
@@ -1847,7 +1854,7 @@ async function executeDraftSchemeSections(
   const maxParallel = Number.isFinite(requestedParallel)
     ? clampDraftSectionParallelism(requestedParallel)
     : configuredParallel;
-  const parsedTemplate = JSON.parse(readFileSync(join(context.docsDir, "密码应用方案.template.json"), "utf-8")) as SchemeTemplateTaskJson;
+  const parsedTemplate = JSON.parse(readFileSync(getBuiltInTemplateJsonPath(context.docsDir), "utf-8")) as SchemeTemplateTaskJson;
   const templateSections = readTemplateTaskSections(parsedTemplate.sections);
   const sections = requestedSections
     .slice(0, DRAFT_SECTION_PARALLELISM_MAX)
@@ -1930,7 +1937,7 @@ function resolveDraftSchemeSection(
     throw new Error(
       matches.length
         ? `draft_scheme_sections failed: ambiguous template section ${input.section}; use the exact sections[].id`
-        : `draft_scheme_sections failed: unknown template section ${input.section}; use an existing sections[].id from docs/密码应用方案.template.json`
+        : `draft_scheme_sections failed: unknown template section ${input.section}; use an existing sections[].id from ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH}`
     );
   }
   const matched = matches[0];
@@ -2125,8 +2132,8 @@ async function executeCreateWord(
   const rawName = readStringArg(args, "name") || `${context.sessionTitle}-密码应用方案.docx`;
   const safeName = sanitizeFileName(rawName.endsWith(".docx") ? rawName : `${rawName}.docx`);
   const outputPath = join(context.outputDir, `${Date.now().toString(36)}-${safeName}`);
-  const templatePath = join(context.docsDir, "密码应用方案.docx");
-  const templateJsonPath = join(context.docsDir, "密码应用方案.template.json");
+  const templatePath = getBuiltInTemplateDocxPath(context.docsDir);
+  const templateJsonPath = getBuiltInTemplateJsonPath(context.docsDir);
   const result = await createWordDocxFromTemplate(templatePath, outputPath, {
     fields: readObjectArg(args, "fields"),
     templateFields: readTemplateFieldsArg(args),
@@ -2160,8 +2167,8 @@ async function executeWriteWord(
   const sectionBatch = readWordSectionBatchArg(args);
 
   const prompt = readStringArg(args, "prompt");
-  const templatePath = join(context.docsDir, "密码应用方案.docx");
-  const templateJsonPath = join(context.docsDir, "密码应用方案.template.json");
+  const templatePath = getBuiltInTemplateDocxPath(context.docsDir);
+  const templateJsonPath = getBuiltInTemplateJsonPath(context.docsDir);
   const diagrams = readDiagramAssetsArg(args, context);
   const section = readSectionArg(args);
   const fields = readObjectArg(args, "fields");

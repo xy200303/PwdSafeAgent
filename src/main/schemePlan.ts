@@ -1,3 +1,5 @@
+import { BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH } from "./templatePaths";
+
 export interface SchemeSectionRequirement {
   key: string;
   title: string;
@@ -87,8 +89,8 @@ export function renderSchemeChapterGuide(): string {
     ...REQUIRED_SCHEME_SECTIONS.map((section) => `- ${section.title}`),
     "常用图示清单（需要图片时先调用 image_generate 生成，再按需传给 write_word）：",
     ...REQUIRED_SCHEME_DIAGRAMS.map((diagram) => `- ${diagram.label}`),
-    "模板精确标注：docs/密码应用方案.template.json 包含不可见 SDT 锚、表格单元格、图片和题注锚点。",
-    "推荐节奏：整篇交付时先读取 docs/密码应用方案.template.json，再调用 plan_scheme_batches 生成批次，create_word 创建模板副本，随后按批次调用 draft_scheme_sections 并行起草正文，再按 sections 顺序合并到 write_word.sections 批量写入；不要一次性生成整篇长文。",
+    `模板精确标注：${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 包含不可见 SDT 锚、表格单元格、图片和题注锚点。`,
+    `推荐节奏：整篇交付时先读取 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH}，再调用 plan_scheme_batches 生成批次，create_word 创建模板副本，随后按批次调用 draft_scheme_sections 并行起草正文，再按 sections 顺序合并到 write_word.sections 批量写入；不要一次性生成整篇长文。`,
     "段落节奏：plan_scheme_batches 会给每节 paragraph_tasks，draft_scheme_sections 必须按这些任务输出多个连续自然段，并处理上一节/下一节过渡。",
     "表格和图示节奏：正文写完后调用 plan_scheme_assets，按 template_cells_plan 填表；如果返回 next_plan_scheme_assets_call，继续分批规划和写入直到没有后续；按 image_generate_plan 生图，并用 diagrams.figure_id 精确嵌入对应图片锚点。",
     "写作要求：每节只处理对应模板节的事实，资料不足处标注待补充，避免通用套话；表格和图示放到正文写完后统一生成和嵌入。"

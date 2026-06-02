@@ -839,7 +839,7 @@ export interface ReadWordResult {
 
 ### 11.9 `plan_scheme_batches`
 
-`plan_scheme_batches` 根据 `docs/密码应用方案.template.json` 规划稳定的章节起草批次，不生成正文、不写 Word。
+`plan_scheme_batches` 根据 `docs/templates/密码应用方案.template.json` 规划稳定的章节起草批次，不生成正文、不写 Word。
 
 ### Input
 
@@ -966,7 +966,7 @@ export interface DraftSchemeSectionsResult {
 
 行为规范：
 
-1. `sections[].section` 必须来自 `docs/密码应用方案.template.json`，推荐使用 section id。
+1. `sections[].section` 必须来自 `docs/templates/密码应用方案.template.json`，推荐使用 section id。
 2. 默认并行数由 `AGENT_DRAFT_SECTION_PARALLELISM` 控制，当前默认 `20`。
 3. 输出是可传给 `write_word.sections` 的正文草稿，不包含章节标题、Markdown 表格和图片。
 
@@ -1152,7 +1152,7 @@ await imageClient.images.generate({
 - `AGENT_EXEC_BASH_ENABLED` 已作为设置项暴露，当前默认启用；设置为 `false` 后 Agent 不再注册和执行 `exec_bash` 工具。
 - `AGENT_DRAFT_SECTION_PARALLELISM` 已作为设置项暴露，控制 `draft_scheme_sections` 默认并行起草章节数，默认值为 `20`；工具参数 `max_parallel` 仅覆盖单次调用。
 - `AGENT_IMAGE_GENERATION_PARALLELISM` 已作为设置项暴露，控制 `image_generate` 同时执行数量，默认值为 `10`。
-- `read_file docs/密码应用方案.template.json` 返回规范化“Word 模板规划任务清单”，不再把原始 JSON 直接塞给模型。
+- `read_file docs/templates/密码应用方案.template.json` 返回规范化“Word 模板规划任务清单”，不再把原始 JSON 直接塞给模型。
 - `plan_scheme_batches` 已作为整篇生成的显式规划工具：先规划真实章节批次，再调用 `draft_scheme_sections`，避免模型每次只传 1 个章节。
 - `plan_scheme_assets` 已作为表格/图示规划工具：正文写入后先规划 `template_cells` 和 `image_generate` 任务，再补齐表格和图片。
 - `write_word.sections` 的正文、表格和图片定位只使用 `template.json` 中的不可见 SDT 锚；图片可通过 `diagrams.figure_id` 精确写入，不再按标题、编号、题注或表格序号兜底写入。

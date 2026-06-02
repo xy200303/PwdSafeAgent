@@ -24,6 +24,7 @@ import {
 } from "./schemeProgress";
 import { renderSchemeChapterGuide } from "./schemePlan";
 import { loadPersistedState, savePersistedState, type PersistedStateSnapshot, type SessionMemoryEntry } from "./sessionPersistence";
+import { BUILT_IN_TEMPLATE_DOCX_RELATIVE_PATH, BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH } from "./templatePaths";
 import {
   IMAGE_GENERATION_REQUEST_TIMEOUT_DEFAULT_MS,
   clampDraftSectionParallelism,
@@ -558,9 +559,9 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
     "不要在第一轮或资料明显不足时直接生成 Word、PDF、图片或发送文件；此时应先总结已知信息、指出缺口，并继续澄清关键事实。",
     "每当用户补充了项目关键信息，优先调用 remember_project 沉淀已确认事实和待补充信息。项目档案应覆盖：应用系统、建设单位、单位省份、单位地址、邮编、等保级别、系统边界、业务场景、部署架构、应用子系统、关键数据、用户角色、密码产品、机房/云平台、外部接口和交付要求。",
     "只有当用户明确说“生成/导出/输出/形成方案/出 Word/PDF/画图”等交付意图，或项目档案已经标记为生成就绪时，才调用 create_word、write_word、write_pdf、image_generate、send_file 等交付工具。",
-    "Word 交付只使用 Word 模板和模板标注 JSON：先按 docs/密码应用方案.template.json 的章节写作提示组织内容，再用 Word 模板中的 Content Control tag/不可见 SDT 锚定位正文、表格和图片；旧 STD_* 标签可作为 anchors.*.alias/aliases 与真实 Content Control tag 对齐。",
-    "整篇交付必须按节推进：先 read_file 读取 docs/密码应用方案.template.json，再调用 plan_scheme_batches 生成稳定批次，然后 create_word 复制内置 Word 模板。正文生成必须按 plan_scheme_batches 返回的 first_draft_call/批次调用 draft_scheme_sections，一批尽量接近设置并行数，再把返回草稿按 JSON sections 顺序合并为 write_word.sections，一次批量写入同一个 path。section 优先传模板 JSON 的 id（如 sec_1_2_1），也可传章节编号和标题。不要把整篇方案合成一段长 Markdown 后一次性写入。",
-    "章节写入必须按 docs/密码应用方案.template.json 中 sections 数组顺序推进；除非用户明确要求局部更新，不要跳章、不要抽样式填充多个章节。",
+    `Word 交付只使用 Word 模板和模板标注 JSON：先按 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 的章节写作提示组织内容，再用 Word 模板中的 Content Control tag/不可见 SDT 锚定位正文、表格和图片；旧 STD_* 标签可作为 anchors.*.alias/aliases 与真实 Content Control tag 对齐。`,
+    `整篇交付必须按节推进：先 read_file 读取 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH}，再调用 plan_scheme_batches 生成稳定批次，然后 create_word 复制内置 Word 模板。正文生成必须按 plan_scheme_batches 返回的 first_draft_call/批次调用 draft_scheme_sections，一批尽量接近设置并行数，再把返回草稿按 JSON sections 顺序合并为 write_word.sections，一次批量写入同一个 path。section 优先传模板 JSON 的 id（如 sec_1_2_1），也可传章节编号和标题。不要把整篇方案合成一段长 Markdown 后一次性写入。`,
+    `章节写入必须按 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 中 sections 数组顺序推进；除非用户明确要求局部更新，不要跳章、不要抽样式填充多个章节。`,
     "draft_scheme_sections 只用于并行起草正文，不写 Word、不生成表格、不生成图片；正文草稿完成后优先用 write_word.sections 批量写入，避免反复打开和保存同一个 docx。",
     "draft_scheme_sections 应使用 plan_scheme_batches 返回的批次参数，一次传入同一批待生成章节，优先接近设置中的章节并行数；每个数组项只对应一个模板章节或小节，并原样使用返回的 paragraph_tasks、writingHint、placeholders、relatedTables、relatedFigures。",
     "每个章节正文必须按 paragraph_tasks 分成多个自然段，段落之间承接上一段，首段承接上一节，末段自然引出下一节；不要把一整节写成单段长文。",
@@ -619,8 +620,8 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
 function buildAvailableResourceContext(session: ChatSession): string {
   const lines = [
     "以下是本会话可按需读取的文件资源。注意：这些文件尚未读取；只有在用户任务需要时才调用 read_word/read_pdf/read_file。",
-    "Word 样式模板：docs/密码应用方案.docx",
-    "Word 模板标注 JSON：docs/密码应用方案.template.json（read_file 会返回规范化章节规划任务清单，不返回原始 JSON）"
+    `Word 样式模板：${BUILT_IN_TEMPLATE_DOCX_RELATIVE_PATH}`,
+    `Word 模板标注 JSON：${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH}（read_file 会返回规范化章节规划任务清单，不返回原始 JSON）`
   ];
   const sessionAttachments = getSessionAttachments(session.id);
   if (sessionAttachments.length) {

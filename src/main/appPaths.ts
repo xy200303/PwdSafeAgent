@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { resolveBundledResourceDir } from "./bundledRuntime";
+import { PROJECT_BUNDLED_DOCS_RELATIVE_PATH, RUNTIME_BUNDLED_DOCS_RELATIVE_PATH } from "./templatePaths";
 
 export interface AppPathOptions {
   projectRootDir: string;
@@ -30,7 +31,12 @@ export function resolveAppPaths(options: AppPathOptions): AppPaths {
   return {
     rootDir,
     projectRootDir: options.projectRootDir,
-    docsDir: resolveBundledResourceDir(options.projectRootDir, "docs", options.resourcesDir),
+    docsDir: resolveBundledResourceDir(
+      options.projectRootDir,
+      RUNTIME_BUNDLED_DOCS_RELATIVE_PATH,
+      options.resourcesDir,
+      PROJECT_BUNDLED_DOCS_RELATIVE_PATH
+    ),
     dataDir,
     inputDir: join(dataDir, "input"),
     outputDir: join(dataDir, "output"),

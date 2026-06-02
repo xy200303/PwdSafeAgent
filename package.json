@@ -38,7 +38,7 @@
         ]
       },
       {
-        "from": "docs",
+        "from": "resources/docs",
         "to": "docs",
         "filter": [
           "**/*"

@@ -18,6 +18,8 @@ import {
 
 const TEMPLATE_BODY_STYLE_ID = "30";
 const HEADING_OR_CAPTION_STYLE_PATTERN = /<w:pStyle\b[^>]*\bw:val="(?:2|3|4|12)"/;
+const BUILT_IN_TEMPLATE_DOCX_PATH = join(process.cwd(), "resources", "docs", "templates", "密码应用方案.docx");
+const BUILT_IN_TEMPLATE_JSON_PATH = join(process.cwd(), "resources", "docs", "templates", "密码应用方案.template.json");
 
 async function readDocumentXml(filePath: string): Promise<string> {
   const zip = new PizZip(await readFile(filePath, "binary"));
@@ -53,7 +55,7 @@ function expectTemplateBodyParagraphStyle(paragraphXml: string): void {
 describe("schemeDocument", () => {
   it("copies the official template byte-for-byte when creating a Word file without fields", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-create-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const outputPath = join(dir, "模板副本.docx");
 
     try {
@@ -71,7 +73,7 @@ describe("schemeDocument", () => {
 
   it("uses the template JSON to replace a precise table cell while preserving the template document", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-cell-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const outputPath = join(dir, "表格单元格替换.docx");
 
     try {
@@ -100,7 +102,7 @@ describe("schemeDocument", () => {
 
   it("keeps cleaned table cell formatting when replacing table placeholders", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-clean-cell-style-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const outputPath = join(dir, "清洁表格样式替换.docx");
 
     try {
@@ -136,7 +138,7 @@ describe("schemeDocument", () => {
 
   it("resolves STD content control tags through the template mapping while preserving the outer Word control", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-content-control-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const outputPath = join(dir, "控件局部替换.docx");
 
     try {
@@ -173,7 +175,7 @@ describe("schemeDocument", () => {
 
   it("resolves template field block ids through the template mapping for precise front-matter edits", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-field-block-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const outputPath = join(dir, "模板块局部替换.docx");
 
     try {
@@ -200,7 +202,7 @@ describe("schemeDocument", () => {
 
   it("updates a section text block without removing the section's nested figure anchors", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-text-block-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const outputPath = join(dir, "章节正文块局部替换.docx");
 
     try {
@@ -229,7 +231,7 @@ describe("schemeDocument", () => {
 
   it("replaces one template section while keeping the surrounding document", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-section-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "增量方案.docx");
 
     try {
@@ -257,7 +259,7 @@ describe("schemeDocument", () => {
 
   it("keeps child headings when replacing a parent template section", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-parent-section-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "父子章节增量方案.docx");
 
     try {
@@ -284,7 +286,7 @@ describe("schemeDocument", () => {
 
   it("uses the template body style when replacing an empty parent section anchor", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-parent-style-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "父章节正文样式.docx");
 
     try {
@@ -304,7 +306,7 @@ describe("schemeDocument", () => {
 
   it("keeps every generated list and normal paragraph in the template body style", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-list-style-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "列表正文样式.docx");
 
     try {
@@ -327,9 +329,67 @@ describe("schemeDocument", () => {
     }
   });
 
+  it("preserves nested table and figure anchors when rewriting a structured section body", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-structured-section-"));
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
+    const draftPath = join(dir, "结构化章节改写方案.docx");
+    const diagramPath = join(dir, "storage-flow.png");
+
+    try {
+      await writeFile(
+        diagramPath,
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+          "base64"
+        )
+      );
+
+      await createWordDocxFromTemplate(templatePath, draftPath);
+      await replaceWordSectionContent(draftPath, draftPath, {
+        section: "sec_5_4_9_4",
+        content: [
+          "本节说明重要数据存储场景下的保护对象、配套密码产品与密钥管理要求。",
+          "相关表格和流程图由后续 template_cells 与 diagrams 精确补齐。"
+        ].join("\n")
+      });
+
+      const result = await updateWordTemplateContent(draftPath, draftPath, {
+        templateCells: [
+          {
+            tableId: "table_30_5_4_9_4",
+            rowIndex: 1,
+            columnIndex: 1,
+            value: "重要日志数据"
+          }
+        ],
+        diagrams: [
+          {
+            label: "重要数据存储保护流程图",
+            kind: "flow",
+            path: diagramPath,
+            figureId: "fig_12_5_4_9_4"
+          }
+        ]
+      });
+
+      const documentXml = await readDocumentXml(draftPath);
+      const figureXml = findSdtXmlContaining(documentXml, "ps:figure:fig_12_5_4_9_4:image");
+
+      expect(result.templateCellReplacementCount).toBe(1);
+      expect(result.embeddedDiagrams).toEqual(["重要数据存储保护流程图"]);
+      expect(documentXml).toContain("重要日志数据");
+      expect(figureXml).toContain("<w:drawing>");
+      expect(figureXml).not.toContain("【图片占位】");
+      expect(documentXml).toContain("表 5-15 数据存储的保护对象");
+      expect(documentXml).toContain("图 510");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("does not preserve a previous bad heading style when rewriting a section anchor", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-bad-style-rewrite-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "错误样式重写.docx");
 
     try {
@@ -367,7 +427,7 @@ describe("schemeDocument", () => {
 
   it("keeps body style for every generated section in a batch replacement", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-batch-style-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "批量正文样式.docx");
 
     try {
@@ -400,7 +460,7 @@ describe("schemeDocument", () => {
 
   it("uses heading style only for markdown subheadings and body style for following text", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-heading-body-style-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "标题正文样式分离.docx");
 
     try {
@@ -422,7 +482,7 @@ describe("schemeDocument", () => {
 
   it("replaces multiple template sections in one docx pass", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-batch-section-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "批量章节增量方案.docx");
 
     try {
@@ -457,8 +517,8 @@ describe("schemeDocument", () => {
 
   it("uses invisible template anchors when JSON block indexes and titles drift", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-invisible-section-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
-    const builtInTemplateJsonPath = join(process.cwd(), "docs", "密码应用方案.template.json");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
+    const builtInTemplateJsonPath = BUILT_IN_TEMPLATE_JSON_PATH;
     const driftedTemplateJsonPath = join(dir, "drifted-template.json");
     const draftPath = join(dir, "锚点增量方案.docx");
 
@@ -493,7 +553,7 @@ describe("schemeDocument", () => {
 
   it("uses invisible template anchors even when Word heading text changes", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-heading-drift-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "标题漂移增量方案.docx");
 
     try {
@@ -521,7 +581,7 @@ describe("schemeDocument", () => {
 
   it("rejects section replacement when the invisible body anchor is missing", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-missing-anchor-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "锚点缺失方案.docx");
 
     try {
@@ -548,7 +608,7 @@ describe("schemeDocument", () => {
 
   it("does not update template table cells when the invisible table anchor is missing", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-missing-table-anchor-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "表格锚点缺失模板.docx");
     const outputPath = join(dir, "表格锚点缺失输出.docx");
 
@@ -584,7 +644,7 @@ describe("schemeDocument", () => {
 
   it("rejects sections that do not exist in the template JSON", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-missing-section-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "不存在章节.docx");
 
     try {
@@ -610,7 +670,7 @@ describe("schemeDocument", () => {
 
   it("splits numbered markdown and replaces only matching template sections", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-precise-section-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "精准增量方案.docx");
 
     try {
@@ -642,7 +702,7 @@ describe("schemeDocument", () => {
 
   it("renders markdown tables as real Word tables during section replacement", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-section-table-"));
-    const templatePath = join(process.cwd(), "docs", "密码应用方案.docx");
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const draftPath = join(dir, "表格增量方案.docx");
 
     try {
@@ -677,7 +737,7 @@ describe("schemeDocument", () => {
 
     try {
       const result = await writeSchemeDocxFromTemplate(
-        join(process.cwd(), "docs", "密码应用方案.docx"),
+        BUILT_IN_TEMPLATE_DOCX_PATH,
         outputPath,
         {
           prompt: "系统名称：智慧医疗大数据共享平台\n建设单位：示例卫健委",
@@ -784,7 +844,7 @@ describe("schemeDocument", () => {
 
     try {
       const result = await writeSchemeDocxFromTemplate(
-        join(process.cwd(), "docs", "密码应用方案.docx"),
+        BUILT_IN_TEMPLATE_DOCX_PATH,
         outputPath,
         {
           prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心\n单位省份：广东省",
@@ -832,7 +892,7 @@ describe("schemeDocument", () => {
       );
 
       const result = await writeSchemeDocxFromTemplate(
-        join(process.cwd(), "docs", "密码应用方案.docx"),
+        BUILT_IN_TEMPLATE_DOCX_PATH,
         outputPath,
         {
           prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心",
@@ -884,7 +944,7 @@ describe("schemeDocument", () => {
       );
 
       const result = await writeSchemeDocxFromTemplate(
-        join(process.cwd(), "docs", "密码应用方案.docx"),
+        BUILT_IN_TEMPLATE_DOCX_PATH,
         outputPath,
         {
           prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心",
@@ -915,6 +975,46 @@ describe("schemeDocument", () => {
     }
   });
 
+  it("throws when a template figure anchor is missing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-figure-missing-anchor-"));
+    const sourcePath = join(dir, "缺失图位模板.docx");
+    const outputPath = join(dir, "缺失图位输出.docx");
+    const diagramPath = join(dir, "storage-flow.png");
+
+    try {
+      await writeFile(
+        diagramPath,
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+          "base64"
+        )
+      );
+
+      const templateZip = new PizZip(await readFile(BUILT_IN_TEMPLATE_DOCX_PATH, "binary"));
+      const templateXml = templateZip.file("word/document.xml")?.asText() ?? "";
+      const imageAnchorPattern =
+        /<w:sdt><w:sdtPr>[\s\S]*?<w:tag w:val="ps:figure:fig_12_5_4_9_4:image"\/>[\s\S]*?<\/w:sdtPr><w:sdtContent>[\s\S]*?<\/w:sdtContent><\/w:sdt>/;
+      expect(templateXml).toMatch(imageAnchorPattern);
+      templateZip.file("word/document.xml", templateXml.replace(imageAnchorPattern, ""));
+      await writeFile(sourcePath, templateZip.generate({ type: "nodebuffer", compression: "DEFLATE" }));
+
+      await expect(
+        updateWordTemplateContent(sourcePath, outputPath, {
+          diagrams: [
+            {
+              label: "重要数据存储保护流程图",
+              kind: "flow",
+              path: diagramPath,
+              figureId: "fig_12_5_4_9_4"
+            }
+          ]
+        })
+      ).rejects.toThrow(/未找到模板图位锚点：fig_12_5_4_9_4/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("does not append unmatched diagrams when the template has figure anchors", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-unmatched-diagram-"));
     const outputPath = join(dir, "未匹配图位不追加.docx");
@@ -930,7 +1030,7 @@ describe("schemeDocument", () => {
       );
 
       const result = await writeSchemeDocxFromTemplate(
-        join(process.cwd(), "docs", "密码应用方案.docx"),
+        BUILT_IN_TEMPLATE_DOCX_PATH,
         outputPath,
         {
           prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心",
@@ -977,7 +1077,7 @@ describe("schemeDocument", () => {
       );
 
       const result = await writeSchemeDocxFromTemplate(
-        join(process.cwd(), "docs", "密码应用方案.docx"),
+        BUILT_IN_TEMPLATE_DOCX_PATH,
         outputPath,
         {
           prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心",
@@ -1018,7 +1118,7 @@ describe("schemeDocument", () => {
 
     try {
       const result = await writeSchemeDocxFromTemplate(
-        join(process.cwd(), "docs", "密码应用方案.docx"),
+        BUILT_IN_TEMPLATE_DOCX_PATH,
         outputPath,
         {
           prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心",

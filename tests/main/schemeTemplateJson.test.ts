@@ -3,6 +3,9 @@ import { join } from "node:path";
 import PizZip from "pizzip";
 import { describe, expect, it } from "vitest";
 
+const BUILT_IN_TEMPLATE_DOCX_PATH = join(process.cwd(), "resources", "docs", "templates", "密码应用方案.docx");
+const BUILT_IN_TEMPLATE_JSON_PATH = join(process.cwd(), "resources", "docs", "templates", "密码应用方案.template.json");
+
 interface TemplateCell {
   rowIndex: number;
   columnIndex: number;
@@ -141,9 +144,9 @@ interface TemplateJson {
 
 describe("scheme template json", () => {
   it("contains detailed invisible anchors parsed from the built-in Word template", async () => {
-    const template = JSON.parse(await readFile(join(process.cwd(), "docs", "密码应用方案.template.json"), "utf-8")) as TemplateJson;
+    const template = JSON.parse(await readFile(BUILT_IN_TEMPLATE_JSON_PATH, "utf-8")) as TemplateJson;
 
-    expect(template.source.docx).toBe("docs/密码应用方案.docx");
+    expect(template.source.docx).toBe("docs/templates/密码应用方案.docx");
     expect("contentTemplate" in template.source).toBe(false);
     expect(template.statistics.blockCount).toBeGreaterThan(500);
     expect(template.statistics.sectionCount).toBeGreaterThanOrEqual(150);
@@ -262,7 +265,7 @@ describe("scheme template json", () => {
   });
 
   it("keeps the built-in docx as a clean template without legacy body prose", async () => {
-    const docx = new PizZip(await readFile(join(process.cwd(), "docs", "密码应用方案.docx"), "binary"));
+    const docx = new PizZip(await readFile(BUILT_IN_TEMPLATE_DOCX_PATH, "binary"));
     const documentXml = docx.file("word/document.xml")?.asText() ?? "";
     const mediaFiles = Object.values(docx.files).filter((file) => file.name.startsWith("word/media/") && !file.dir);
 
