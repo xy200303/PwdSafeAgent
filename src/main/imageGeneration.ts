@@ -43,7 +43,7 @@ export function shouldGenerateDiagramArtifacts(prompt: string, content: string):
 }
 
 export function buildDiagramPrompt(input: DiagramGenerationInput): string {
-  const title = input.label || (input.kind === "architecture" ? "密码应用技术架构图" : "典型业务密码应用流程图");
+  const subject = input.label || (input.kind === "architecture" ? "密码应用技术架构图" : "典型业务密码应用流程图");
   const context = compactText(`${input.prompt}\n\n${input.generatedMarkdown}\n\n${input.memory}`, 9000);
   const focus =
     input.kind === "architecture"
@@ -51,10 +51,10 @@ export function buildDiagramPrompt(input: DiagramGenerationInput): string {
       : "展示业务发起、身份鉴别、电子签名/验签、数据加密存储、密钥调用、日志审计和异常处置的端到端流程。";
 
   return [
-    `生成一张用于正式密码应用方案文档的${title}。`,
+    `生成一张用于正式密码应用方案文档的${subject}，供外部 Word 文档单独添加图号和题注。`,
     "视觉风格：专业政务/企业安全方案插图，蓝灰色系，扁平矢量信息图，白底，线条清晰，中文标签清晰可读，不要照片质感。",
     `内容重点：${focus}`,
-    "输出要求：使用分区、箭头、编号和简洁中文标签；不要出现乱码、英文占位符、水印、品牌 Logo 或虚构产品厂商。",
+    "输出要求：使用分区、箭头、编号和简洁中文标签；图内只保留结构内容，不要单独绘制图标题、图号、题注；不要出现乱码、英文占位符、水印、品牌 Logo 或虚构产品厂商。",
     "如果资料不足，应优先依据已确认信息绘制通用结构，不要在最终图中出现“待补充”“需确认”“XXX”等占位标识。",
     "",
     "参考上下文：",
@@ -73,7 +73,7 @@ export async function generateDiagramImage(
 
   if (!config.apiKey) {
     const outputPath = join(input.outputDir, `${safeBaseName}.svg`);
-    await writeLocalSvgDiagram(outputPath, input.kind, diagramName, input);
+    await writeLocalSvgDiagram(outputPath, input.kind, input);
     return {
       outputPath,
       fileName: basename(outputPath),
@@ -149,21 +149,15 @@ async function writeImageResponse(outputPath: string, response: ImagesResponse):
 async function writeLocalSvgDiagram(
   outputPath: string,
   kind: DiagramKind,
-  title: string,
   input: DiagramGenerationInput
 ): Promise<void> {
-  const svg = createLocalSvgDiagram(kind, title, input);
+  const svg = createLocalSvgDiagram(kind, input);
   await mkdir(dirname(outputPath), { recursive: true });
   await writeFile(outputPath, svg, "utf-8");
 }
 
-function createLocalSvgDiagram(kind: DiagramKind, title: string, input: DiagramGenerationInput): string {
+function createLocalSvgDiagram(kind: DiagramKind, input: DiagramGenerationInput): string {
   const appName = pickFact(input.prompt, ["系统名称", "项目名称", "应用系统"]) || input.sessionTitle || "应用系统";
-  const orgName = pickFact(input.prompt, ["建设单位", "单位名称"]) || "建设单位";
-  const subtitle =
-    kind === "architecture"
-      ? "本地演示图：配置 OPENAI_IMAGE_API_KEY 或 OPENAI_API_KEY 后将使用 gpt-image-2 生成正式图像"
-      : "本地演示图：配置 OPENAI_IMAGE_API_KEY 或 OPENAI_API_KEY 后将使用 gpt-image-2 生成正式流程图";
   const nodes =
     kind === "architecture"
       ? [
@@ -226,13 +220,12 @@ function createLocalSvgDiagram(kind: DiagramKind, title: string, input: DiagramG
   </defs>
   <rect width="1280" height="720" fill="url(#bg)"/>
   <rect x="48" y="48" width="1184" height="624" rx="28" fill="#ffffff" stroke="#c8d8e6"/>
-  <text x="80" y="105" font-size="30" font-weight="700" fill="#0d2b45">${escapeXml(title)}</text>
-  <text x="80" y="140" font-size="16" fill="#5e7184">${escapeXml(orgName)} · ${escapeXml(appName)} · ${escapeXml(
-    subtitle
-  )}</text>
+  <rect x="80" y="78" width="228" height="34" rx="17" fill="#eef5fb" stroke="#c8d8e6"/>
+  <text x="194" y="101" text-anchor="middle" font-size="16" fill="#30546f">${escapeXml(appName)}</text>
+  <rect x="1080" y="78" width="120" height="34" rx="17" fill="#eef5fb" stroke="#c8d8e6"/>
+  <text x="1140" y="101" text-anchor="middle" font-size="15" fill="#30546f">本地演示图</text>
   ${arrowMarkup}
   ${nodeMarkup}
-  <text x="80" y="625" font-size="15" fill="#6b7f91">说明：本图为离线占位示意图，可在配置模型后由 image_generate 工具重新生成专业图像。</text>
 </svg>`;
 }
 

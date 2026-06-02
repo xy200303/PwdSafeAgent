@@ -273,6 +273,8 @@ describe("scheme template json", () => {
     expect(documentXml).toContain('w:val="ps:table:table_3_2_1"');
     expect(documentXml).toContain('w:val="ps:field-block:field_block_front_9"');
     expect(documentXml).toContain('w:val="ps:section:sec_2_2_2:text:1"');
+    expect(documentXml.match(/<w:sectPr\b/g)?.length ?? 0).toBeGreaterThanOrEqual(6);
+    expect(documentXml.match(/w:orient="landscape"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
     expect(documentXml).toContain("【图片占位】");
     expect(documentXml).not.toContain("密码是保障网络与信息安全的核心技术和基础支撑");
     expect(documentXml).not.toContain("网络运营者开展经营和服务活动");

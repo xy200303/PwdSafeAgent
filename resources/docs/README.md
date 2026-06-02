@@ -19,4 +19,3 @@
 
 - Word 模板：`docs/templates/密码应用方案.docx`
 - 模板标注 JSON：`docs/templates/密码应用方案.template.json`
-- 模板说明稿：`docs/templates/密码应用方案.md`

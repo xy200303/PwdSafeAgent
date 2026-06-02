@@ -636,7 +636,18 @@ export async function writeSchemeDocxFromTemplate(
   let appendedMarkdown = false;
   let templateAnchorsUsed: string[] = [];
   if (renderMode === "full_document") {
-    appendedMarkdown = replaceDocumentBodyWithGeneratedMarkdown(renderedZip, input.generatedMarkdown, facts);
+    if (shouldPreserveTemplateAnchorsForFullDocument(input, templateJson)) {
+      const replacement = replaceMarkdownDocumentSections(renderedZip, input.generatedMarkdown, templateJson);
+      appendedMarkdown = replacement.replacementCount > 0;
+      templateAnchorsUsed = replacement.templateAnchorIds;
+      if (!appendedMarkdown) {
+        throw new Error(
+          "render_mode=full_document 在当前写入中需要保留模板图位或表格锚点，但 Markdown 未匹配到模板章节。请改用带编号的章节正文，或直接使用 sections/template_sections 写入。"
+        );
+      }
+    } else {
+      appendedMarkdown = replaceDocumentBodyWithGeneratedMarkdown(renderedZip, input.generatedMarkdown, facts);
+    }
   } else if (renderMode === "template_sections") {
     const replacement = replaceMarkdownDocumentSections(renderedZip, input.generatedMarkdown, templateJson);
     appendedMarkdown = replacement.replacementCount > 0;
@@ -669,6 +680,14 @@ export async function writeSchemeDocxFromTemplate(
     renderMode,
     templateAnchorsUsed
   };
+}
+
+function shouldPreserveTemplateAnchorsForFullDocument(
+  input: Pick<SchemeDocumentInput, "diagrams" | "templateCells">,
+  templateJson?: WordTemplateJson
+): boolean {
+  if (!templateJson?.sections?.length) return false;
+  return Boolean((input.diagrams?.length ?? 0) || (input.templateCells?.length ?? 0));
 }
 
 export function validateSchemeDraftCompleteness(

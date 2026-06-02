@@ -779,6 +779,66 @@ describe("schemeDocument", () => {
     }
   });
 
+  it("preserves template figure anchors when full_document also embeds diagrams", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-full-document-diagrams-"));
+    const outputPath = join(dir, "整篇正文保留图位方案.docx");
+    const architecturePath = join(dir, "network-architecture.png");
+    const topologyPath = join(dir, "network-topology.png");
+
+    try {
+      for (const diagramPath of [architecturePath, topologyPath]) {
+        await writeFile(
+          diagramPath,
+          Buffer.from(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "base64"
+          )
+        );
+      }
+
+      const result = await writeSchemeDocxFromTemplate(BUILT_IN_TEMPLATE_DOCX_PATH, outputPath, {
+        prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心\n单位省份：广东省",
+        memory: "",
+        generatedMarkdown: [
+          "# 统一身份认证系统密码应用方案",
+          "## 2. 系统概述",
+          "### 2.2. 计算平台现状",
+          "系统采用 B/S 架构，部署在核心机房，包含应用服务器、数据库和日志审计组件。",
+          "### 2.2.2. 网络环境",
+          "网络划分为安全接入区、交换区、服务器区和安全运维区。",
+          "图：网络架构图",
+          "图：网络拓扑图"
+        ].join("\n\n"),
+        diagrams: [
+          {
+            label: "网络架构图",
+            kind: "architecture",
+            path: architecturePath
+          },
+          {
+            label: "网络拓扑图",
+            kind: "architecture",
+            path: topologyPath
+          }
+        ],
+        renderMode: "full_document"
+      });
+      const documentXml = await readDocumentXml(outputPath);
+      const figureOneXml = findSdtXmlContaining(documentXml, "ps:figure:fig_1_2_2_2_1:image");
+      const figureTwoXml = findSdtXmlContaining(documentXml, "ps:figure:fig_2_2_2_2_2:image");
+
+      expect(result.renderMode).toBe("full_document");
+      expect(result.templateAnchorsUsed).toContain("sec_2_2_2");
+      expect(result.embeddedDiagrams).toEqual(["网络架构图", "网络拓扑图"]);
+      expect(figureOneXml).toContain("<w:drawing>");
+      expect(figureTwoXml).toContain("<w:drawing>");
+      expect(figureOneXml).not.toContain("【图片占位】");
+      expect(figureTwoXml).not.toContain("【图片占位】");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("builds template data from prompt and generated content", () => {
     const data = buildSchemeTemplateData({
       prompt: "系统名称：统一身份认证系统\n建设单位：示例政务服务中心\n单位省份：广东省\n等保级别：三级",

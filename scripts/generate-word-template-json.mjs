@@ -862,7 +862,8 @@ function cleanSectionBodyContent(contentXml) {
     const candidates = [
       { tagName: "w:sdt", start: findNextElementStart(contentXml, "w:sdt", cursor) },
       { tagName: "w:tbl", start: findNextElementStart(contentXml, "w:tbl", cursor) },
-      { tagName: "w:p", start: findNextElementStart(contentXml, "w:p", cursor) }
+      { tagName: "w:p", start: findNextElementStart(contentXml, "w:p", cursor) },
+      { tagName: "w:sectPr", start: findNextElementStart(contentXml, "w:sectPr", cursor) }
     ].filter((candidate) => candidate.start >= 0);
 
     if (!candidates.length) break;
@@ -880,6 +881,10 @@ function cleanSectionBodyContent(contentXml) {
       }
     } else if (candidate.tagName === "w:tbl") {
       preserved.push(cleanTemplateTableXml(element.xml));
+    } else if (candidate.tagName === "w:sectPr") {
+      preserved.push(element.xml);
+    } else if (hasSectionProperties(element.xml)) {
+      preserved.push(buildTemplateSectionBreakParagraph(element.xml));
     } else if (isStructuralTemplateParagraph(element.xml)) {
       preserved.push(element.xml);
     } else if (!hasBodyPlaceholder) {
@@ -899,6 +904,17 @@ function cleanSectionBodyContent(contentXml) {
 function isStructuralTemplateParagraph(paragraphXml) {
   const text = extractText(paragraphXml).replace(/\s+/g, "");
   return Boolean(text && (/^[表图]\d/.test(text) || isFigurePlaceholderText(text)));
+}
+
+function hasSectionProperties(xml) {
+  return /<w:sectPr\b/.test(xml);
+}
+
+function buildTemplateSectionBreakParagraph(paragraphXml) {
+  let openTag = paragraphXml.match(/^<w:p\b[^>]*>/)?.[0] ?? "<w:p>";
+  if (openTag.endsWith("/>")) openTag = `${openTag.slice(0, -2)}>`;
+  const paragraphProperties = paragraphXml.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/)?.[0] ?? "";
+  return `${openTag}${paragraphProperties}</w:p>`;
 }
 
 function cleanTemplateDrawingParagraphs(documentXml) {
@@ -1293,6 +1309,7 @@ function buildSectionTextBlocks(blocks, sections, tables, figures) {
 function isSectionTextBlockCandidate(block, blockIndex, structuralBlocks) {
   if (!block || block.type !== "p" || structuralBlocks.has(blockIndex)) return false;
   if (block.headingLevel || block.captionType || block.drawingCount) return false;
+  if (hasSectionProperties(block._xml ?? "")) return false;
   return Boolean(block.text?.trim());
 }
 

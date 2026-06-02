@@ -28,7 +28,9 @@ import {
   type TemplateCellReplacementInput
 } from "./schemeDocument";
 import type { SchemeProgressUpdateInput } from "./schemeProgress";
+import { buildSchemeStandardReferenceContext } from "./schemeReference";
 import {
+  BUILT_IN_STANDARD_REFERENCE_RELATIVE_PATH,
   BUILT_IN_TEMPLATE_DOCX_RELATIVE_PATH,
   BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH,
   getBuiltInTemplateDocxPath,
@@ -514,7 +516,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
           "兼容模式：不传 section 时可用 template_sections 按 Markdown 编号拆分章节，但正式交付不推荐一次性写入整篇长文。",
           "传入 section 时，section 必须精确匹配 template.json 中已存在的章节 id 或 number，推荐传 id，例如 sec_7；不要传模板中不存在的 7.2、sec_7_2 等虚拟章节。",
           "Word 内部定位优先使用该章节 anchors.body.tag/alias 对应的 Content Control tag（不可见 SDT 锚），也兼容常见 STD_* tag 命名；只替换 w:sdtContent，保留模板其他章节、页眉页脚、样式和编号。",
-          "Markdown 表格会渲染为真实 Word 表格；可用 render_mode=full_document 强制重建正文，或 append 追加到文末。"
+          "Markdown 表格会渲染为真实 Word 表格；可用 render_mode=full_document 优先重建正文，但如果同时需要保留模板图位或表格锚点且 Markdown 能匹配模板章节，会先按模板章节写入以保留锚点；append 追加到文末。"
         ].join("\n"),
         parameters: {
           type: "object",
@@ -687,7 +689,8 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             render_mode: {
               type: "string",
               enum: ["template_sections", "append", "full_document"],
-              description: "兼容模式下不传 section/sections 时使用。默认 template_sections：按 Markdown 编号替换 Word 模板；append 表示追加正文，full_document 表示用正文替换文档主体。正式方案优先传 sections 批量写入。"
+              description:
+                "兼容模式下不传 section/sections 时使用。默认 template_sections：按 Markdown 编号替换 Word 模板；append 表示追加正文；full_document 优先用正文重建文档主体，但若同时需要保留模板图位或表格锚点且 Markdown 可匹配模板章节，则会先按模板章节写入。正式方案优先传 sections 批量写入。"
             }
           },
           required: [],
@@ -700,7 +703,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       function: {
         name: "image_generate",
         description:
-          "生成密码应用技术架构图或业务流程图，并登记为前端文件卡片。需要多张配图时可以并行调用多个 image_generate；实际并发数受设置中的生图并行数限制。仅当用户明确要求生成方案交付物、架构图、流程图、拓扑图或配图时使用；寒暄、答疑、资料澄清阶段不要调用。",
+          "生成密码应用技术架构图或业务流程图，并登记为前端文件卡片。需要多张配图时可以并行调用多个 image_generate；实际并发数受设置中的生图并行数限制。生成的图片应只包含图形内容和必要节点标签，不要在图内单独绘制图号、题注或标题。仅当用户明确要求生成方案交付物、架构图、流程图、拓扑图或配图时使用；寒暄、答疑、资料澄清阶段不要调用。",
         parameters: {
           type: "object",
           properties: {
@@ -715,7 +718,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             },
             prompt: {
               type: "string",
-              description: "图片生成说明，应包含系统名称、设备、流程和中文标签要求。"
+              description: "图片生成说明，应包含系统名称、设备、流程和中文标签要求；不要要求在图内单独绘制图号、题注或标题。"
             }
           },
           required: ["kind", "prompt"],
@@ -1789,10 +1792,10 @@ function buildImageGeneratePlan(figure: SchemeTemplateTaskFigure): Record<string
     label,
     kind,
     prompt: [
-      `生成《密码应用方案》图示：${label}。`,
-      figure.caption ? `模板题注：${figure.caption}。` : "",
+      `生成《密码应用方案》图示，主题：${label}。`,
+      figure.caption ? `模板题注仅供匹配参考：${figure.caption}。` : "",
       figure.sectionNumber ? `所属章节：${figure.sectionNumber}。` : "",
-      "要求：白底、中文标签清晰、流程方向明确，节点包含应用系统、密码服务/密码设备、数据库或存储、密钥管理/证书/算法调用等关键元素；不要使用模糊装饰图。"
+      "要求：白底、中文标签清晰、流程方向明确，节点包含应用系统、密码服务/密码设备、数据库或存储、密钥管理/证书/算法调用等关键元素；图内不要单独放图号、题注或标题，外部文档会提供题注；不要使用模糊装饰图。"
     ]
       .filter(Boolean)
       .join("")
@@ -2000,6 +2003,12 @@ function buildDraftSchemeSectionMessages(
   projectContext: string
 ): ChatCompletionMessageParam[] {
   const facts = compactText([context.userPrompt, projectContext, context.memory].filter(Boolean).join("\n\n"), 12000);
+  const standardReference = buildSchemeStandardReferenceContext(context.docsDir, {
+    sectionNumber: section.number,
+    sectionTitle: section.title,
+    paragraphTasks: section.paragraphTasks,
+    projectContext: facts
+  });
   return [
     {
       role: "system",
@@ -2028,7 +2037,9 @@ function buildDraftSchemeSectionMessages(
         section.relatedFigures?.length ? `关联图示：${section.relatedFigures.join("、")}（最后统一生成，此处不生成图片）` : "",
         "",
         "项目事实和上下文：",
-        facts || "暂无明确项目事实。"
+        facts || "暂无明确项目事实。",
+        "",
+        standardReference ? standardReference : `标准参考路径：${BUILT_IN_STANDARD_REFERENCE_RELATIVE_PATH}`
       ]
         .filter(Boolean)
         .join("\n")

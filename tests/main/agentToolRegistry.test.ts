@@ -284,6 +284,8 @@ describe("agentToolRegistry", () => {
     expect(result.content).toContain("\"figure_id\": \"fig_12_5_4_9_4\"");
     expect(result.content).toContain("\"label\": \"重要数据存储保护流程图\"");
     expect(result.content).toContain("write_word_diagrams_plan");
+    expect(result.content).toContain("模板题注仅供匹配参考");
+    expect(result.content).toContain("图内不要单独放图号、题注或标题");
   });
 
   it("paginates full template table cell planning to avoid truncating later tables", async () => {

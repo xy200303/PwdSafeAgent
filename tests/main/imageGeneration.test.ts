@@ -26,6 +26,8 @@ describe("imageGeneration", () => {
     expect(prompt).toContain("统一身份认证系统");
     expect(prompt).toContain("服务器密码机");
     expect(prompt).toContain("中文标签清晰可读");
+    expect(prompt).toContain("供外部 Word 文档单独添加图号和题注");
+    expect(prompt).toContain("不要单独绘制图标题、图号、题注");
   });
 
   it("writes a local svg placeholder when OpenAI image API key is not configured", async () => {
@@ -57,8 +59,9 @@ describe("imageGeneration", () => {
       expect(result.mode).toBe("local-svg");
       expect(result.fileName).toContain(".svg");
       expect(fileStat.size).toBeGreaterThan(100);
-      expect(content).toContain("典型业务密码应用流程图");
       expect(content).toContain("统一身份认证系统");
+      expect(content).toContain("本地演示图");
+      expect(content).not.toContain("典型业务密码应用流程图");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

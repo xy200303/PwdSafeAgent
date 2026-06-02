@@ -9,11 +9,12 @@ export const BUILT_IN_REFERENCES_DIRNAME = "references";
 
 export const BUILT_IN_TEMPLATE_DOCX_BASENAME = "密码应用方案.docx";
 export const BUILT_IN_TEMPLATE_JSON_BASENAME = "密码应用方案.template.json";
-export const BUILT_IN_TEMPLATE_MARKDOWN_BASENAME = "密码应用方案.md";
+export const BUILT_IN_STANDARD_REFERENCE_BASENAME = "密码应用国家标准.md";
 
 export const BUILT_IN_TEMPLATE_DOCX_RELATIVE_PATH = `docs/${BUILT_IN_TEMPLATE_DIRNAME}/${BUILT_IN_TEMPLATE_DOCX_BASENAME}`;
 export const BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH = `docs/${BUILT_IN_TEMPLATE_DIRNAME}/${BUILT_IN_TEMPLATE_JSON_BASENAME}`;
-export const BUILT_IN_TEMPLATE_MARKDOWN_RELATIVE_PATH = `docs/${BUILT_IN_TEMPLATE_DIRNAME}/${BUILT_IN_TEMPLATE_MARKDOWN_BASENAME}`;
+export const BUILT_IN_STANDARD_REFERENCE_RELATIVE_PATH =
+  `docs/${BUILT_IN_REFERENCES_DIRNAME}/${BUILT_IN_STANDARD_REFERENCE_BASENAME}`;
 
 export function getProjectBundledDocsDir(rootDir: string): string {
   return join(rootDir, "resources", "docs");
@@ -31,8 +32,8 @@ export function getBuiltInTemplateJsonPath(docsDir: string): string {
   return getBuiltInTemplateAssetPath(docsDir, BUILT_IN_TEMPLATE_JSON_BASENAME);
 }
 
-export function getBuiltInTemplateMarkdownPath(docsDir: string): string {
-  return getBuiltInTemplateAssetPath(docsDir, BUILT_IN_TEMPLATE_MARKDOWN_BASENAME);
+export function getBuiltInStandardReferencePath(docsDir: string): string {
+  return join(docsDir, BUILT_IN_REFERENCES_DIRNAME, BUILT_IN_STANDARD_REFERENCE_BASENAME);
 }
 
 export function isBuiltInTemplateJsonPath(filePath: string, docsDir: string): boolean {
