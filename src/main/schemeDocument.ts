@@ -17,6 +17,7 @@ export interface SchemeDocumentInput {
   renderMode?: SchemeDocumentRenderMode;
   templateJsonPath?: string;
   templateCells?: TemplateCellReplacementInput[];
+  templateTables?: TemplateTableReplacementInput[];
   contentControls?: ContentControlReplacementInput[];
 }
 
@@ -39,6 +40,7 @@ export interface SchemeDocumentResult {
   appendedMarkdown: boolean;
   embeddedDiagrams: string[];
   templateReplacementCount: number;
+  templateTableReplacementCount: number;
   templateCellReplacementCount: number;
   contentControlReplacementCount: number;
   renderMode: SchemeDocumentRenderMode;
@@ -50,6 +52,7 @@ export interface TemplateWordDocumentInput {
   templateFields?: SchemeTemplateFieldInput;
   templateJsonPath?: string;
   templateCells?: TemplateCellReplacementInput[];
+  templateTables?: TemplateTableReplacementInput[];
   contentControls?: ContentControlReplacementInput[];
 }
 
@@ -58,6 +61,7 @@ export interface TemplateWordDocumentResult {
   fileName: string;
   filledFields: string[];
   templateReplacementCount: number;
+  templateTableReplacementCount: number;
   templateCellReplacementCount: number;
   contentControlReplacementCount: number;
 }
@@ -95,6 +99,7 @@ export interface WordSectionReplacementResult {
   matchedHeading: string;
   replacementCount: number;
   templateReplacementCount: number;
+  templateTableReplacementCount: number;
   templateCellReplacementCount: number;
   contentControlReplacementCount: number;
   embeddedDiagrams: string[];
@@ -111,6 +116,7 @@ export interface WordSectionBatchReplacementResult {
     templateAnchorId?: string;
   }>;
   templateReplacementCount: number;
+  templateTableReplacementCount: number;
   templateCellReplacementCount: number;
   contentControlReplacementCount: number;
   embeddedDiagrams: string[];
@@ -123,6 +129,13 @@ export interface TemplateCellReplacementInput {
   cellIndex?: number;
   columnIndex?: number;
   value: string;
+}
+
+export interface TemplateTableReplacementInput {
+  tableId?: string;
+  caption?: string;
+  markdown?: string;
+  rows?: string[][];
 }
 
 export interface ContentControlReplacementInput {
@@ -429,6 +442,7 @@ export async function createWordDocxFromTemplate(
 ): Promise<TemplateWordDocumentResult> {
   await mkdir(dirname(outputPath), { recursive: true });
   const templateCells = input.templateCells ?? [];
+  const templateTables = input.templateTables ?? [];
   const contentControls = input.contentControls ?? [];
   const explicitFields = buildExplicitTemplateFieldOverrides({
     prompt: "",
@@ -439,13 +453,14 @@ export async function createWordDocxFromTemplate(
   });
   const filledFields = Object.keys(explicitFields).filter((key) => !key.startsWith("$"));
 
-  if (!filledFields.length && !templateCells.length && !contentControls.length) {
+  if (!filledFields.length && !templateCells.length && !templateTables.length && !contentControls.length) {
     await copyFile(templatePath, outputPath);
     return {
       outputPath,
       fileName: sanitizeFileName(outputPath.split(/[\\/]/).at(-1) || "密码应用方案.docx"),
       filledFields,
       templateReplacementCount: 0,
+      templateTableReplacementCount: 0,
       templateCellReplacementCount: 0,
       contentControlReplacementCount: 0
     };
@@ -455,6 +470,7 @@ export async function createWordDocxFromTemplate(
   const zip = new PizZip(content);
   const templateJson = await loadWordTemplateJson(input.templateJsonPath ?? inferTemplateJsonPath(templatePath));
   const templateReplacementCount = await replaceTemplatePlaceholders(zip, explicitFields);
+  const templateTableReplacementCount = replaceTemplateTables(zip, templateJson, templateTables);
   const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, templateCells);
   const contentControlReplacementCount = replaceContentControlsByTag(zip, contentControls, templateJson);
   const buffer = zip.generate({ type: "nodebuffer", compression: "DEFLATE" });
@@ -465,6 +481,7 @@ export async function createWordDocxFromTemplate(
     fileName: sanitizeFileName(outputPath.split(/[\\/]/).at(-1) || "密码应用方案.docx"),
     filledFields,
     templateReplacementCount,
+    templateTableReplacementCount,
     templateCellReplacementCount,
     contentControlReplacementCount
   };
@@ -510,6 +527,7 @@ export async function updateWordTemplateContent(
   });
   const templateJson = await loadWordTemplateJson(input.templateJsonPath);
   const templateReplacementCount = await replaceTemplatePlaceholders(zip, explicitFields);
+  const templateTableReplacementCount = replaceTemplateTables(zip, templateJson, input.templateTables ?? []);
   const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, input.templateCells ?? []);
   const contentControlReplacementCount = replaceContentControlsByTag(zip, input.contentControls ?? [], templateJson);
   const embeddedDiagrams = await appendGeneratedDiagrams(zip, input.diagrams ?? [], templateJson);
@@ -523,6 +541,7 @@ export async function updateWordTemplateContent(
     fileName: sanitizeFileName(outputPath.split(/[\\/]/).at(-1) || "密码应用方案.docx"),
     filledFields: Object.keys(explicitFields).filter((key) => !key.startsWith("$")),
     templateReplacementCount,
+    templateTableReplacementCount,
     templateCellReplacementCount,
     contentControlReplacementCount,
     embeddedDiagrams
@@ -547,11 +566,12 @@ export async function replaceWordSectionContent(
       templateFields: input.templateFields
     })
   );
-  const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, input.templateCells ?? []);
   const replacement = replaceDocumentSectionWithMarkdown(zip, input.section, input.content, templateJson);
   if (!replacement) {
     throw new Error(`未找到 Word 章节：${input.section}`);
   }
+  const templateTableReplacementCount = replaceTemplateTables(zip, templateJson, input.templateTables ?? []);
+  const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, input.templateCells ?? []);
   const contentControlReplacementCount = replaceContentControlsByTag(zip, input.contentControls ?? [], templateJson);
   const embeddedDiagrams = await appendGeneratedDiagrams(zip, input.diagrams ?? [], templateJson);
 
@@ -566,6 +586,7 @@ export async function replaceWordSectionContent(
     matchedHeading: replacement.matchedHeading,
     replacementCount: replacement.replacementCount,
     templateReplacementCount,
+    templateTableReplacementCount,
     templateCellReplacementCount,
     contentControlReplacementCount,
     embeddedDiagrams,
@@ -598,8 +619,9 @@ export async function replaceWordSectionsContent(
       templateFields: input.templateFields
     })
   );
-  const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, input.templateCells ?? []);
   const replacements = replaceDocumentSectionsWithMarkdown(zip, sections, templateJson);
+  const templateTableReplacementCount = replaceTemplateTables(zip, templateJson, input.templateTables ?? []);
+  const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, input.templateCells ?? []);
   const contentControlReplacementCount = replaceContentControlsByTag(zip, input.contentControls ?? [], templateJson);
 
   const embeddedDiagrams = await appendGeneratedDiagrams(zip, input.diagrams ?? [], templateJson);
@@ -613,6 +635,7 @@ export async function replaceWordSectionsContent(
     fileName: sanitizeFileName(outputPath.split(/[\\/]/).at(-1) || "密码应用方案.docx"),
     sections: replacements,
     templateReplacementCount,
+    templateTableReplacementCount,
     templateCellReplacementCount,
     contentControlReplacementCount,
     embeddedDiagrams
@@ -630,7 +653,6 @@ export async function writeSchemeDocxFromTemplate(
   const zip = new PizZip(content);
   const templateJson = await loadWordTemplateJson(input.templateJsonPath ?? inferTemplateJsonPath(templatePath));
   const templateReplacementCount = await replaceTemplatePlaceholders(zip, data);
-  const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, input.templateCells ?? []);
   const renderedZip = zip;
   const renderMode = input.renderMode ?? "append";
   let appendedMarkdown = false;
@@ -658,8 +680,10 @@ export async function writeSchemeDocxFromTemplate(
   } else {
     appendedMarkdown = appendGeneratedMarkdown(renderedZip, input.generatedMarkdown, facts);
   }
-  const embeddedDiagrams = await appendGeneratedDiagrams(renderedZip, input.diagrams ?? [], templateJson);
+  const templateTableReplacementCount = replaceTemplateTables(renderedZip, templateJson, input.templateTables ?? []);
+  const templateCellReplacementCount = replaceTemplateTableCells(renderedZip, templateJson, input.templateCells ?? []);
   const contentControlReplacementCount = replaceContentControlsByTag(renderedZip, input.contentControls ?? [], templateJson);
+  const embeddedDiagrams = await appendGeneratedDiagrams(renderedZip, input.diagrams ?? [], templateJson);
   await mkdir(dirname(outputPath), { recursive: true });
   const buffer = renderedZip.generate({ type: "nodebuffer", compression: "DEFLATE" });
   await writeFile(outputPath, buffer);
@@ -675,6 +699,7 @@ export async function writeSchemeDocxFromTemplate(
     appendedMarkdown,
     embeddedDiagrams,
     templateReplacementCount,
+    templateTableReplacementCount,
     templateCellReplacementCount,
     contentControlReplacementCount,
     renderMode,
@@ -683,11 +708,11 @@ export async function writeSchemeDocxFromTemplate(
 }
 
 function shouldPreserveTemplateAnchorsForFullDocument(
-  input: Pick<SchemeDocumentInput, "diagrams" | "templateCells">,
+  input: Pick<SchemeDocumentInput, "diagrams" | "templateCells" | "templateTables">,
   templateJson?: WordTemplateJson
 ): boolean {
   if (!templateJson?.sections?.length) return false;
-  return Boolean((input.diagrams?.length ?? 0) || (input.templateCells?.length ?? 0));
+  return Boolean((input.diagrams?.length ?? 0) || (input.templateTables?.length ?? 0) || (input.templateCells?.length ?? 0));
 }
 
 export function validateSchemeDraftCompleteness(
@@ -1890,6 +1915,102 @@ function replaceTemplateTableCells(
   return replacementCount;
 }
 
+function replaceTemplateTables(
+  zip: PizZip,
+  templateJson: WordTemplateJson | undefined,
+  replacements: TemplateTableReplacementInput[]
+): number {
+  if (!templateJson?.tables?.length || !replacements.length) return 0;
+
+  let replacementCount = 0;
+  for (const replacement of replacements) {
+    if (replaceSingleTemplateTable(zip, templateJson, replacement)) replacementCount += 1;
+  }
+  return replacementCount;
+}
+
+function replaceSingleTemplateTable(
+  zip: PizZip,
+  templateJson: WordTemplateJson,
+  replacement: TemplateTableReplacementInput
+): boolean {
+  const table = findTemplateTable(templateJson, replacement);
+  if (!table) {
+    throw new Error(`未找到模板表格：${replacement.tableId || replacement.caption || "未提供 table_id/caption"}`);
+  }
+
+  const documentFile = zip.file("word/document.xml");
+  const documentXml = documentFile?.asText();
+  if (!documentXml) return false;
+
+  const bodyOpen = documentXml.match(/<w:body\b[^>]*>/);
+  const bodyEnd = documentXml.lastIndexOf("</w:body>");
+  if (!bodyOpen || bodyOpen.index === undefined || bodyEnd < 0) return false;
+
+  const bodyStart = bodyOpen.index + bodyOpen[0].length;
+  const bodyXml = documentXml.slice(bodyStart, bodyEnd);
+  const anchoredTable = findSdtElementByTags(bodyXml, getTableAnchorTags(table));
+  if (!anchoredTable) {
+    throw new Error(`未找到模板表格锚点：${table.id}（${table.caption || "未命名表格"}）`);
+  }
+
+  const replacementContentXml = buildTemplateTableReplacementContentXml(anchoredTable.xml, replacement, table);
+  const replacementXml = replaceSdtContentXml(anchoredTable.xml, replacementContentXml);
+  const nextBodyXml = `${bodyXml.slice(0, anchoredTable.start)}${replacementXml}${bodyXml.slice(anchoredTable.end)}`;
+  const nextXml = `${documentXml.slice(0, bodyStart)}${nextBodyXml}${documentXml.slice(bodyEnd)}`;
+  zip.file("word/document.xml", nextXml);
+  return true;
+}
+
+function buildTemplateTableReplacementContentXml(
+  sdtXml: string,
+  replacement: TemplateTableReplacementInput,
+  table: WordTemplateTable
+): string {
+  const rows = resolveTemplateTableReplacementRows(replacement, table);
+  const anchorBlocks = collectWordBodyBlocks(extractSdtContentXml(sdtXml), new Map());
+  const paragraphTemplate =
+    extractSdtContentXml(sdtXml).match(/<w:p\b[\s\S]*?<\/w:p>/)?.[0] ??
+    findBodyParagraphTemplate(anchorBlocks, -1) ??
+    buildDefaultBodyParagraphTemplate();
+  const tableTemplate = findTableTemplate(anchorBlocks, -1) ?? anchorBlocks.find((block) => block.tagName === "tbl")?.xml;
+  return buildWordTableFromMarkdown(rows, paragraphTemplate, tableTemplate);
+}
+
+function resolveTemplateTableReplacementRows(
+  replacement: TemplateTableReplacementInput,
+  table: WordTemplateTable
+): string[][] {
+  const explicitRows = normalizeTemplateTableReplacementRows(replacement.rows);
+  if (explicitRows) return explicitRows;
+
+  const markdown = replacement.markdown?.trim() ?? "";
+  if (!markdown) {
+    throw new Error(`模板整表替换缺少内容：${table.id}（请提供 markdown 或 rows）`);
+  }
+
+  const lines = markdown.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const parsed = parseMarkdownTable(lines, index);
+    if (parsed) return parsed.rows;
+  }
+
+  throw new Error(`模板整表替换未解析到 Markdown 表格：${table.id}`);
+}
+
+function normalizeTemplateTableReplacementRows(rows: string[][] | undefined): string[][] | undefined {
+  if (!Array.isArray(rows) || !rows.length) return undefined;
+  const normalizedRows = rows
+    .map((row) =>
+      Array.isArray(row)
+        ? row.map((cell) => (cell == null ? "" : typeof cell === "string" ? cell.trim() : String(cell).trim()))
+        : []
+    )
+    .filter((row) => row.length);
+  if (!normalizedRows.length || normalizedRows.some((row) => !row.length)) return undefined;
+  return normalizeMarkdownTableRows(normalizedRows);
+}
+
 function replaceContentControlsByTag(
   zip: PizZip,
   replacements: ContentControlReplacementInput[],
@@ -2099,7 +2220,7 @@ function replaceSingleTemplateTableCell(
 
 function findTemplateTable(
   templateJson: WordTemplateJson,
-  replacement: TemplateCellReplacementInput
+  replacement: Pick<TemplateCellReplacementInput, "tableId" | "caption"> | Pick<TemplateTableReplacementInput, "tableId" | "caption">
 ): WordTemplateTable | undefined {
   if (replacement.tableId) {
     const table = templateJson.tables?.find((item) => item.id === replacement.tableId);
@@ -2523,7 +2644,7 @@ function normalizeMarkdownTableRows(rows: string[][]): string[][] {
 function buildWordTableFromMarkdown(rows: string[][], paragraphTemplate = "", tableTemplate?: string): string {
   const columnCount = Math.max(1, ...rows.map((row) => row.length));
   const columnWidth = Math.max(900, Math.floor(9000 / columnCount));
-  const paragraphProperties = "";
+  const paragraphProperties = paragraphTemplate.match(/<w:pPr\b[\s\S]*?<\/w:pPr>/)?.[0] ?? "";
   const firstRun = paragraphTemplate.match(/<w:r\b[\s\S]*?<\/w:r>/)?.[0] ?? "";
   const runProperties = firstRun.match(/<w:rPr\b[\s\S]*?<\/w:rPr>/)?.[0] ?? "";
   const tableProperties = tableTemplate?.match(/<w:tblPr\b[\s\S]*?<\/w:tblPr>/)?.[0] ?? buildDefaultTableProperties();

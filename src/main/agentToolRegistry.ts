@@ -25,7 +25,8 @@ import {
   type ContentControlReplacementInput,
   type SchemeCompletenessResult,
   type SchemeDiagramAsset,
-  type TemplateCellReplacementInput
+  type TemplateCellReplacementInput,
+  type TemplateTableReplacementInput
 } from "./schemeDocument";
 import type { SchemeProgressUpdateInput } from "./schemeProgress";
 import { buildSchemeStandardReferenceContext } from "./schemeReference";
@@ -277,7 +278,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
         name: "plan_scheme_assets",
         description: [
           `根据 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 规划某些章节关联的表格单元格和图片生成任务，不写 Word、不生成图片。`,
-          "用于正文写入后补齐表格和图位：输入 section_ids 后，返回可填的 template_cells 坐标清单，以及需要调用 image_generate 的 figure_id/label/prompt。",
+          "用于正文写入后补齐表格和图位：输入 section_ids 后，返回动态表 template_tables_plan、固定表 template_cells_plan，以及需要调用 image_generate 的 figure_id/label/prompt。",
           "只使用模板 JSON 中真实存在的 sections/tables/figures；不要自行编造 table_id、figure_id、行列号。"
         ].join("\n"),
         parameters: {
@@ -292,7 +293,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             },
             include_tables: {
               type: "boolean",
-              description: "是否包含表格 template_cells 任务，默认 true。"
+              description: "是否包含表格任务，默认 true；返回中会自动区分 dynamic 的 template_tables_plan 和 fixed 的 template_cells_plan。"
             },
             include_figures: {
               type: "boolean",
@@ -339,7 +340,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
           "用于加速正式方案生成：先按模板 JSON 顺序选取待生成小节调用本工具并行生成正文；再把返回草稿合并到 write_word.sections，按章节顺序批量写入同一个 docx。",
           `sections[].section 必须来自 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 的真实 sections 条目，优先传 id，例如 sec_2_2_2；不要自行拆分或编造模板中不存在的 7.2、sec_7_2 等虚拟章节。`,
           "每个章节会按 paragraph_tasks 生成 2-4 个连续段落；如果 plan_scheme_batches 返回了 paragraph_tasks，必须原样传入。",
-          "本工具只生成正文段落和必要列表，不生成 Markdown 表格，不生成图片，不修改模板表格单元格；表格 template_cells 和配图 image_generate/diagrams 应在所有正文写入后由 Agent 统一处理。",
+          "本工具只生成正文段落和必要列表，不生成 Markdown 表格，不生成图片，不修改模板表格；动态表 template_tables、固定表 template_cells 和配图 image_generate/diagrams 应在所有正文写入后由 Agent 统一处理。",
           "草稿必须贴合 section 的 writingHint、placeholders、relatedTables、relatedFigures 和已确认项目事实；资料不足处写待补充，不编造关键事实。"
         ].join("\n"),
         parameters: {
@@ -395,7 +396,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       function: {
         name: "create_word",
         description:
-          `根据内置 ${BUILT_IN_TEMPLATE_DOCX_RELATIVE_PATH} 模板创建一个 Word 文件。默认直接复制模板，内容和格式与模板保持一致；可选 template_fields 替换 {字段名} 占位，content_controls 按 Word Content Control tag/STD_* 精确替换模板控件内容。`,
+          `根据内置 ${BUILT_IN_TEMPLATE_DOCX_RELATIVE_PATH} 模板创建一个 Word 文件。默认直接复制模板，内容和格式与模板保持一致；可选 template_fields 替换 {字段名} 占位，template_tables 整表重建动态表格，content_controls 按 Word Content Control tag/STD_* 精确替换模板控件内容。`,
         parameters: {
           type: "object",
           properties: {
@@ -495,6 +496,39 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
                 required: ["row_index", "value"],
                 additionalProperties: false
               }
+            },
+            template_tables: {
+              type: "array",
+              description:
+                `可选模板整表替换。按 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 的 table_id/caption 找到表格模板锚点，并用新的 Markdown 表格或 rows 重建整张表，适合行数不固定的动态表。`,
+              items: {
+                type: "object",
+                properties: {
+                  table_id: {
+                    type: "string",
+                    description: "模板 JSON 中的表格 ID，例如 table_31_5_4_9_4。"
+                  },
+                  caption: {
+                    type: "string",
+                    description: "表格题注，仅用于在模板 JSON 中选择表格；Word 内定位使用表格 anchors.table 的不可见 SDT 锚。"
+                  },
+                  markdown: {
+                    type: "string",
+                    description: "完整 Markdown 表格，首行为表头。"
+                  },
+                  rows: {
+                    type: "array",
+                    description: "二维字符串数组，首行为表头。",
+                    items: {
+                      type: "array",
+                      items: {
+                        type: "string"
+                      }
+                    }
+                  }
+                },
+                additionalProperties: false
+              }
             }
           },
           additionalProperties: false
@@ -510,7 +544,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
           `标准流程：先读取 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 获取真实 sections、tables、figures 和 anchors；再调用 create_word 基于 ${BUILT_IN_TEMPLATE_DOCX_RELATIVE_PATH} 创建模板副本；随后把多个章节草稿放入 sections 批量写入。`,
           "正式生成优先使用 sections 批量写入多个已起草章节：一次打开 docx、替换多个不可见锚、一次保存，明显快于多次调用 write_word。",
           "正文可先由 draft_scheme_sections 并行起草，再把多个草稿合并到 sections 数组中按模板顺序一次性写入同一个 docx。",
-          "表格 template_cells 和配图 diagrams 必须放在所有正文章节写入后统一补充：先调用 plan_scheme_assets 获取 table_id/row/column 和 figure_id，再写表格、生图并嵌入。",
+          "表格和配图必须放在所有正文章节写入后统一补充：先调用 plan_scheme_assets；动态表用 template_tables 重建整表，固定骨架表用 template_cells 精确补单元格，再生图并嵌入。",
           "固定字段、小段模板内容或旧 STD_* 标签内容，可用 content_controls 按 Word Content Control tag 精确替换；这适合 AI 对已有 Word 做局部编辑。",
           "如果 template.json 某节已经列出局部正文块 textBlocks，而需求只是补一句、改一段或细化局部说明，优先使用 write_word.content_controls；这样更稳定，也更利于保留后续图表锚点。",
           "兼容模式：不传 section 时可用 template_sections 按 Markdown 编号拆分章节，但正式交付不推荐一次性写入整篇长文。",
@@ -623,6 +657,39 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
                   }
                 },
                 required: ["row_index", "value"],
+                additionalProperties: false
+              }
+            },
+            template_tables: {
+              type: "array",
+              description:
+                `可选模板整表替换。按 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 的 table_id/caption 找到表格模板锚点，并用新的 Markdown 表格或 rows 重建整张表，适合行数不固定的动态表。`,
+              items: {
+                type: "object",
+                properties: {
+                  table_id: {
+                    type: "string",
+                    description: "模板 JSON 中的表格 ID，例如 table_31_5_4_9_4。"
+                  },
+                  caption: {
+                    type: "string",
+                    description: "表格题注，仅用于在模板 JSON 中选择表格；Word 内定位使用表格 anchors.table 的不可见 SDT 锚。"
+                  },
+                  markdown: {
+                    type: "string",
+                    description: "完整 Markdown 表格，首行为表头。"
+                  },
+                  rows: {
+                    type: "array",
+                    description: "二维字符串数组，首行为表头。",
+                    items: {
+                      type: "array",
+                      items: {
+                        type: "string"
+                      }
+                    }
+                  }
+                },
                 additionalProperties: false
               }
             },
@@ -1049,6 +1116,7 @@ interface SchemeTemplateTaskTable {
   sectionNumber?: string;
   caption?: string;
   purpose?: string;
+  writeStrategy?: string;
   header?: string[];
   placeholders?: string[];
   rows?: SchemeTemplateTaskRow[];
@@ -1131,7 +1199,7 @@ function buildSchemeTemplateTaskSummary(filePath: string, context: AgentToolExec
     "- 每节正文按 paragraph_plan 分段编写，一项任务对应一个自然段；段落之间要承接上文，不能各写各的。",
     "- tables/figures 只记录后续任务，正文阶段不要生成 Markdown 表格或图片。",
     "- 正文草稿完成后，用 write_word.sections 按相同顺序批量写入 Word；随后调用 plan_scheme_assets 规划表格和图片任务。",
-    "- 表格按 plan_scheme_assets 返回的 template_cells_plan 改写 value 后写入；图片按 image_generate_plan 生成，再用 diagrams.figure_id 精确嵌入。",
+    "- dynamic 表格按 plan_scheme_assets 返回的 template_tables_plan 整表生成；fixed 表按 template_cells_plan 改写 value 后写入；图片按 image_generate_plan 生成，再用 diagrams.figure_id 精确嵌入。",
     "- content_controls[].tag 可直接传 fieldBlocks/textBlocks 的 id，例如 field_block_front_9、sec_2_2_2_text_1；工具会自动映射到真实 ps:* / STD_* tag。",
     "- 如果只想改某节中的一小段正文，优先使用该节的 textBlocks / write_word.content_controls 做局部替换，不必重写整节。",
     "- 某节若已列出“局部正文块”，补一句、改一段、细化说明时都先用局部块；只有需要整体改写多段结构时再用 write_word.sections。",
@@ -1190,6 +1258,7 @@ function readTemplateTaskTables(value: unknown): SchemeTemplateTaskTable[] {
       sectionNumber: readRecordString(record, "sectionNumber") || undefined,
       caption: readRecordString(record, "caption") || undefined,
       purpose: readRecordString(record, "purpose") || undefined,
+      writeStrategy: readRecordString(record, "writeStrategy") || undefined,
       header: readRecordStringArray(record, "header"),
       placeholders: readRecordStringArray(record, "placeholders"),
       rows: readTemplateTaskRows(record.rows)
@@ -1701,8 +1770,11 @@ function formatSchemeAssetPlan(input: {
   figureOffset: number;
   maxFigures: number;
 }): string {
-  const allTableCells = input.tables.flatMap((table) => buildTemplateCellPlan(table));
+  const templateTables = input.tables.filter((table) => isDynamicTemplateTable(table));
+  const templateCellTables = input.tables.filter((table) => !isDynamicTemplateTable(table));
+  const allTableCells = templateCellTables.flatMap((table) => buildTemplateCellPlan(table));
   const tableCells = allTableCells.slice(input.cellOffset, input.cellOffset + input.maxCells);
+  const tableReplacements = templateTables.map((table) => buildTemplateTablePlan(table));
   const figurePage = input.figures.slice(input.figureOffset, input.figureOffset + input.maxFigures);
   const imageCalls = figurePage.map((figure) => buildImageGeneratePlan(figure));
   const diagramRefs = figurePage.map((figure) => ({
@@ -1728,18 +1800,22 @@ function formatSchemeAssetPlan(input: {
   const lines = [
     "plan_scheme_assets completed",
     `章节：${input.sections.map((section) => `${section.id}(${section.number})`).join("、") || "全部关联章节"}`,
-    `表格任务：${input.tables.length} 个；可填单元格：${allTableCells.length} 个；本批单元格：${tableCells.length} 个（offset=${input.cellOffset}, limit=${input.maxCells}）`,
+    `表格任务：${input.tables.length} 个（整表替换：${templateTables.length} 个，单元格填充：${templateCellTables.length} 个）；可填单元格：${allTableCells.length} 个；本批单元格：${tableCells.length} 个（offset=${input.cellOffset}, limit=${input.maxCells}）`,
     `图示任务：${input.figures.length} 个；本批图示：${figurePage.length} 个（offset=${input.figureOffset}, limit=${input.maxFigures}）`,
     `是否还有后续：${hasMoreCells || hasMoreFigures ? "是" : "否"}`,
     "",
     "使用规则：",
-    "- 先根据 project_context/项目档案把本批 template_cells_plan 的 value 建议改成具体值，再通过 write_word.template_cells 写入。",
+    "- dynamic 表格先根据 project_context/项目档案生成完整表内容，再通过 write_word.template_tables 写入；建议优先传 markdown，首行为表头。",
+    "- fixed 骨架表先根据 project_context/项目档案把本批 template_cells_plan 的 value 建议改成具体值，再通过 write_word.template_cells 写入。",
     "- 如果 next_plan_scheme_assets_call 不为空，必须继续调用并写入下一批，直到“是否还有后续：否”。",
-    "- table_id、row_index、column_index/cell_index 必须原样保留；不要自行新增行列坐标。",
+    "- template_cells 的 table_id、row_index、column_index/cell_index 必须原样保留；不要自行新增行列坐标。",
     "- 对 figures 先并行调用 image_generate；再在 write_word.diagrams 中传 figure_id、label、kind、path，按不可见图片锚精确嵌入。",
     "",
     "next_plan_scheme_assets_call:",
     JSON.stringify(nextCall, null, 2),
+    "",
+    "template_tables_plan:",
+    JSON.stringify(tableReplacements, null, 2),
     "",
     "template_cells_plan:",
     JSON.stringify(tableCells, null, 2),
@@ -1751,6 +1827,37 @@ function formatSchemeAssetPlan(input: {
     JSON.stringify(diagramRefs, null, 2)
   ];
   return compactText(lines.join("\n"), 120000);
+}
+
+function isDynamicTemplateTable(table: SchemeTemplateTaskTable): boolean {
+  return table.writeStrategy === "replace_table_when_data_complete";
+}
+
+function buildTemplateTablePlan(table: SchemeTemplateTaskTable): Record<string, unknown> {
+  return {
+    table_id: table.id,
+    caption: table.caption,
+    purpose: table.purpose || "",
+    header: table.header || [],
+    recommended_write: "template_tables",
+    markdown_template: buildTemplateTableMarkdownTemplate(table)
+  };
+}
+
+function buildTemplateTableMarkdownTemplate(table: SchemeTemplateTaskTable): string {
+  const header = table.header?.length ? table.header : inferTemplateTableHeader(table);
+  if (!header.length) return "";
+  const separator = header.map(() => "---");
+  return [`| ${header.join(" | ")} |`, `| ${separator.join(" | ")} |`].join("\n");
+}
+
+function inferTemplateTableHeader(table: SchemeTemplateTaskTable): string[] {
+  const headerRow = table.rows?.find((row) => row.index === 0) ?? table.rows?.[0];
+  return headerRow?.cells
+    .slice()
+    .sort((left, right) => left.columnIndex - right.columnIndex)
+    .map((cell) => cell.text?.trim() ?? "")
+    .filter(Boolean) ?? [];
 }
 
 function buildTemplateCellPlan(table: SchemeTemplateTaskTable): Array<Record<string, unknown>> {
@@ -2018,7 +2125,7 @@ function buildDraftSchemeSectionMessages(
         "必须按 paragraph_tasks 顺序分段输出：每个任务写 1 个自然段，段落之间用空行分隔；不要把整节写成一整坨。",
         "第一段要自然承接 previous_section，最后一段要为 next_section 留出过渡；没有上下文时也要写清本段与本节主题的关系。",
         "本阶段只写正文段落和必要列表；不要生成 Markdown 表格，不要生成图片，不要写 Mermaid/SVG，不要编造表格单元格。",
-        "如该节关联表格或图示，只写引入性正文，具体表格和配图将在最后由 Agent 用 template_cells、image_generate 和 diagrams 统一生成。",
+        "如该节关联表格或图示，只写引入性正文，具体表格和配图将在最后由 Agent 用 template_tables/template_cells、image_generate 和 diagrams 统一生成。",
         "降低 AI 味：围绕本节事实写短而具体的句子，说明对象、位置、算法/产品/调用路径/安全效果；避免万能套话、重复政策背景和空泛排比。",
         "资料不足时明确写“待补充/需确认”，不得虚构建设单位、设备型号、产品名称、网络边界或密钥管理细节。"
       ].join("\n")
@@ -2149,6 +2256,7 @@ async function executeCreateWord(
     fields: readObjectArg(args, "fields"),
     templateFields: readTemplateFieldsArg(args),
     templateJsonPath,
+    templateTables: readTemplateTablesArg(args),
     templateCells: readTemplateCellsArg(args),
     contentControls: readContentControlsArg(args)
   });
@@ -2162,6 +2270,7 @@ async function executeCreateWord(
     content: [
       `create_word completed: ${result.outputPath}`,
       `模板占位符替换次数：${result.templateReplacementCount}`,
+      `模板整表替换次数：${result.templateTableReplacementCount}`,
       `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
       `Content Control 替换次数：${result.contentControlReplacementCount}`,
       `显式字段：${result.filledFields.join("、") || "无"}`
@@ -2184,11 +2293,12 @@ async function executeWriteWord(
   const section = readSectionArg(args);
   const fields = readObjectArg(args, "fields");
   const templateFields = readTemplateFieldsArg(args);
+  const templateTables = readTemplateTablesArg(args);
   const templateCells = readTemplateCellsArg(args);
   const contentControls = readContentControlsArg(args);
   const hasFieldOverrides = Boolean(fields && Object.keys(fields).length);
   const hasDirectTemplateUpdates = Boolean(
-    hasFieldOverrides || templateFields?.length || templateCells?.length || contentControls.length || diagrams.length
+    hasFieldOverrides || templateFields?.length || templateTables?.length || templateCells?.length || contentControls.length || diagrams.length
   );
 
   if (sectionBatch.length) {
@@ -2198,6 +2308,7 @@ async function executeWriteWord(
       sections: sectionBatch,
       fields,
       templateFields,
+      templateTables,
       templateCells,
       contentControls,
       diagrams,
@@ -2213,6 +2324,7 @@ async function executeWriteWord(
         `模板锚点：${result.sections.map((item) => item.templateAnchorId).filter(Boolean).join("、") || "未使用"}`,
         `替换原内容块：${result.sections.reduce((total, item) => total + item.replacementCount, 0)}`,
         `模板占位符替换次数：${result.templateReplacementCount}`,
+        `模板整表替换次数：${result.templateTableReplacementCount}`,
         `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
         `Content Control 替换次数：${result.contentControlReplacementCount}`,
         `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`
@@ -2233,6 +2345,7 @@ async function executeWriteWord(
       content,
       fields,
       templateFields,
+      templateTables,
       templateCells,
       contentControls,
       diagrams,
@@ -2248,6 +2361,7 @@ async function executeWriteWord(
         `模板锚点：${result.templateAnchorId || "未使用"}`,
         `替换原内容块：${result.replacementCount}`,
         `模板占位符替换次数：${result.templateReplacementCount}`,
+        `模板整表替换次数：${result.templateTableReplacementCount}`,
         `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
         `Content Control 替换次数：${result.contentControlReplacementCount}`,
         `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`
@@ -2266,6 +2380,7 @@ async function executeWriteWord(
     const result = await updateWordTemplateContent(sourcePath, outputPath, {
       fields,
       templateFields,
+      templateTables,
       templateCells,
       contentControls,
       diagrams,
@@ -2278,6 +2393,7 @@ async function executeWriteWord(
       content: [
         `write_word completed: ${result.outputPath}`,
         `模板占位符替换次数：${result.templateReplacementCount}`,
+        `模板整表替换次数：${result.templateTableReplacementCount}`,
         `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
         `Content Control 替换次数：${result.contentControlReplacementCount}`,
         `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`
@@ -2294,6 +2410,7 @@ async function executeWriteWord(
     generatedMarkdown: content,
     fields,
     templateFields,
+    templateTables,
     templateCells,
     contentControls,
     diagrams,
@@ -2308,6 +2425,7 @@ async function executeWriteWord(
       `write_word completed: ${result.outputPath}`,
       `填充字段：${result.filledFields.join("、") || "无"}`,
       `模板锚点：${result.templateAnchorsUsed.join("、") || "未使用"}`,
+      `模板整表替换次数：${result.templateTableReplacementCount}`,
       `模板表格单元格替换次数：${result.templateCellReplacementCount}`,
       `Content Control 替换次数：${result.contentControlReplacementCount}`,
       `嵌入图示：${result.embeddedDiagrams.join("、") || "无"}`,
@@ -2670,6 +2788,15 @@ function readTemplateFieldsArg(args: Record<string, unknown>): Array<Record<stri
   return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
 }
 
+function readTemplateTablesArg(args: Record<string, unknown>): TemplateTableReplacementInput[] | undefined {
+  const value = args.template_tables ?? args.templateTables;
+  if (!Array.isArray(value)) return undefined;
+  const tables = value
+    .map((item) => normalizeTemplateTableReplacement(item))
+    .filter((item): item is TemplateTableReplacementInput => Boolean(item));
+  return tables.length ? tables : undefined;
+}
+
 function readTemplateCellsArg(args: Record<string, unknown>): TemplateCellReplacementInput[] | undefined {
   const value = args.template_cells ?? args.templateCells;
   if (!Array.isArray(value)) return undefined;
@@ -2705,6 +2832,25 @@ function normalizeContentControlReplacement(item: unknown): ContentControlReplac
   };
 }
 
+function normalizeTemplateTableReplacement(item: unknown): TemplateTableReplacementInput | undefined {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+  const record = item as Record<string, unknown>;
+  const tableId = typeof (record.table_id ?? record.tableId) === "string" ? String(record.table_id ?? record.tableId).trim() : "";
+  const caption = typeof record.caption === "string" ? record.caption.trim() : "";
+  const markdown = typeof record.markdown === "string" ? record.markdown.trim() : "";
+  const rows = normalizeTemplateTableRows(record.rows);
+
+  if (!tableId && !caption) return undefined;
+  if (!markdown && !rows?.length) return undefined;
+
+  return {
+    ...(tableId ? { tableId } : {}),
+    ...(caption ? { caption } : {}),
+    ...(markdown ? { markdown } : {}),
+    ...(rows?.length ? { rows } : {})
+  };
+}
+
 function normalizeTemplateCellReplacement(item: unknown): TemplateCellReplacementInput | undefined {
   if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
   const record = item as Record<string, unknown>;
@@ -2733,6 +2879,22 @@ function readTemplateCellNumber(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.trim()) return Number(value.trim());
   return Number.NaN;
+}
+
+function normalizeTemplateTableRows(value: unknown): string[][] | undefined {
+  if (!Array.isArray(value) || !value.length) return undefined;
+  const rows = value
+    .map((row) =>
+      Array.isArray(row)
+        ? row.map((cell) => {
+            if (typeof cell === "string") return cell.trim();
+            if (typeof cell === "number" || typeof cell === "boolean") return String(cell);
+            return "";
+          })
+        : []
+    )
+    .filter((row) => row.length);
+  return rows.length ? rows : undefined;
 }
 
 function readSectionArg(args: Record<string, unknown>): string {

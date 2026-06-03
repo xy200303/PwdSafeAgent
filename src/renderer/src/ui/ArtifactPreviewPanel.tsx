@@ -6,6 +6,7 @@ import { X } from "lucide-react";
 import type { ArtifactPreview } from "../../../shared/types";
 
 const LazyVaneFilePreview = lazy(() => import("./VaneFilePreview"));
+const LazySuperDocPreview = lazy(() => import("./SuperDocPreview"));
 
 export default function ArtifactPreviewPanel({
   preview,
@@ -16,6 +17,8 @@ export default function ArtifactPreviewPanel({
   error: string;
   onClose: () => void;
 }): JSX.Element {
+  const isDocxPreview = preview?.mode === "docx";
+
   return (
     <Dialog.Root
       open
@@ -25,7 +28,7 @@ export default function ArtifactPreviewPanel({
     >
       <Dialog.Portal>
         <Dialog.Overlay className="preview-backdrop" />
-        <Dialog.Content className="preview-panel">
+        <Dialog.Content className={isDocxPreview ? "preview-panel preview-panel-docx" : "preview-panel"}>
           <header>
             <div>
               <Dialog.Title asChild>
@@ -44,9 +47,19 @@ export default function ArtifactPreviewPanel({
           ) : (
             <Dialog.Description className="sr-only">文件预览内容</Dialog.Description>
           )}
-          <ScrollArea.Root className="preview-scroll">
-            <ScrollArea.Viewport className="preview-body">
-              {error ? <p className="preview-empty">{error}</p> : null}
+          {isDocxPreview ? (
+            <div className="preview-docx-shell">
+              <div className="preview-docx-body">
+                {error ? <p className="preview-empty">{error}</p> : null}
+                <Suspense fallback={<PreviewRendererLoading label="正在加载 SuperDoc..." />}>
+                  {preview ? <LazySuperDocPreview preview={preview} /> : null}
+                </Suspense>
+              </div>
+            </div>
+          ) : (
+            <ScrollArea.Root className="preview-scroll">
+              <ScrollArea.Viewport className="preview-body">
+                {error ? <p className="preview-empty">{error}</p> : null}
               {preview && isVanePreviewMode(preview) ? (
                 <Suspense fallback={<PreviewRendererLoading label="正在加载 Vane File Preview..." />}>
                   <LazyVaneFilePreview preview={preview} />
@@ -59,11 +72,12 @@ export default function ArtifactPreviewPanel({
               ) : null}
               {preview?.mode === "text" && preview.kind !== "md" && preview.text ? <pre>{preview.text}</pre> : null}
               {preview?.mode === "unsupported" ? <p className="preview-empty">{preview.summary}</p> : null}
-            </ScrollArea.Viewport>
-            <ScrollArea.Scrollbar className="scrollbar" orientation="vertical">
-              <ScrollArea.Thumb className="scrollbar-thumb" />
-            </ScrollArea.Scrollbar>
-          </ScrollArea.Root>
+              </ScrollArea.Viewport>
+              <ScrollArea.Scrollbar className="scrollbar" orientation="vertical">
+                <ScrollArea.Thumb className="scrollbar-thumb" />
+              </ScrollArea.Scrollbar>
+            </ScrollArea.Root>
+          )}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -71,7 +85,7 @@ export default function ArtifactPreviewPanel({
 }
 
 function isVanePreviewMode(preview: ArtifactPreview): boolean {
-  return Boolean(preview.dataUrl && ["image", "pdf", "docx"].includes(preview.mode));
+  return Boolean(preview.dataUrl && ["image", "pdf"].includes(preview.mode));
 }
 
 function PreviewRendererLoading({ label }: { label: string }): JSX.Element {

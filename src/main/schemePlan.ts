@@ -93,7 +93,7 @@ export function renderSchemeChapterGuide(): string {
     `标准参考资料：${BUILT_IN_STANDARD_REFERENCE_RELATIVE_PATH}，章节起草和合规分析应优先参考其中与当前主题、等级要求对应的内容。`,
     `推荐节奏：整篇交付时先读取 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH}，再调用 plan_scheme_batches 生成批次，create_word 创建模板副本，随后按批次调用 draft_scheme_sections 并行起草正文，再按 sections 顺序合并到 write_word.sections 批量写入；不要一次性生成整篇长文。`,
     "段落节奏：plan_scheme_batches 会给每节 paragraph_tasks，draft_scheme_sections 必须按这些任务输出多个连续自然段，并处理上一节/下一节过渡。",
-    "表格和图示节奏：正文写完后调用 plan_scheme_assets，按 template_cells_plan 填表；如果返回 next_plan_scheme_assets_call，继续分批规划和写入直到没有后续；按 image_generate_plan 生图，并用 diagrams.figure_id 精确嵌入对应图片锚点。",
+    "表格和图示节奏：正文写完后调用 plan_scheme_assets，dynamic 表按 template_tables_plan 整表生成，fixed 表按 template_cells_plan 填表；如果返回 next_plan_scheme_assets_call，继续分批规划和写入直到没有后续；按 image_generate_plan 生图，并用 diagrams.figure_id 精确嵌入对应图片锚点。",
     "写作要求：每节只处理对应模板节的事实，资料不足处标注待补充，避免通用套话；表格和图示放到正文写完后统一生成和嵌入。"
   ].join("\n");
 }

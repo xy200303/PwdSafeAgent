@@ -22,6 +22,7 @@ import {
   settleSchemeProgressItem,
   type SchemeProgressUpdateInput
 } from "./schemeProgress";
+import { rewriteContinuationPrompt, stripSyntheticSchemeCompletionNotice } from "./schemeContinuation";
 import { renderSchemeChapterGuide } from "./schemePlan";
 import { loadPersistedState, savePersistedState, type PersistedStateSnapshot, type SessionMemoryEntry } from "./sessionPersistence";
 import {
@@ -570,7 +571,7 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
     "draft_scheme_sections 只用于并行起草正文，不写 Word、不生成表格、不生成图片；正文草稿完成后优先用 write_word.sections 批量写入，避免反复打开和保存同一个 docx。",
     "draft_scheme_sections 应使用 plan_scheme_batches 返回的批次参数，一次传入同一批待生成章节，优先接近设置中的章节并行数；每个数组项只对应一个模板章节或小节，并原样使用返回的 paragraph_tasks、writingHint、placeholders、relatedTables、relatedFigures。",
     "每个章节正文必须按 paragraph_tasks 分成多个自然段，段落之间承接上一段，首段承接上一节，末段自然引出下一节；不要把一整节写成单段长文。",
-    "正文全部写入后，必须调用 plan_scheme_assets 规划 relatedTables/relatedFigures；表格按返回的 template_cells_plan 改写 value 后用 write_word.template_cells 精确写入。如果 next_plan_scheme_assets_call 不为空，必须继续规划和写入下一批，直到工具显示没有后续，避免表格只填一部分。图片按 image_generate_plan 并行生成后用 write_word.diagrams 传 figure_id、label、kind、path 精确嵌入。固定字段、fieldBlocks 或章节正文 textBlocks 可用 write_word.content_controls 按 Content Control tag/STD_* 精确替换。不要把【待填写】和【图片占位】留在最终交付版本里。",
+    "正文全部写入后，必须调用 plan_scheme_assets 规划 relatedTables/relatedFigures；dynamic 表格按返回的 template_tables_plan 用 write_word.template_tables 整表生成，fixed 骨架表按 template_cells_plan 改写 value 后用 write_word.template_cells 精确写入。如果 next_plan_scheme_assets_call 不为空，必须继续规划和写入下一批，直到工具显示没有后续，避免表格只处理一部分。图片按 image_generate_plan 并行生成后用 write_word.diagrams 传 figure_id、label、kind、path 精确嵌入。固定字段、fieldBlocks 或章节正文 textBlocks 可用 write_word.content_controls 按 Content Control tag/STD_* 精确替换。不要把【待填写】和【图片占位】留在最终交付版本里。",
     "局部更新同样使用 create_word 或已有 docx 路径；多章节更新优先传 write_word.sections，单章节更新才传 path、section 和该章节 content；固定字段、小段模板内容、章节局部正文块、STD_* 标签内容优先传 write_word.content_controls。",
     "如果 template.json 已给某节列出 textBlocks，而需求只是补一句、改一段或细化局部说明，优先使用 write_word.content_controls，并直接把 textBlock id（如 sec_2_2_2_text_1）放进 content_controls[].tag；只有需要整体改写章节结构时再用 write_word.sections。",
     "write_word 不要求一次性完成所有章节；资料不足时可以先写已确认章节，后续继续增量替换。不要为了通过完整性检查而编造用户未提供的关键事实。",
@@ -613,10 +614,12 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
 
   for (const item of session.items) {
     if (item.kind !== "message") continue;
-    if (!item.content.trim()) continue;
+    const content =
+      item.role === "assistant" ? stripSyntheticSchemeCompletionNotice(item.content) : item.content.trim();
+    if (!content) continue;
     messages.push({
       role: item.role === "user" ? "user" : "assistant",
-      content: item.content
+      content
     });
   }
   return messages;
@@ -670,7 +673,7 @@ function renderSchemeProgressRuntimeContext(sessionId: string): string {
     draftedSections.length
       ? "继续生成时，先把已起草章节按模板 JSON 顺序合并到 write_word.sections 批量写入 Word，再起草新章节。"
       : "继续生成时，先调用 plan_scheme_batches 生成下一批待起草章节，再按 first_draft_call 调用 draft_scheme_sections；不要直接手写单个 section。",
-    "表格 template_cells 和配图 image_generate/diagrams 放在所有正文章节完成后统一处理。",
+    "表格 template_tables/template_cells 和配图 image_generate/diagrams 放在所有正文章节完成后统一处理。",
     "不得跳到后续章节抽样填充。若本轮没有把 completed 写到 total，最终回复只能说阶段性文件/部分完成。"
   ]
     .filter(Boolean)
@@ -697,8 +700,8 @@ function getSessionReadableFiles(sessionId: string): string[] {
   return getSessionAttachments(sessionId).map((attachment) => attachment.path);
 }
 
-function buildUserMessageContent(input: ChatPromptInput): string {
-  const message = input.message.trim();
+function buildUserMessageContent(input: ChatPromptInput, progress?: SchemeProgressItem): string {
+  const message = rewriteContinuationPrompt(input.message, progress);
   const attachmentNames = input.attachments?.map((attachment) => attachment.name).filter(Boolean) ?? [];
 
   if (!attachmentNames.length) return message;
@@ -785,7 +788,8 @@ async function handlePrompt(input: ChatPromptInput): Promise<{ accepted: true }>
   if (!session) {
     throw new Error("Session not found");
   }
-  const userContent = buildUserMessageContent(input);
+  const progress = getLatestSchemeProgressItem(input.sessionId);
+  const userContent = buildUserMessageContent(input, progress);
 
   if (session.title === "新的密码方案对话" && userContent) {
     session.title = userContent.replace(/\s+/g, " ").slice(0, 24);

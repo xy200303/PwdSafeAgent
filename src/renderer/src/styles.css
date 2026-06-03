@@ -1286,6 +1286,14 @@ button {
   box-shadow: -14px 0 40px rgb(16 32 51 / 10%);
 }
 
+.preview-panel-docx {
+  inset: 0;
+  width: 100vw;
+  min-width: 0;
+  border-left: 0;
+  box-shadow: none;
+}
+
 .artifact-history-panel {
   position: fixed;
   inset: 0 0 0 auto;
@@ -1462,6 +1470,21 @@ button {
   padding: 9px 16px;
 }
 
+.preview-docx-shell {
+  min-height: 0;
+  overflow: hidden;
+  background:
+    linear-gradient(#ffffff 0 0) padding-box,
+    repeating-linear-gradient(0deg, #fbfcfd 0, #fbfcfd 31px, #f3f5f7 32px);
+  padding: 18px;
+}
+
+.preview-docx-body {
+  display: grid;
+  height: 100%;
+  min-height: 0;
+}
+
 .preview-body {
   display: grid;
   height: 100%;
@@ -1505,20 +1528,22 @@ button {
 }
 
 .pdfjs-preview,
-.docx-preview-host,
-.vane-preview-host {
+.vane-preview-host,
+.superdoc-preview-host {
   display: grid;
   min-width: 0;
   gap: 12px;
 }
 
-.vane-preview-host {
+.vane-preview-host,
+.superdoc-preview-host {
   height: 100%;
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr);
 }
 
-.vane-preview-frame {
+.vane-preview-frame,
+.superdoc-preview-frame {
   height: 100%;
   min-height: 0;
   overflow: hidden;
@@ -1534,95 +1559,24 @@ button {
   height: 100%;
 }
 
-.pdf-pages,
-.docx-pages {
-  display: grid;
-  justify-items: center;
-  gap: 18px;
-}
-
-.vane-docx-preview {
+.superdoc-preview-editor {
   height: 100%;
   min-height: 0;
-  overflow: auto;
-  background: #eef2f6;
-  padding: 16px;
 }
 
-.vane-docx-toolbar {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 14px;
-  border: 1px solid #d9e2ea;
-  border-radius: 999px;
-  background: rgb(255 255 255 / 92%);
-  color: #52687c;
-  font-size: 12px;
-  padding: 6px 8px 6px 12px;
-  backdrop-filter: blur(8px);
+.superdoc-preview-frame .superdoc-wrapper {
+  height: 100%;
 }
 
-.vane-docx-toolbar button {
-  border: 1px solid #c9d5df;
-  border-radius: 999px;
-  background: #fff;
-  color: #1b4f8a;
-  cursor: pointer;
-  font-size: 12px;
-  padding: 3px 8px;
+.preview-panel-docx .preview-summary {
+  padding-left: 20px;
+  padding-right: 20px;
 }
 
-.vane-docx-toolbar button:hover {
-  border-color: #2a6bb3;
-  background: #e9f1fb;
-}
-
-.vane-docx-status {
-  margin: 0 0 12px;
-}
-
-.vane-docx-status.error {
-  color: #b42318;
-}
-
-.vane-docx-pages {
+.pdf-pages {
   display: grid;
   justify-items: center;
   gap: 18px;
-  min-width: 0;
-}
-
-.vane-docx-pages .docx-wrapper,
-.vane-docx-pages .docx-preview-document-wrapper {
-  width: max-content;
-  max-width: none;
-  justify-self: center;
-  background: transparent !important;
-  padding: 0 !important;
-  padding-bottom: 0 !important;
-}
-
-.vane-docx-pages .docx,
-.vane-docx-pages .docx-preview-document {
-  margin: 0 auto !important;
-  background: #fff !important;
-  box-shadow: 0 10px 28px rgb(16 32 51 / 12%);
-}
-
-.vane-docx-pages .docx-wrapper,
-.vane-docx-pages .docx-preview-document-wrapper {
-  zoom: var(--docx-scale, 1);
-}
-
-.docx-viewport {
-  display: grid;
-  width: 100%;
-  min-width: 0;
-  overflow: hidden;
 }
 
 .pdf-page {
@@ -1637,26 +1591,6 @@ button {
   display: block;
   max-width: 100%;
   height: auto !important;
-}
-
-.docx-pages {
-  width: 100%;
-  min-width: 0;
-  justify-items: center;
-}
-
-.docx-pages .docx-wrapper,
-.docx-pages .docx-preview-document-wrapper {
-  max-width: none;
-  background: transparent !important;
-  padding: 0 !important;
-  padding-bottom: 0 !important;
-  zoom: var(--docx-scale, 1);
-}
-
-.docx-pages .docx,
-.docx-pages .docx-preview-document {
-  box-shadow: 0 10px 28px rgb(16 32 51 / 9%);
 }
 
 .settings-panel label {

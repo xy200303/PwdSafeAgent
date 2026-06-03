@@ -15,6 +15,7 @@ import {
 import type { Api, AssistantMessage, Model, TextContent } from "@mariozechner/pi-ai";
 import { compactText } from "./agentTools";
 import { buildAgentChatTools, executeAgentToolCall, type AgentToolExecutionResult } from "./agentToolRegistry";
+import { resolveAssistantDisplayTextOrThrow } from "./piAgentResult";
 import type { AgentRuntime, AgentRuntimeHost, AgentRuntimeTurnInput, MessageStreamItem } from "./agentRuntime";
 import { extractTemplateAnchorIds } from "./schemeProgress";
 import type { AppSettings, SchemeProgressItem, StreamItem } from "../shared/types";
@@ -97,7 +98,7 @@ async function createPiSessionState(
   configSignature: string,
   currentUserPrompt: string
 ): Promise<PiSessionState> {
-  const agentDir = resolve(host.outputDir, "..", "pi-agent");
+  const agentDir = resolve(host.outputDir, "..", "pi-agent", input.sessionId);
   mkdirSync(agentDir, { recursive: true });
 
   const authStorage = AuthStorage.inMemory();
@@ -180,6 +181,11 @@ async function runPiPrompt(
   const toolItems = new Map<string, StreamItem>();
   const toolArgs = new Map<string, unknown>();
   const sealedAssistantTexts: string[] = [];
+  const assistantCompletion: {
+    finalText?: string;
+    stopReason?: AssistantMessage["stopReason"];
+    errorMessage?: string;
+  } = {};
   const abort = () => {
     void state.session.abort();
   };
@@ -193,6 +199,7 @@ async function runPiPrompt(
       toolItems,
       toolArgs,
       sealedAssistantTexts,
+      assistantCompletion,
       getAssistantItem: () => assistantItem,
       setAssistantItem: (item) => {
         assistantItem = item;
@@ -206,12 +213,20 @@ async function runPiPrompt(
       source: "interactive"
     });
 
-    const finalText = stripSealedAssistantText(state.session.getLastAssistantText(), sealedAssistantTexts);
+    const finalText = resolveAssistantDisplayTextOrThrow({
+      finalText:
+        assistantCompletion.finalText ??
+        stripSealedAssistantText(state.session.getLastAssistantText(), sealedAssistantTexts),
+      assistantContent: assistantItem?.content,
+      toolItems,
+      stopReason: assistantCompletion.stopReason,
+      errorMessage: assistantCompletion.errorMessage
+    });
     if (!assistantItem) {
       assistantItem = host.createAssistantMessage(input.sessionId);
       input.onAssistantCreated(assistantItem);
     }
-    if (finalText && assistantItem.content !== finalText) {
+    if (assistantItem.content !== finalText) {
       assistantItem.content = finalText;
       host.updateItem(input.sessionId, assistantItem);
     }
@@ -233,6 +248,11 @@ function handlePiSessionEvent(
     toolItems: Map<string, StreamItem>;
     toolArgs: Map<string, unknown>;
     sealedAssistantTexts: string[];
+    assistantCompletion: {
+      finalText?: string;
+      stopReason?: AssistantMessage["stopReason"];
+      errorMessage?: string;
+    };
     getAssistantItem: () => MessageStreamItem | undefined;
     setAssistantItem: (item: MessageStreamItem | undefined) => void;
   }
@@ -240,19 +260,25 @@ function handlePiSessionEvent(
   switch (event.type) {
     case "message_update": {
       const update = event.assistantMessageEvent;
-      if (update.type !== "text_delta") return;
-      const assistantItem = ensureAssistantItem(context);
-      assistantItem.content += update.delta;
-      context.host.updateItem(context.input.sessionId, assistantItem);
+      if (update.type === "text_delta") {
+        const assistantItem = ensureAssistantItem(context);
+        assistantItem.content += update.delta;
+        context.host.updateItem(context.input.sessionId, assistantItem);
+        return;
+      }
+      if (update.type === "done") {
+        captureAssistantCompletion(update.message, context);
+        return;
+      }
+      if (update.type === "error") {
+        captureAssistantCompletion(update.error, context);
+        return;
+      }
       return;
     }
     case "message_end": {
       if (event.message.role !== "assistant") return;
-      const text = stripSealedAssistantText(extractAssistantText(event.message), context.sealedAssistantTexts);
-      if (!text) return;
-      const assistantItem = ensureAssistantItem(context);
-      assistantItem.content = text;
-      context.host.updateItem(context.input.sessionId, assistantItem);
+      captureAssistantCompletion(event.message, context);
       return;
     }
     case "tool_execution_start": {
@@ -472,6 +498,31 @@ function stripSealedAssistantText(text: string | undefined, sealedTexts: string[
     }
   }
   return nextText.trim();
+}
+
+function captureAssistantCompletion(
+  message: AssistantMessage,
+  context: {
+    host: AgentRuntimeHost;
+    input: AgentRuntimeTurnInput;
+    sealedAssistantTexts: string[];
+    assistantCompletion: {
+      finalText?: string;
+      stopReason?: AssistantMessage["stopReason"];
+      errorMessage?: string;
+    };
+    getAssistantItem: () => MessageStreamItem | undefined;
+    setAssistantItem: (item: MessageStreamItem | undefined) => void;
+  }
+): void {
+  context.assistantCompletion.stopReason = message.stopReason;
+  context.assistantCompletion.errorMessage = message.errorMessage;
+  const text = stripSealedAssistantText(extractAssistantText(message), context.sealedAssistantTexts);
+  context.assistantCompletion.finalText = text || context.assistantCompletion.finalText;
+  if (!text) return;
+  const assistantItem = ensureAssistantItem(context);
+  assistantItem.content = text;
+  context.host.updateItem(context.input.sessionId, assistantItem);
 }
 
 function createPwdSafePiTools(

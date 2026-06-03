@@ -8,6 +8,10 @@ export function dataUrlToUint8Array(dataUrl: string): Uint8Array<ArrayBuffer> {
   return bytes;
 }
 
+export function dataUrlToArrayBuffer(dataUrl: string): ArrayBuffer {
+  return dataUrlToUint8Array(dataUrl).buffer;
+}
+
 export function dataUrlToBlob(dataUrl: string): Blob {
   const mimeType = dataUrl.match(/^data:([^;,]+)[;,]/)?.[1] || "application/octet-stream";
   return new Blob([dataUrlToUint8Array(dataUrl).buffer], { type: mimeType });

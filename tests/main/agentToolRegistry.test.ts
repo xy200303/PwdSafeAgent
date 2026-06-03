@@ -56,6 +56,7 @@ describe("agentToolRegistry", () => {
     expect(fullTools.every((tool) => tool.type === "function" && tool.function.strict === true)).toBe(true);
     expect(writeWordTool?.function.description).toContain("局部正文块 textBlocks");
     expect(JSON.stringify(writeWordTool)).toContain("sec_2_2_2_text_1");
+    expect(JSON.stringify(writeWordTool)).toContain("template_tables");
   });
 
   it("can hide final artifact tools while collecting project information", () => {
@@ -277,10 +278,13 @@ describe("agentToolRegistry", () => {
 
     expect(result.toolName).toBe("plan_scheme_assets");
     expect(result.summary).toContain("表格 3 个、图示 2 个");
+    expect(result.content).toContain("template_tables_plan");
     expect(result.content).toContain("template_cells_plan");
     expect(result.content).toContain("本批单元格");
     expect(result.content).toContain("\"table_id\": \"table_30_5_4_9_4\"");
     expect(result.content).toContain("\"caption\": \"表 5-15 数据存储的保护对象\"");
+    expect(result.content).toContain("\"table_id\": \"table_31_5_4_9_4\"");
+    expect(result.content).toContain("\"recommended_write\": \"template_tables\"");
     expect(result.content).toContain("\"figure_id\": \"fig_12_5_4_9_4\"");
     expect(result.content).toContain("\"label\": \"重要数据存储保护流程图\"");
     expect(result.content).toContain("write_word_diagrams_plan");
@@ -299,7 +303,8 @@ describe("agentToolRegistry", () => {
     );
 
     expect(result.toolName).toBe("plan_scheme_assets");
-    expect(result.content).toContain("可填单元格：825 个；本批单元格：25 个");
+    expect(result.content).toContain("template_tables_plan");
+    expect(result.content).toContain("可填单元格：272 个；本批单元格：25 个");
     expect(result.content).toContain("next_plan_scheme_assets_call");
     expect(result.content).toContain("\"cell_offset\": 25");
     expect(result.content).toContain("\"include_tables\": true");

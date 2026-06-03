@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { applyRendererEvent, setArtifacts, setCurrentSession, setSessions, store } from "../../src/renderer/src/store";
+import {
+  addAttachments,
+  applyRendererEvent,
+  clearComposer,
+  setArtifacts,
+  setComposer,
+  setCurrentSession,
+  setSessions,
+  store
+} from "../../src/renderer/src/store";
 import type { ChatSession, RendererEvent } from "../../src/shared/types";
 
 describe("renderer store", () => {
@@ -238,6 +247,60 @@ describe("renderer store", () => {
       kind: "file",
       name: "新方案.docx"
     });
+  });
+
+  it("keeps composer drafts isolated per session", () => {
+    const first = makeSession("session_a", "A");
+    const second = makeSession("session_b", "B");
+
+    store.dispatch(setSessions([first, second]));
+    store.dispatch(setCurrentSession(first.id));
+    store.dispatch(setComposer("第一段草稿"));
+    store.dispatch(
+      addAttachments({
+        attachments: [
+          {
+            id: "attachment_1",
+            sessionId: first.id,
+            name: "A.docx",
+            mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size: 128,
+            path: "C:/tmp/A.docx",
+            source: "picker",
+            createdAt: "2026-05-23T00:01:00.000Z"
+          }
+        ]
+      })
+    );
+
+    store.dispatch(setCurrentSession(second.id));
+    expect(store.getState().chat.composer).toBe("");
+    expect(store.getState().chat.pendingAttachments).toEqual([]);
+
+    store.dispatch(setComposer("第二段草稿"));
+    store.dispatch(setCurrentSession(first.id));
+
+    expect(store.getState().chat.composer).toBe("第一段草稿");
+    expect(store.getState().chat.pendingAttachments.map((attachment) => attachment.name)).toEqual(["A.docx"]);
+  });
+
+  it("clears only the draft of the completed session", () => {
+    const first = makeSession("session_a", "A");
+    const second = makeSession("session_b", "B");
+
+    store.dispatch(setSessions([first, second]));
+    store.dispatch(setCurrentSession(first.id));
+    store.dispatch(setComposer("会话 A 草稿"));
+    store.dispatch(setCurrentSession(second.id));
+    store.dispatch(setComposer("会话 B 草稿"));
+
+    store.dispatch(clearComposer(first.id));
+
+    expect(store.getState().chat.currentSessionId).toBe(second.id);
+    expect(store.getState().chat.composer).toBe("会话 B 草稿");
+
+    store.dispatch(setCurrentSession(first.id));
+    expect(store.getState().chat.composer).toBe("");
   });
 
   it("preserves tool detail previews from stream events", () => {

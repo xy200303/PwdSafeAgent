@@ -100,6 +100,44 @@ describe("schemeDocument", () => {
     }
   });
 
+  it("rebuilds a dynamic template table with AI-generated rows while preserving the outer table anchor", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-dynamic-table-"));
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
+    const outputPath = join(dir, "动态整表替换.docx");
+
+    try {
+      const result = await updateWordTemplateContent(templatePath, outputPath, {
+        templateTables: [
+          {
+            tableId: "table_31_5_4_9_4",
+            markdown: [
+              "| 序号 | 数据类型 | 密码产品 | 部署位置 | 使用方式 |",
+              "| --- | --- | --- | --- | --- |",
+              "| 1 | 身份鉴别数据 | 服务器密码机 | 应用服务器区 | 存储前加密 |",
+              "| 2 | 重要业务数据 | 密码服务管理平台 | 数据库服务器区 | 字段级加密 |",
+              "| 3 | 重要审计数据 | 签名验签服务器 | 日志审计区 | 完整性校验 |"
+            ].join("\n")
+          }
+        ]
+      });
+      const documentXml = await readDocumentXml(outputPath);
+      const extracted = await mammoth.extractRawText({ path: outputPath });
+      const sdtXml = findSdtXmlContaining(documentXml, 'w:val="ps:table:table_31_5_4_9_4"');
+
+      expect(result.templateTableReplacementCount).toBe(1);
+      expect(result.templateCellReplacementCount).toBe(0);
+      expect(extracted.value).toContain("身份鉴别数据");
+      expect(extracted.value).toContain("密码服务管理平台");
+      expect(extracted.value).toContain("完整性校验");
+      expect(sdtXml).toContain("ps:table:table_31_5_4_9_4");
+      expect(sdtXml).toContain("<w:tbl>");
+      expect(sdtXml).not.toContain("【待填写】");
+      expect(sdtXml.match(/<w:tr\b/g)?.length ?? 0).toBe(4);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps cleaned table cell formatting when replacing table placeholders", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-clean-cell-style-"));
     const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;

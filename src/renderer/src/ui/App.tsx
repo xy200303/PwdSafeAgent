@@ -197,12 +197,12 @@ export function App(): JSX.Element {
             value={composer}
             attachments={pendingAttachments}
             onChange={(value) => dispatch(setComposer(value))}
-            onAddAttachments={(items) => dispatch(addAttachments(items))}
+            onAddAttachments={(items) => dispatch(addAttachments({ attachments: items }))}
             onRemoveAttachment={(id) => {
               dispatch(removeAttachment(id));
               void api.attachment.remove(id);
             }}
-            onSent={() => dispatch(clearComposer())}
+            onSent={(sessionId) => dispatch(clearComposer(sessionId))}
             onError={(message) => setAppError(message)}
           />
         </main>
@@ -1162,7 +1162,7 @@ function Composer(props: {
   onChange: (value: string) => void;
   onAddAttachments: (attachments: AttachmentRef[]) => void;
   onRemoveAttachment: (id: string) => void;
-  onSent: () => void;
+  onSent: (sessionId: string) => void;
   onError: (message: string) => void;
 }): JSX.Element {
   const canSend = Boolean(props.session && (props.value.trim() || props.attachments.length));
@@ -1178,7 +1178,7 @@ function Composer(props: {
         message: props.value.trim(),
         attachments: props.attachments
       });
-      props.onSent();
+      props.onSent(props.session.id);
     } catch (error) {
       props.onError(`发送失败：${getErrorMessage(error)}`);
     }

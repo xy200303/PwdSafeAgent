@@ -1,6 +1,6 @@
 {
   "name": "pwd-safe-agent",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Desktop password application scheme generation agent",
   "author": "PwdSafeAgent Team",
   "private": true,
@@ -84,7 +84,7 @@
     "@radix-ui/react-tabs": "^1.1.13",
     "@radix-ui/react-tooltip": "^1.2.8",
     "@reduxjs/toolkit": "^2.11.2",
-    "docx-preview": "^0.3.7",
+    "@superdoc-dev/react": "^1.9.0",
     "docx-templates": "^4.15.0",
     "dotenv": "^17.2.3",
     "lucide-react": "^0.562.0",

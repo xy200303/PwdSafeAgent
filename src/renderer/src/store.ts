@@ -1,12 +1,18 @@
 import { configureStore, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import type { AppSettings, ArtifactSummary, AttachmentRef, ChatSession, RendererEvent, StreamItem } from "../../shared/types";
 
+interface SessionDraft {
+  composer: string;
+  pendingAttachments: AttachmentRef[];
+}
+
 interface ChatState {
   sessions: ChatSession[];
   artifacts: ArtifactSummary[];
   currentSessionId?: string;
   composer: string;
   pendingAttachments: AttachmentRef[];
+  drafts: Record<string, SessionDraft>;
   settings?: AppSettings;
   settingsOpen: boolean;
   artifactsOpen: boolean;
@@ -17,6 +23,7 @@ const initialState: ChatState = {
   artifacts: [],
   composer: "",
   pendingAttachments: [],
+  drafts: {},
   settingsOpen: false,
   artifactsOpen: false
 };
@@ -32,12 +39,13 @@ const chatSlice = createSlice({
           session
         )
       );
+      pruneDrafts(state);
       if (!state.currentSessionId || !action.payload.some((session) => session.id === state.currentSessionId)) {
-        state.currentSessionId = action.payload[0]?.id;
+        activateSession(state, action.payload[0]?.id);
       }
     },
     setCurrentSession(state, action: PayloadAction<string>) {
-      state.currentSessionId = action.payload;
+      activateSession(state, action.payload);
     },
     upsertSession(state, action: PayloadAction<ChatSession>) {
       const index = state.sessions.findIndex((session) => session.id === action.payload.id);
@@ -47,7 +55,9 @@ const chatSlice = createSlice({
       } else {
         state.sessions.unshift(nextSession);
       }
-      state.currentSessionId ??= action.payload.id;
+      if (!state.currentSessionId) {
+        activateSession(state, action.payload.id);
+      }
     },
     addStreamItem(state, action: PayloadAction<{ sessionId: string; item: StreamItem }>) {
       const session = state.sessions.find((existing) => existing.id === action.payload.sessionId);
@@ -66,12 +76,21 @@ const chatSlice = createSlice({
     },
     setComposer(state, action: PayloadAction<string>) {
       state.composer = action.payload;
+      syncActiveDraft(state);
     },
-    addAttachments(state, action: PayloadAction<AttachmentRef[]>) {
-      state.pendingAttachments.push(...action.payload);
+    addAttachments(state, action: PayloadAction<{ attachments: AttachmentRef[]; sessionId?: string }>) {
+      const targetSessionId =
+        action.payload.sessionId ?? action.payload.attachments[0]?.sessionId ?? state.currentSessionId;
+      if (!targetSessionId || action.payload.attachments.length === 0) return;
+      const draft = readDraft(state, targetSessionId);
+      writeDraft(state, targetSessionId, {
+        composer: draft.composer,
+        pendingAttachments: [...draft.pendingAttachments, ...action.payload.attachments]
+      });
     },
     removeAttachment(state, action: PayloadAction<string>) {
       state.pendingAttachments = state.pendingAttachments.filter((attachment) => attachment.id !== action.payload);
+      syncActiveDraft(state);
     },
     removeSession(state, action: PayloadAction<string>) {
       const deletedArtifactIds = getSessionArtifactIds(
@@ -81,8 +100,9 @@ const chatSlice = createSlice({
       state.artifacts = state.artifacts.filter(
         (artifact) => artifact.sessionId !== action.payload && !deletedArtifactIds.has(artifact.id)
       );
+      delete state.drafts[action.payload];
       if (state.currentSessionId === action.payload) {
-        state.currentSessionId = state.sessions[0]?.id;
+        activateSession(state, state.sessions[0]?.id);
       }
     },
     setArtifacts(state, action: PayloadAction<ArtifactSummary[]>) {
@@ -96,9 +116,11 @@ const chatSlice = createSlice({
         state.artifacts.unshift(action.payload);
       }
     },
-    clearComposer(state) {
-      state.composer = "";
-      state.pendingAttachments = [];
+    clearComposer(state, action: PayloadAction<string>) {
+      writeDraft(state, action.payload, {
+        composer: "",
+        pendingAttachments: []
+      });
     },
     setSettings(state, action: PayloadAction<AppSettings>) {
       state.settings = action.payload;
@@ -119,7 +141,9 @@ const chatSlice = createSlice({
         } else {
           state.sessions.unshift(nextSession);
         }
-        state.currentSessionId ??= event.payload.id;
+        if (!state.currentSessionId) {
+          activateSession(state, event.payload.id);
+        }
         return;
       }
       if (event.type === "session.deleted") {
@@ -130,8 +154,9 @@ const chatSlice = createSlice({
         state.artifacts = state.artifacts.filter(
           (artifact) => artifact.sessionId !== event.sessionId && !deletedArtifactIds.has(artifact.id)
         );
+        delete state.drafts[event.sessionId];
         if (state.currentSessionId === event.sessionId) {
-          state.currentSessionId = state.sessions[0]?.id;
+          activateSession(state, state.sessions[0]?.id);
         }
         return;
       }
@@ -203,6 +228,11 @@ export const store = configureStore({
 export type RootState = ReturnType<typeof store.getState>;
 export type AppDispatch = typeof store.dispatch;
 
+const EMPTY_DRAFT: SessionDraft = {
+  composer: "",
+  pendingAttachments: []
+};
+
 function getSessionArtifactIds(session?: ChatSession): Set<string> {
   return new Set(
     session?.items
@@ -231,4 +261,47 @@ function mergeSessionPreservingFileItems(existing: ChatSession | undefined, inco
     ...incoming,
     items: [...incoming.items, ...preservedFileItems].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
   };
+}
+
+function activateSession(state: ChatState, sessionId?: string): void {
+  state.currentSessionId = sessionId;
+  const draft = sessionId ? readDraft(state, sessionId) : EMPTY_DRAFT;
+  state.composer = draft.composer;
+  state.pendingAttachments = draft.pendingAttachments;
+}
+
+function syncActiveDraft(state: ChatState): void {
+  if (!state.currentSessionId) return;
+  state.drafts[state.currentSessionId] = {
+    composer: state.composer,
+    pendingAttachments: [...state.pendingAttachments]
+  };
+}
+
+function readDraft(state: ChatState, sessionId: string): SessionDraft {
+  const draft = state.drafts[sessionId];
+  return {
+    composer: draft?.composer || "",
+    pendingAttachments: [...(draft?.pendingAttachments ?? [])]
+  };
+}
+
+function writeDraft(state: ChatState, sessionId: string, draft: SessionDraft): void {
+  state.drafts[sessionId] = {
+    composer: draft.composer,
+    pendingAttachments: [...draft.pendingAttachments]
+  };
+  if (state.currentSessionId === sessionId) {
+    state.composer = draft.composer;
+    state.pendingAttachments = [...draft.pendingAttachments];
+  }
+}
+
+function pruneDrafts(state: ChatState): void {
+  const validSessionIds = new Set(state.sessions.map((session) => session.id));
+  for (const sessionId of Object.keys(state.drafts)) {
+    if (!validSessionIds.has(sessionId)) {
+      delete state.drafts[sessionId];
+    }
+  }
 }
