@@ -1436,7 +1436,7 @@ function formatTemplateTaskSection(
   figureMap: Map<string, SchemeTemplateTaskFigure>,
   textBlockMap: Map<string, SchemeTemplateTaskTextBlock[]>
 ): string {
-  const paragraphPlan = buildSectionParagraphTasks(section);
+  const paragraphPlan = buildSectionParagraphTasks(section, { tableMap, figureMap });
   const textBlocks = textBlockMap.get(section.id) ?? [];
   const tasks = [
     `正文：${section.writingHint || `围绕“${section.title}”编写项目化正文，资料不足处写待补充。`}`,
@@ -1483,18 +1483,25 @@ function groupTemplateTaskTextBlocksBySection(
 
 function formatRelatedTable(id: string, table?: SchemeTemplateTaskTable): string {
   if (!table) return id;
+  const name = table.caption || "关联表格";
   const details = [table.purpose, table.header?.length ? `列=${table.header.join("|")}` : "", table.placeholders?.length ? `字段=${table.placeholders.join("、")}` : ""].filter(Boolean);
-  return `${id}${details.length ? `（${details.join("；")}）` : ""}`;
+  return `${name}${details.length ? `（${details.join("；")}）` : ""}`;
 }
 
 function formatRelatedFigure(id: string, figure?: SchemeTemplateTaskFigure): string {
   if (!figure) return id;
-  const label = figure.recommendedLabel || figure.caption;
+  const label = formatFigureDisplayName(figure);
   const details = [label, figure.purpose].filter(Boolean);
-  return `${id}${details.length ? `（${details.join("；")}）` : ""}`;
+  return details.length ? details.join("（") + (details.length > 1 ? "）" : "") : label;
 }
 
-function buildSectionParagraphTasks(section: Pick<SchemeTemplateTaskSection, "title" | "writingHint" | "relatedTables" | "relatedFigures">): string[] {
+function buildSectionParagraphTasks(
+  section: Pick<SchemeTemplateTaskSection, "title" | "writingHint" | "relatedTables" | "relatedFigures">,
+  lookup?: {
+    tableMap?: Map<string, SchemeTemplateTaskTable>;
+    figureMap?: Map<string, SchemeTemplateTaskFigure>;
+  }
+): string[] {
   const text = `${section.title} ${section.writingHint || ""}`;
   const tasks: string[] = [];
 
@@ -1511,13 +1518,32 @@ function buildSectionParagraphTasks(section: Pick<SchemeTemplateTaskSection, "ti
   }
 
   if (section.relatedTables?.length) {
-    tasks.push(`为后续 ${section.relatedTables.join("、")} 表格填充提供文字依据，不在正文中生成表格`);
+    const tableNames = formatRelatedTableNames(section.relatedTables, lookup?.tableMap);
+    tasks.push(`为后续${tableNames}填充提供文字依据，不在正文中生成表格，也不要输出 table_id 或表格任务清单`);
   }
   if (section.relatedFigures?.length) {
-    tasks.push(`为后续 ${section.relatedFigures.join("、")} 图示生成提供场景说明，不在正文中生成图片`);
+    const figureNames = formatRelatedFigureNames(section.relatedFigures, lookup?.figureMap);
+    tasks.push(`为后续${figureNames}生成提供场景说明，不在正文中生成图片，也不要输出 fig_id 或图示任务清单`);
   }
 
   return tasks.slice(0, 5);
+}
+
+function formatRelatedTableNames(ids: string[], tableMap?: Map<string, SchemeTemplateTaskTable>): string {
+  const names = ids.map((id) => tableMap?.get(id)?.caption).filter(Boolean);
+  return names.length ? `“${names.join("”“")}”` : "关联表格";
+}
+
+function formatRelatedFigureNames(ids: string[], figureMap?: Map<string, SchemeTemplateTaskFigure>): string {
+  const names = ids.map((id) => {
+    const figure = figureMap?.get(id);
+    return figure ? formatFigureDisplayName(figure) : "";
+  }).filter(Boolean);
+  return names.length ? `“${names.join("”“")}”` : "关联图示";
+}
+
+function formatFigureDisplayName(figure: SchemeTemplateTaskFigure): string {
+  return figure.recommendedLabel || normalizeFigureCaption(figure.caption) || figure.caption || "关联图示";
 }
 
 function readRecordString(record: Record<string, unknown>, key: string): string {
@@ -1544,6 +1570,8 @@ function executePlanSchemeBatches(
   const templateJsonPath = getBuiltInTemplateJsonPath(context.docsDir);
   const parsed = JSON.parse(readFileSync(templateJsonPath, "utf-8")) as SchemeTemplateTaskJson;
   const allSections = readTemplateTaskSections(parsed.sections);
+  const tableMap = new Map(readTemplateTaskTables(parsed.tables).map((table) => [table.id, table]));
+  const figureMap = new Map(readTemplateTaskFigures(parsed.figures).map((figure) => [figure.id, figure]));
   const startSection = readStringArg(args, "start_section");
   const resolvedStartSection = startSection ? resolveTemplateTaskSection(startSection, allSections) : undefined;
   if (startSection && !resolvedStartSection) {
@@ -1583,7 +1611,9 @@ function executePlanSchemeBatches(
       batches,
       batchSize,
       startSection,
-      skippedCount: skippedSections.size
+      skippedCount: skippedSections.size,
+      tableMap,
+      figureMap
     })
   };
 }
@@ -1645,6 +1675,8 @@ function formatSchemeBatchPlan(input: {
   batchSize: number;
   startSection?: string;
   skippedCount: number;
+  tableMap: Map<string, SchemeTemplateTaskTable>;
+  figureMap: Map<string, SchemeTemplateTaskFigure>;
 }): string {
   const firstBatch = input.batches[0] ?? [];
   const firstDraftCall = {
@@ -1652,7 +1684,7 @@ function formatSchemeBatchPlan(input: {
       section: section.id,
       title: section.title,
       writing_hint: section.writingHint,
-      paragraph_tasks: buildSectionParagraphTasks(section)
+      paragraph_tasks: buildSectionParagraphTasks(section, input)
     })),
     max_parallel: input.batchSize
   };
@@ -1677,7 +1709,7 @@ function formatSchemeBatchPlan(input: {
       ...batch.map((section) =>
         [
           `- ${section.id} | ${section.number} ${section.title} | ${section.writingHint || "按模板章节主题编写正文。"}`,
-          `  paragraph_tasks: ${buildSectionParagraphTasks(section).join("；")}`
+          `  paragraph_tasks: ${buildSectionParagraphTasks(section, input).join("；")}`
         ].join("\n")
       )
     );
@@ -1937,6 +1969,8 @@ interface ResolvedDraftSchemeSection {
   placeholders?: string[];
   relatedTables?: string[];
   relatedFigures?: string[];
+  relatedTableSummaries?: string[];
+  relatedFigureSummaries?: string[];
 }
 
 interface DraftSchemeSectionResult {
@@ -1966,9 +2000,11 @@ async function executeDraftSchemeSections(
     : configuredParallel;
   const parsedTemplate = JSON.parse(readFileSync(getBuiltInTemplateJsonPath(context.docsDir), "utf-8")) as SchemeTemplateTaskJson;
   const templateSections = readTemplateTaskSections(parsedTemplate.sections);
+  const tableMap = new Map(readTemplateTaskTables(parsedTemplate.tables).map((table) => [table.id, table]));
+  const figureMap = new Map(readTemplateTaskFigures(parsedTemplate.figures).map((figure) => [figure.id, figure]));
   const sections = requestedSections
     .slice(0, DRAFT_SECTION_PARALLELISM_MAX)
-    .map((section) => resolveDraftSchemeSection(section, templateSections));
+    .map((section) => resolveDraftSchemeSection(section, templateSections, { tableMap, figureMap }));
   const projectContext = readStringArg(args, "project_context");
   const results = await mapWithConcurrency(sections, maxParallel, async (section) => {
     try {
@@ -2029,7 +2065,11 @@ function readDraftSectionsArg(args: Record<string, unknown>): DraftSchemeSection
 
 function resolveDraftSchemeSection(
   input: DraftSchemeSectionInput,
-  templateSections: SchemeTemplateTaskSection[]
+  templateSections: SchemeTemplateTaskSection[],
+  lookup: {
+    tableMap: Map<string, SchemeTemplateTaskTable>;
+    figureMap: Map<string, SchemeTemplateTaskFigure>;
+  }
 ): ResolvedDraftSchemeSection {
   const normalizedInput = normalizeDraftSectionLookup(input.section);
   const matches = templateSections.filter((section) =>
@@ -2061,13 +2101,87 @@ function resolveDraftSchemeSection(
     number: matched.number,
     title: input.title || matched.title,
     writingHint: input.writingHint || matched.writingHint,
-    paragraphTasks: input.paragraphTasks?.length ? input.paragraphTasks : buildSectionParagraphTasks(matched),
+    paragraphTasks: normalizeParagraphTasksForDraft(
+      input.paragraphTasks?.length ? input.paragraphTasks : buildSectionParagraphTasks(matched, lookup),
+      matched,
+      lookup
+    ),
     previousSection,
     nextSection,
     placeholders: matched.placeholders,
     relatedTables: matched.relatedTables,
-    relatedFigures: matched.relatedFigures
+    relatedFigures: matched.relatedFigures,
+    relatedTableSummaries: buildRelatedTableSummaries(matched.relatedTables, lookup.tableMap),
+    relatedFigureSummaries: buildRelatedFigureSummaries(matched.relatedFigures, lookup.figureMap)
   };
+}
+
+function normalizeParagraphTasksForDraft(
+  tasks: string[],
+  section: Pick<SchemeTemplateTaskSection, "relatedTables" | "relatedFigures">,
+  lookup: {
+    tableMap: Map<string, SchemeTemplateTaskTable>;
+    figureMap: Map<string, SchemeTemplateTaskFigure>;
+  }
+): string[] {
+  return tasks
+    .map((task) => replaceTemplateIdsForDraft(task, section, lookup).trim())
+    .filter(Boolean);
+}
+
+function replaceTemplateIdsForDraft(
+  value: string,
+  section: Pick<SchemeTemplateTaskSection, "relatedTables" | "relatedFigures">,
+  lookup: {
+    tableMap: Map<string, SchemeTemplateTaskTable>;
+    figureMap: Map<string, SchemeTemplateTaskFigure>;
+  }
+): string {
+  let nextValue = value;
+  for (const id of section.relatedTables ?? []) {
+    const tableName = lookup.tableMap.get(id)?.caption || "关联表格";
+    nextValue = nextValue.replaceAll(id, tableName);
+  }
+  for (const id of section.relatedFigures ?? []) {
+    const figure = lookup.figureMap.get(id);
+    const figureName = figure ? formatFigureDisplayName(figure) : "关联图示";
+    nextValue = nextValue.replaceAll(id, figureName);
+  }
+  return nextValue;
+}
+
+function buildRelatedTableSummaries(
+  ids: string[] | undefined,
+  tableMap: Map<string, SchemeTemplateTaskTable>
+): string[] | undefined {
+  const summaries = (ids ?? [])
+    .map((id) => {
+      const table = tableMap.get(id);
+      if (!table) return "";
+      const purpose = table.purpose ? `，用于${trimSentencePunctuation(table.purpose)}` : "";
+      return `${table.caption || "关联表格"}${purpose}`;
+    })
+    .filter(Boolean);
+  return summaries.length ? summaries : undefined;
+}
+
+function buildRelatedFigureSummaries(
+  ids: string[] | undefined,
+  figureMap: Map<string, SchemeTemplateTaskFigure>
+): string[] | undefined {
+  const summaries = (ids ?? [])
+    .map((id) => {
+      const figure = figureMap.get(id);
+      if (!figure) return "";
+      const purpose = figure.purpose ? `，用于${trimSentencePunctuation(figure.purpose)}` : "";
+      return `${formatFigureDisplayName(figure)}${purpose}`;
+    })
+    .filter(Boolean);
+  return summaries.length ? summaries : undefined;
+}
+
+function trimSentencePunctuation(value: string): string {
+  return value.trim().replace(/[。；;,.，]+$/g, "");
 }
 
 async function draftSchemeSection(
@@ -2126,6 +2240,7 @@ function buildDraftSchemeSectionMessages(
         "第一段要自然承接 previous_section，最后一段要为 next_section 留出过渡；没有上下文时也要写清本段与本节主题的关系。",
         "本阶段只写正文段落和必要列表；不要生成 Markdown 表格，不要生成图片，不要写 Mermaid/SVG，不要编造表格单元格。",
         "如该节关联表格或图示，只写引入性正文，具体表格和配图将在最后由 Agent 用 template_tables/template_cells、image_generate 和 diagrams 统一生成。",
+        "正文中禁止输出模板内部 ID、锚点或任务清单，例如 fig_*、table_*、ps:figure:*、STD_*；需要提到图表时只写自然名称。",
         "降低 AI 味：围绕本节事实写短而具体的句子，说明对象、位置、算法/产品/调用路径/安全效果；避免万能套话、重复政策背景和空泛排比。",
         "资料不足时明确写“待补充/需确认”，不得虚构建设单位、设备型号、产品名称、网络边界或密钥管理细节。"
       ].join("\n")
@@ -2140,8 +2255,8 @@ function buildDraftSchemeSectionMessages(
         section.placeholders?.length ? `可用字段：${section.placeholders.join("、")}` : "",
         "paragraph_tasks:",
         ...section.paragraphTasks.map((task, index) => `${index + 1}. ${task}`),
-        section.relatedTables?.length ? `关联表格：${section.relatedTables.join("、")}（最后统一填充，此处不生成表格）` : "",
-        section.relatedFigures?.length ? `关联图示：${section.relatedFigures.join("、")}（最后统一生成，此处不生成图片）` : "",
+        section.relatedTableSummaries?.length ? `关联表格：${section.relatedTableSummaries.join("；")}（最后统一填充，此处不生成表格，不要输出 table_id）` : "",
+        section.relatedFigureSummaries?.length ? `关联图示：${section.relatedFigureSummaries.join("；")}（最后统一生成，此处不生成图片，不要输出 fig_id）` : "",
         "",
         "项目事实和上下文：",
         facts || "暂无明确项目事实。",
@@ -2178,8 +2293,8 @@ function buildFallbackDraftSchemeSection(
   return [
     ...taskParagraphs,
     contextText ? `已确认上下文摘要：${contextText}` : "",
-    section.relatedTables?.length ? `本节关联模板表格 ${section.relatedTables.join("、")}，表格单元格将在最后统一补充。` : "",
-    section.relatedFigures?.length ? `本节关联模板图示 ${section.relatedFigures.join("、")}，配图将在最后统一生成并嵌入。` : ""
+    section.relatedTableSummaries?.length ? `本节后续需结合${section.relatedTableSummaries.join("、")}补充表格，正文不直接生成表格。` : "",
+    section.relatedFigureSummaries?.length ? `本节后续需结合${section.relatedFigureSummaries.join("、")}生成配图，正文只保留自然场景说明。` : ""
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -2211,10 +2326,34 @@ function formatDraftSchemeSectionResults(
 }
 
 function normalizeDraftContent(content: string): string {
-  return content
+  const normalized = content
     .replace(/^```(?:markdown|md)?\s*/i, "")
     .replace(/```$/i, "")
     .trim();
+  return stripRawTemplatePlanningText(normalized);
+}
+
+function stripRawTemplatePlanningText(content: string): string {
+  return content
+    .split(/\n{2,}/)
+    .map((paragraph) =>
+      paragraph
+        .split(/\r?\n/)
+        .filter((line) => !isRawTemplatePlanningLine(line))
+        .join("\n")
+        .trim()
+    )
+    .filter(Boolean)
+    .join("\n\n")
+    .replace(/\bfig_\d+(?:_\d+)+\b/gi, "对应图示")
+    .replace(/\btable_\d+(?:_\d+)+\b/gi, "对应表格")
+    .trim();
+}
+
+function isRawTemplatePlanningLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  return /^(?:[-*]\s*)?(?:fig|table)_\d+(?:_\d+)+\s*(?:[·:：,，、-]|将|用于|需要|应)/i.test(trimmed);
 }
 
 function normalizeDraftSectionLookup(value: string): string {

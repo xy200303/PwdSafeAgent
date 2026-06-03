@@ -2,43 +2,50 @@ import { useEffect, useMemo, useState, type JSX } from "react";
 import {
   SuperDocEditor,
   type SuperDocContentErrorEvent,
-  type SuperDocExceptionEvent,
-  type SuperDocReadyEvent
+  type SuperDocExceptionEvent
 } from "@superdoc-dev/react";
 import "@superdoc-dev/react/style.css";
 import type { ArtifactPreview } from "../../../shared/types";
 import { dataUrlToArrayBuffer } from "./previewDataUrl";
 import { sanitizeDocxForSuperDoc } from "./sanitizeDocxForSuperDoc";
 
+const DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
 export default function SuperDocPreview({ preview }: { preview: ArtifactPreview }): JSX.Element {
   const [error, setError] = useState("");
   const [isLoadingDocument, setIsLoadingDocument] = useState(true);
-  const documentBuffer = useMemo(() => buildDocumentBuffer(preview), [preview]);
+  const documentFile = useMemo(() => buildDocumentFile(preview), [preview]);
 
   useEffect(() => {
     setError("");
     setIsLoadingDocument(true);
   }, [preview.artifactId]);
 
-  if (!documentBuffer) {
+  if (!documentFile) {
     return <p className="preview-empty">当前 DOCX 预览缺少文档数据。</p>;
   }
 
   return (
     <div className="superdoc-preview-host">
-      <div className="preview-library-label">SuperDoc 原生 DOCX 预览</div>
-      {isLoadingDocument ? <p className="preview-empty">正在加载 Word 文档内容...</p> : null}
-      {error ? <p className="preview-empty">Word 渲染失败：{error}</p> : null}
+      <div className="superdoc-preview-status" aria-live="polite">
+        {isLoadingDocument ? "正在加载 Word 文档内容..." : "SuperDoc 原生 DOCX 预览"}
+        {error ? ` · Word 渲染失败：${error}` : ""}
+      </div>
       <div className="superdoc-preview-frame">
         <SuperDocEditor
           key={preview.artifactId}
+          document={documentFile}
           documentMode="viewing"
           role="viewer"
           contained
+          hideToolbar
           className="sd-theme-word superdoc-preview-editor"
-          style={{ height: "100%" }}
+          style={{ height: "100%", width: "100%" }}
           renderLoading={() => <p className="preview-empty">正在初始化 Word 工作区...</p>}
-          onReady={(event) => void loadDocumentIntoEditor(event, documentBuffer, setError, setIsLoadingDocument)}
+          onReady={() => {
+            setError("");
+            setIsLoadingDocument(false);
+          }}
           onContentError={(event) => {
             setError(describeContentError(event));
             setIsLoadingDocument(false);
@@ -54,42 +61,11 @@ export default function SuperDocPreview({ preview }: { preview: ArtifactPreview 
   );
 }
 
-function buildDocumentBuffer(preview: ArtifactPreview): ArrayBuffer | null {
+function buildDocumentFile(preview: ArtifactPreview): File | null {
   if (!preview.dataUrl) return null;
-  return sanitizeDocxForSuperDoc(dataUrlToArrayBuffer(preview.dataUrl));
-}
-
-async function loadDocumentIntoEditor(
-  event: SuperDocReadyEvent,
-  documentBuffer: ArrayBuffer,
-  setError: (message: string) => void,
-  setIsLoadingDocument: (value: boolean) => void
-): Promise<void> {
-  setError("");
-  setIsLoadingDocument(true);
-
-  try {
-    const host = event.superdoc as {
-      ui?: { document?: { replaceFile?: (file: ArrayBuffer) => Promise<void> } };
-      activeEditor?: { replaceFile?: (file: ArrayBuffer) => Promise<void> } | null;
-    };
-
-    if (host.ui?.document?.replaceFile) {
-      await host.ui.document.replaceFile(documentBuffer);
-      setIsLoadingDocument(false);
-      return;
-    }
-
-    if (!host.activeEditor?.replaceFile) {
-      throw new Error("SuperDoc 编辑器尚未就绪");
-    }
-
-    await host.activeEditor.replaceFile(documentBuffer);
-    setIsLoadingDocument(false);
-  } catch (error) {
-    setError(getErrorMessage(error) || "文档加载失败");
-    setIsLoadingDocument(false);
-  }
+  const buffer = sanitizeDocxForSuperDoc(dataUrlToArrayBuffer(preview.dataUrl));
+  const fileName = preview.name.endsWith(".docx") ? preview.name : `${preview.name || "document"}.docx`;
+  return new File([buffer], fileName, { type: preview.mimeType || DOCX_MIME_TYPE });
 }
 
 function describeContentError(event: SuperDocContentErrorEvent): string {

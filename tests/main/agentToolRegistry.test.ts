@@ -167,8 +167,9 @@ describe("agentToolRegistry", () => {
     expect(result.content).toContain("task: 正文：描述网络整体结构");
     expect(result.content).toContain("局部正文块：sec_2_2_2_text_1（tag：ps:section:sec_2_2_2:text:1）");
     expect(result.content).toContain("段落：说明本节范围和已确认对象");
-    expect(result.content).toContain("表格：table_4_2_2_1");
-    expect(result.content).toContain("图示：fig_1_2_2_2_1");
+    expect(result.content).toContain("表格：表 22 物理环境情况");
+    expect(result.content).toContain("图示：网络框架图");
+    expect(result.content).not.toContain("图示：fig_1_2_2_2_1");
     expect(result.content).toContain("固定模板块");
     expect(result.content).toContain("field_block_front_9");
     expect(result.content).not.toContain("\"schemaVersion\"");
@@ -201,6 +202,22 @@ describe("agentToolRegistry", () => {
     expect(result.content).toContain("\"paragraph_tasks\"");
     expect(result.content).not.toContain("\"section\": \"sec_2_2_2_1\"");
     expect(result.content).toContain("BATCH 1 (5)");
+  });
+
+  it("uses natural figure names instead of template ids in section paragraph tasks", async () => {
+    const result = await executeAgentToolCall(
+      createToolCall("plan_scheme_batches", {
+        start_section: "sec_5_4_9_4",
+        batch_size: 1
+      }),
+      createContext(process.cwd())
+    );
+
+    expect(result.toolName).toBe("plan_scheme_batches");
+    expect(result.content).toContain("重要数据存储保护流程图");
+    expect(result.content).toContain("重要数据存储读取流程图");
+    expect(result.content).not.toContain("为后续 fig_12_5_4_9_4");
+    expect(result.content).not.toContain("为后续 fig_13_5_4_9_4");
   });
 
   it("skips already drafted or completed sections when planning batches", async () => {
@@ -352,6 +369,31 @@ describe("agentToolRegistry", () => {
       expect.objectContaining({ section: "2.1", status: "drafted" }),
       expect.objectContaining({ section: "2.2.2", status: "drafted" })
     ]);
+  });
+
+  it("keeps raw template figure ids out of fallback draft content", async () => {
+    const result = await executeAgentToolCall(
+      createToolCall("draft_scheme_sections", {
+        sections: [
+          {
+            section: "sec_5_4_9_4",
+            paragraph_tasks: [
+              "说明重要数据存储保护措施",
+              "为后续 fig_12_5_4_9_4、fig_13_5_4_9_4 图示生成提供场景说明，不在正文中生成图片"
+            ]
+          }
+        ],
+        max_parallel: 1
+      }),
+      createContext(process.cwd())
+    );
+
+    expect(result.toolName).toBe("draft_scheme_sections");
+    expect(result.content).toContain("重要数据存储保护流程图");
+    expect(result.content).toContain("重要数据存储读取流程图");
+    expect(result.content).not.toContain("fig_12_5_4_9_4");
+    expect(result.content).not.toContain("fig_13_5_4_9_4");
+    expect(result.content).not.toContain("本节关联模板图示");
   });
 
   it("uses the configured draft section parallelism when no override is provided", async () => {

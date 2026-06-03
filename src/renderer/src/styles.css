@@ -1473,16 +1473,14 @@ button {
 .preview-docx-shell {
   min-height: 0;
   overflow: hidden;
-  background:
-    linear-gradient(#ffffff 0 0) padding-box,
-    repeating-linear-gradient(0deg, #fbfcfd 0, #fbfcfd 31px, #f3f5f7 32px);
-  padding: 18px;
+  background: #eef2f6;
 }
 
 .preview-docx-body {
   display: grid;
   height: 100%;
   min-height: 0;
+  padding: 0;
 }
 
 .preview-body {
@@ -1542,14 +1540,19 @@ button {
   grid-template-rows: auto minmax(0, 1fr);
 }
 
+.superdoc-preview-host {
+  gap: 0;
+  background: #eef2f6;
+}
+
 .vane-preview-frame,
 .superdoc-preview-frame {
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid #d9e2ea;
-  border-radius: 8px;
-  background: #fff;
+  border: 0;
+  border-radius: 0;
+  background: #eef2f6;
 }
 
 .vane-preview-frame iframe,
@@ -1562,10 +1565,29 @@ button {
 .superdoc-preview-editor {
   height: 100%;
   min-height: 0;
+  background: #eef2f6;
 }
 
 .superdoc-preview-frame .superdoc-wrapper {
   height: 100%;
+  min-height: 0;
+}
+
+.superdoc-preview-frame .superdoc-editor-container {
+  height: 100%;
+  min-height: 0;
+  background: #eef2f6;
+}
+
+.superdoc-preview-status {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  border-bottom: 1px solid #d9e2ea;
+  background: #fff;
+  color: #637285;
+  font-size: 12px;
+  padding: 0 20px;
 }
 
 .preview-panel-docx .preview-summary {
