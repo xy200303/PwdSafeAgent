@@ -10,6 +10,8 @@ const DEFAULT_OUTPUT = join(ROOT, "resources", "docs", "templates", "密码应�
 const SECTION_BODY_PLACEHOLDER_TEXT = "【正文占位】";
 const TABLE_CELL_PLACEHOLDER_TEXT = "【待填写】";
 const FIGURE_PLACEHOLDER_TEXT = "【图片占位】";
+const NETWORK_CHANNEL_RULE =
+  "网络通道/通信信道按“访问者通过网络访问系统”的形式定义，例如“业务用户通过互联网访问{应用系统}的通信信道”；访问者可为业务用户、管理用户、运维人员或第三方系统，网络可为互联网、政务外网、内网、VPN、专线或运维网。";
 
 const [, , docxArg, outputArg] = process.argv;
 const docxPath = docxArg ? join(ROOT, docxArg) : DEFAULT_DOCX;
@@ -64,7 +66,6 @@ const templateJson = {
     ],
     notes: [
       "anchors 是写入 Word 的不可见 SDT tag，是章节、表格、图片的主定位依据。",
-      "anchors.*.aliases 记录旧 STD_* 兼容标签，便于旧模板命名和真实 Content Control tag 并存。",
       "fieldBlocks 记录非表格顶层短段落模板块，可通过 content_controls 做更细粒度的局部替换。",
       "textBlocks 记录章节内可独立改写的正文段块，适合只改局部说明而不重写整节。",
       "headingBlock、bodyRange、captionBlock 是模板结构快照，仅用于分析、校验和回归对比，不作为运行时主定位。",
@@ -459,24 +460,16 @@ function buildFigures(blocks, _sections, relationships) {
 function addTemplateInvisibleAnchors(blocks, sections, tables, figures, fieldBlocks, textBlocks) {
   for (const section of sections) {
     section.anchors = {
-      body: makeSdtAnchor(
-        `ps:section:${section.id}:body`,
-        `${section.number} ${section.title} 正文`,
-        buildSectionLegacyAnchorAliases(section)
-      )
+      body: makeSdtAnchor(`ps:section:${section.id}:body`, `${section.number} ${section.title} 正文`)
     };
   }
 
   for (const table of tables) {
     table.anchors = {
-      table: makeSdtAnchor(`ps:table:${table.id}`, table.caption || table.id, buildTableLegacyAnchorAliases(table)),
+      table: makeSdtAnchor(`ps:table:${table.id}`, table.caption || table.id),
       ...(typeof table.captionBlock === "number"
         ? {
-            caption: makeSdtAnchor(
-              `ps:table:${table.id}:caption`,
-              `${table.caption || table.id} 题注`,
-              buildTableCaptionLegacyAnchorAliases(table)
-            )
+            caption: makeSdtAnchor(`ps:table:${table.id}:caption`, `${table.caption || table.id} 题注`)
           }
         : {})
     };
@@ -486,118 +479,24 @@ function addTemplateInvisibleAnchors(blocks, sections, tables, figures, fieldBlo
     figure.anchors = {
       ...(typeof figure.imageBlock === "number"
         ? {
-            image: makeSdtAnchor(
-              `ps:figure:${figure.id}:image`,
-              `${figure.caption || figure.id} 图片`,
-              buildFigureImageLegacyAnchorAliases(figure)
-            )
+            image: makeSdtAnchor(`ps:figure:${figure.id}:image`, `${figure.caption || figure.id} 图片`)
           }
         : {}),
-      caption: makeSdtAnchor(
-        `ps:figure:${figure.id}:caption`,
-        `${figure.caption || figure.id} 题注`,
-        buildFigureCaptionLegacyAnchorAliases(figure)
-      )
+      caption: makeSdtAnchor(`ps:figure:${figure.id}:caption`, `${figure.caption || figure.id} 题注`)
     };
   }
 
   for (const fieldBlock of fieldBlocks) {
     fieldBlock.anchors = {
-      block: makeSdtAnchor(
-        `ps:field-block:${fieldBlock.id}`,
-        fieldBlock.id,
-        buildFieldBlockLegacyAnchorAliases(fieldBlock)
-      )
+      block: makeSdtAnchor(`ps:field-block:${fieldBlock.id}`, fieldBlock.id)
     };
   }
 
   for (const textBlock of textBlocks) {
     textBlock.anchors = {
-      block: makeSdtAnchor(
-        `ps:section:${textBlock.section}:text:${textBlock.order}`,
-        textBlock.id,
-        buildSectionTextBlockLegacyAnchorAliases(textBlock)
-      )
+      block: makeSdtAnchor(`ps:section:${textBlock.section}:text:${textBlock.order}`, textBlock.id)
     };
   }
-}
-
-function buildSectionLegacyAnchorAliases(section) {
-  const sectionId = section.id || "";
-  const sectionIdUpper = sectionId.toUpperCase();
-  const sectionNumberToken = (section.number || "").replaceAll(".", "_");
-  return uniqueSorted([
-    `STD_${sectionId}`,
-    `STD_${sectionId}_BODY`,
-    `STD_${sectionIdUpper}`,
-    `STD_${sectionIdUpper}_BODY`,
-    sectionNumberToken ? `STD_${sectionNumberToken}` : "",
-    sectionNumberToken ? `STD_${sectionNumberToken}_BODY` : ""
-  ]).filter(Boolean);
-}
-
-function buildTableLegacyAnchorAliases(table) {
-  const tableId = table.id || "";
-  const tableIdUpper = tableId.toUpperCase();
-  return uniqueSorted([
-    `STD_${tableId}`,
-    `STD_${tableId}_TABLE`,
-    `STD_${tableIdUpper}`,
-    `STD_${tableIdUpper}_TABLE`,
-    `STD_TABLE_${tableId}`
-  ]).filter(Boolean);
-}
-
-function buildTableCaptionLegacyAnchorAliases(table) {
-  const tableId = table.id || "";
-  const tableIdUpper = tableId.toUpperCase();
-  return uniqueSorted([
-    `STD_${tableId}_CAPTION`,
-    `STD_${tableIdUpper}_CAPTION`,
-    `STD_TABLE_${tableId}_CAPTION`
-  ]).filter(Boolean);
-}
-
-function buildFigureImageLegacyAnchorAliases(figure) {
-  const figureId = figure.id || "";
-  const figureIdUpper = figureId.toUpperCase();
-  return uniqueSorted([
-    `STD_${figureId}`,
-    `STD_${figureId}_IMAGE`,
-    `STD_${figureIdUpper}`,
-    `STD_${figureIdUpper}_IMAGE`,
-    `STD_FIGURE_${figureId}_IMAGE`
-  ]).filter(Boolean);
-}
-
-function buildFigureCaptionLegacyAnchorAliases(figure) {
-  const figureId = figure.id || "";
-  const figureIdUpper = figureId.toUpperCase();
-  return uniqueSorted([
-    `STD_${figureId}_CAPTION`,
-    `STD_${figureIdUpper}_CAPTION`,
-    `STD_FIGURE_${figureId}_CAPTION`
-  ]).filter(Boolean);
-}
-
-function buildFieldBlockLegacyAnchorAliases(fieldBlock) {
-  const fieldBlockId = fieldBlock.id || "";
-  const fieldBlockIdUpper = fieldBlockId.toUpperCase();
-  return uniqueSorted([`STD_${fieldBlockId}`, `STD_${fieldBlockIdUpper}`]).filter(Boolean);
-}
-
-function buildSectionTextBlockLegacyAnchorAliases(textBlock) {
-  const sectionId = textBlock.section || "";
-  const upperSectionId = sectionId.toUpperCase();
-  const sectionNumberToken = (textBlock.sectionNumber || "").replaceAll(".", "_");
-  const order = textBlock.order;
-  return uniqueSorted([
-    `STD_${textBlock.id}`,
-    `STD_${textBlock.id.toUpperCase()}`,
-    sectionId ? `STD_${sectionId}_TEXT_${order}` : "",
-    sectionId ? `STD_${upperSectionId}_TEXT_${order}` : "",
-    sectionNumberToken ? `STD_${sectionNumberToken}_TEXT_${order}` : ""
-  ]).filter(Boolean);
 }
 
 function assignSectionDirectBodyRanges(sections, blocks) {
@@ -1033,11 +932,10 @@ function isManagedBookmarkName(name) {
   return /^(ps_sec_|ps_table_|ps_fig_)/.test(name ?? "");
 }
 
-function makeSdtAnchor(tag, alias = tag, aliases = []) {
+function makeSdtAnchor(tag, alias = tag) {
   return {
     tag,
-    alias,
-    ...(aliases.length ? { aliases: uniqueSorted(aliases.filter(Boolean)) } : {})
+    alias
   };
 }
 
@@ -1479,9 +1377,9 @@ function getSectionHintMap() {
   "2.1": "填写系统基本信息、建设单位、等保级别、是否依赖云平台、测评和密评情况；基础字段优先通过 template_fields 写入。",
   "2.2": "概述物理环境、网络环境和计算环境，为风险分析和设计章节提供现状基础。",
   "2.2.1": "描述机房名称、地址、管理责任主体、门禁、视频监控和值守情况。",
-  "2.2.2": "描述网络整体结构、边界划分、设备组成、数据交互和现有安全防护措施。",
+  "2.2.2": `描述网络整体结构、边界划分、设备组成、数据交互和现有安全防护措施。${NETWORK_CHANNEL_RULE}`,
   "2.2.2.1": "描述逻辑网络框架；需要图片时使用 diagrams label：网络框架图。",
-  "2.2.2.2": "描述网络拓扑、边界设备和访问路径；需要图片时使用 diagrams label：网络拓扑图。",
+  "2.2.2.2": `描述网络拓扑、边界设备和访问路径；需要图片时使用 diagrams label：网络拓扑图。${NETWORK_CHANNEL_RULE}`,
   "2.2.3": "描述服务器、存储、数据库、网络设备、安全设备和云资源现状。",
   "2.3": "描述业务场景、子系统、用户角色、关键数据、外部接口和责任主体。",
   "2.4": "说明当前已部署或拟部署的密码产品、密码协议、证书、密钥和密码服务。",
@@ -1494,6 +1392,7 @@ function getSectionHintMap() {
   "5": "本章是核心设计章节，需要说明保护对象、密码产品、算法协议、部署位置、调用方式、密钥管理和安全效果。",
   "5.1": "描述密码应用技术框架；需要图片时使用 diagrams label：密码应用技术架构图。",
   "5.2": "描述物理和环境、网络和通信、设备和计算层面的密码应用方案。",
+  "5.2.2": `描述网络和通信安全的密码应用方案，说明各通信信道的保护对象、密码措施、产品部署位置和调用路径。${NETWORK_CHANNEL_RULE}`,
   "5.3": "描述密码服务机构、算法、密码设备标准、功能、部署、接入方式、密钥管理和自身安全性。",
   "5.3.7": "覆盖密钥生成、存储、分发、导入导出、使用、备份恢复、归档和销毁。",
   "5.4": "描述业务应用层身份鉴别、访问控制信息完整性、重要数据传输和存储保护、不可否认性等。",

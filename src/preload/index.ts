@@ -11,6 +11,9 @@ import type {
 } from "../shared/types";
 
 const api: PwdSafeAgentApi = {
+  app: {
+    getMetadata: () => ipcRenderer.invoke("app:metadata")
+  },
   session: {
     list: () => ipcRenderer.invoke("session:list"),
     create: () => ipcRenderer.invoke("session:create"),

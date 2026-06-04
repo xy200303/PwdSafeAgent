@@ -141,8 +141,6 @@ export interface TemplateTableReplacementInput {
 export interface ContentControlReplacementInput {
   tag: string;
   value: string;
-  alias?: string;
-  aliases?: string[];
 }
 
 export interface SchemeCompletenessResult {
@@ -233,7 +231,6 @@ interface WordTemplateFigure {
 interface WordTemplateAnchor {
   tag: string;
   alias?: string;
-  aliases?: string[];
 }
 
 const PLACEHOLDER_KEYS = [
@@ -1769,87 +1766,7 @@ function buildTemplateSectionReplacementAnchor(
 }
 
 function getSectionBodyAnchorTags(section: WordTemplateSection): string[] {
-  const sectionNumber = parseSectionNumberFromTemplateId(section.id) || section.number;
-  return buildContentControlTagCandidates(section.anchors?.body, [
-    `ps:section:${section.id}:body`,
-    ...buildSectionLegacyAnchorAliases(section.id, sectionNumber)
-  ]);
-}
-
-function buildSectionLegacyAnchorAliases(sectionId: string, sectionNumber?: string): string[] {
-  const upperSectionId = sectionId.toUpperCase();
-  const numberToken = sectionNumber?.replace(/\./g, "_") ?? "";
-  return normalizeContentControlTagCandidates([
-    `STD_${sectionId}`,
-    `STD_${sectionId}_BODY`,
-    `STD_${upperSectionId}`,
-    `STD_${upperSectionId}_BODY`,
-    numberToken ? `STD_${numberToken}` : "",
-    numberToken ? `STD_${numberToken}_BODY` : ""
-  ]);
-}
-
-function buildTableLegacyAnchorAliases(tableId: string): string[] {
-  const upperTableId = tableId.toUpperCase();
-  return normalizeContentControlTagCandidates([
-    `STD_${tableId}`,
-    `STD_${tableId}_TABLE`,
-    `STD_${upperTableId}`,
-    `STD_${upperTableId}_TABLE`,
-    `STD_TABLE_${tableId}`
-  ]);
-}
-
-function buildTableCaptionLegacyAnchorAliases(tableId: string): string[] {
-  const upperTableId = tableId.toUpperCase();
-  return normalizeContentControlTagCandidates([
-    `STD_${tableId}_CAPTION`,
-    `STD_${upperTableId}_CAPTION`,
-    `STD_TABLE_${tableId}_CAPTION`
-  ]);
-}
-
-function buildFigureImageLegacyAnchorAliases(figureId: string): string[] {
-  const upperFigureId = figureId.toUpperCase();
-  return normalizeContentControlTagCandidates([
-    `STD_${figureId}`,
-    `STD_${figureId}_IMAGE`,
-    `STD_${upperFigureId}`,
-    `STD_${upperFigureId}_IMAGE`,
-    `STD_FIGURE_${figureId}_IMAGE`
-  ]);
-}
-
-function buildFigureCaptionLegacyAnchorAliases(figureId: string): string[] {
-  const upperFigureId = figureId.toUpperCase();
-  return normalizeContentControlTagCandidates([
-    `STD_${figureId}_CAPTION`,
-    `STD_${upperFigureId}_CAPTION`,
-    `STD_FIGURE_${figureId}_CAPTION`
-  ]);
-}
-
-function buildFieldBlockLegacyAnchorAliases(fieldBlockId: string): string[] {
-  const upperFieldBlockId = fieldBlockId.toUpperCase();
-  return normalizeContentControlTagCandidates([`STD_${fieldBlockId}`, `STD_${upperFieldBlockId}`]);
-}
-
-function buildSectionTextBlockLegacyAnchorAliases(
-  sectionId: string,
-  order: number,
-  sectionNumber?: string,
-  textBlockId?: string
-): string[] {
-  const upperSectionId = sectionId.toUpperCase();
-  const numberToken = sectionNumber?.replace(/\./g, "_") ?? "";
-  const textBlockUpperId = textBlockId?.toUpperCase() ?? "";
-  return normalizeContentControlTagCandidates([
-    textBlockId ? `STD_${textBlockId}` : "",
-    textBlockUpperId ? `STD_${textBlockUpperId}` : "",
-    `STD_${sectionId}_TEXT_${order}`,
-    `STD_${upperSectionId}_TEXT_${order}`,
-    numberToken ? `STD_${numberToken}_TEXT_${order}` : ""
-  ]);
+  return buildContentControlTagCandidates(section.anchors?.body, [`ps:section:${section.id}:body`]);
 }
 
 function findSdtBlockByTags(blocks: WordBodyBlock[], tags: string[]): WordBodyBlock | undefined {
@@ -1874,7 +1791,6 @@ function buildContentControlTagCandidates(anchor: WordTemplateAnchor | undefined
   return normalizeContentControlTagCandidates([
     anchor?.tag,
     anchor?.alias,
-    ...(anchor?.aliases ?? []),
     ...fallbackTags
   ]);
 }
@@ -2057,7 +1973,7 @@ function resolveContentControlReplacementTags(
   replacement: ContentControlReplacementInput,
   templateJson?: WordTemplateJson
 ): string[] {
-  const directTags = normalizeContentControlTagCandidates([replacement.tag, replacement.alias, ...(replacement.aliases ?? [])]);
+  const directTags = normalizeContentControlTagCandidates([replacement.tag]);
   if (!templateJson) return directTags;
   return unique([...directTags, ...resolveTemplateContentControlTags(templateJson, directTags)]);
 }
@@ -2233,17 +2149,11 @@ function findTemplateTable(
 }
 
 function getTableAnchorTags(table: WordTemplateTable): string[] {
-  return buildContentControlTagCandidates(table.anchors?.table, [
-    `ps:table:${table.id}`,
-    ...buildTableLegacyAnchorAliases(table.id)
-  ]);
+  return buildContentControlTagCandidates(table.anchors?.table, [`ps:table:${table.id}`]);
 }
 
 function getTableCaptionAnchorTags(table: WordTemplateTable): string[] {
-  return buildContentControlTagCandidates(table.anchors?.caption, [
-    `ps:table:${table.id}:caption`,
-    ...buildTableCaptionLegacyAnchorAliases(table.id)
-  ]);
+  return buildContentControlTagCandidates(table.anchors?.caption, [`ps:table:${table.id}:caption`]);
 }
 
 function resolveTemplateCellIndex(table: WordTemplateTable, replacement: TemplateCellReplacementInput): number {
@@ -2881,31 +2791,19 @@ function replaceTemplateFigureImage(zip: PizZip, figure: WordTemplateFigure, med
 }
 
 function getFigureImageAnchorTags(figure: WordTemplateFigure): string[] {
-  return buildContentControlTagCandidates(figure.anchors?.image, [
-    `ps:figure:${figure.id}:image`,
-    ...buildFigureImageLegacyAnchorAliases(figure.id)
-  ]);
+  return buildContentControlTagCandidates(figure.anchors?.image, [`ps:figure:${figure.id}:image`]);
 }
 
 function getFigureCaptionAnchorTags(figure: WordTemplateFigure): string[] {
-  return buildContentControlTagCandidates(figure.anchors?.caption, [
-    `ps:figure:${figure.id}:caption`,
-    ...buildFigureCaptionLegacyAnchorAliases(figure.id)
-  ]);
+  return buildContentControlTagCandidates(figure.anchors?.caption, [`ps:figure:${figure.id}:caption`]);
 }
 
 function getFieldBlockAnchorTags(fieldBlock: WordTemplateFieldBlock): string[] {
-  return buildContentControlTagCandidates(fieldBlock.anchors?.block, [
-    `ps:field-block:${fieldBlock.id}`,
-    ...buildFieldBlockLegacyAnchorAliases(fieldBlock.id)
-  ]);
+  return buildContentControlTagCandidates(fieldBlock.anchors?.block, [`ps:field-block:${fieldBlock.id}`]);
 }
 
 function getSectionTextBlockAnchorTags(textBlock: WordTemplateTextBlock): string[] {
-  return buildContentControlTagCandidates(textBlock.anchors?.block, [
-    `ps:section:${textBlock.section}:text:${textBlock.order}`,
-    ...buildSectionTextBlockLegacyAnchorAliases(textBlock.section, textBlock.order, textBlock.sectionNumber, textBlock.id)
-  ]);
+  return buildContentControlTagCandidates(textBlock.anchors?.block, [`ps:section:${textBlock.section}:text:${textBlock.order}`]);
 }
 
 function normalizeFigureLookup(value: string): string {

@@ -25,12 +25,10 @@ interface TemplateTable {
     table: {
       tag: string;
       alias?: string;
-      aliases?: string[];
     };
     caption?: {
       tag: string;
       alias?: string;
-      aliases?: string[];
     };
   };
   rows: Array<{
@@ -54,12 +52,10 @@ interface TemplateFigure {
     image?: {
       tag: string;
       alias?: string;
-      aliases?: string[];
     };
     caption: {
       tag: string;
       alias?: string;
-      aliases?: string[];
     };
   };
 }
@@ -75,7 +71,6 @@ interface TemplateFieldBlock {
     block?: {
       tag: string;
       alias?: string;
-      aliases?: string[];
     };
   };
 }
@@ -91,7 +86,6 @@ interface TemplateTextBlock {
     block?: {
       tag: string;
       alias?: string;
-      aliases?: string[];
     };
   };
 }
@@ -130,7 +124,6 @@ interface TemplateJson {
       body: {
         tag: string;
         alias?: string;
-        aliases?: string[];
       };
     };
     relatedTables?: string[];
@@ -144,10 +137,12 @@ interface TemplateJson {
 
 describe("scheme template json", () => {
   it("contains detailed invisible anchors parsed from the built-in Word template", async () => {
-    const template = JSON.parse(await readFile(BUILT_IN_TEMPLATE_JSON_PATH, "utf-8")) as TemplateJson;
+    const rawTemplateJson = await readFile(BUILT_IN_TEMPLATE_JSON_PATH, "utf-8");
+    const template = JSON.parse(rawTemplateJson) as TemplateJson;
 
     expect(template.source.docx).toBe("docs/templates/密码应用方案.docx");
     expect("contentTemplate" in template.source).toBe(false);
+    expect(rawTemplateJson).not.toContain('"aliases"');
     expect(template.statistics.blockCount).toBeGreaterThan(500);
     expect(template.statistics.sectionCount).toBeGreaterThanOrEqual(150);
     expect(template.statistics.tableCount).toBeGreaterThanOrEqual(35);
@@ -166,7 +161,7 @@ describe("scheme template json", () => {
       anchors: {
         block: {
           tag: "ps:field-block:field_block_front_9",
-          aliases: expect.arrayContaining(["STD_FIELD_BLOCK_FRONT_9"])
+          alias: "field_block_front_9"
         }
       }
     });
@@ -178,7 +173,7 @@ describe("scheme template json", () => {
       anchors: {
         block: {
           tag: "ps:section:sec_2_2_2:text:1",
-          aliases: expect.arrayContaining(["STD_SEC_2_2_2_TEXT_1", "STD_2_2_2_TEXT_1"])
+          alias: "sec_2_2_2_text_1"
         }
       }
     });
@@ -191,11 +186,12 @@ describe("scheme template json", () => {
       anchors: {
         body: {
           tag: "ps:section:sec_2_2_2:body",
-          aliases: expect.arrayContaining(["STD_SEC_2_2_2_BODY", "STD_2_2_2_BODY"])
+          alias: "2.2.2 网络环境 正文"
         }
       }
     });
     expect(networkSection?.headingBlock).toBeGreaterThan(0);
+    expect(networkSection?.writingHint).toContain("访问者通过网络访问系统");
     expect(networkSection?.bodyRange[0]).toBeGreaterThan(networkSection?.headingBlock ?? 0);
     expect(networkSection?.bodyRange[1]).toBeGreaterThanOrEqual(networkSection?.bodyRange[0] ?? 0);
     expect(networkSection?.directBodyRange[0]).toBeGreaterThan(networkSection?.headingBlock ?? 0);
@@ -212,11 +208,11 @@ describe("scheme template json", () => {
     expect(basicTable?.anchors).toMatchObject({
       table: {
         tag: "ps:table:table_3_2_1",
-        aliases: expect.arrayContaining(["STD_TABLE_3_2_1", "STD_table_3_2_1_TABLE"])
+        alias: "表 21系统基本情况表"
       },
       caption: {
         tag: "ps:table:table_3_2_1:caption",
-        aliases: expect.arrayContaining(["STD_TABLE_3_2_1_CAPTION"])
+        alias: "表 21系统基本情况表 题注"
       }
     });
     expect("visibleMarkers" in (basicTable ?? {})).toBe(false);
@@ -244,11 +240,11 @@ describe("scheme template json", () => {
       anchors: {
         image: {
           tag: "ps:figure:fig_1_2_2_2_1:image",
-          aliases: expect.arrayContaining(["STD_FIG_1_2_2_2_1_IMAGE", "STD_FIGURE_fig_1_2_2_2_1_IMAGE"])
+          alias: "图 21 网络框架图 图片"
         },
         caption: {
           tag: "ps:figure:fig_1_2_2_2_1:caption",
-          aliases: expect.arrayContaining(["STD_FIG_1_2_2_2_1_CAPTION"])
+          alias: "图 21 网络框架图 题注"
         }
       },
       recommendedLabel: "网络框架图",

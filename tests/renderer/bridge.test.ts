@@ -22,6 +22,7 @@ describe("renderer bridge", () => {
 
   it("accepts a complete bridge shape", () => {
     const bridge = {
+      app: { getMetadata() {} },
       session: { list() {}, create() {} },
       chat: { prompt() {} },
       attachment: { pick() {} },

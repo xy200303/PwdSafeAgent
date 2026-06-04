@@ -47,6 +47,8 @@ import {
 const execAsync = promisify(exec);
 const imageGenerationQueue: Array<{ limit: number; resolve: () => void }> = [];
 let activeImageGenerations = 0;
+const NETWORK_CHANNEL_RULE =
+  "网络通道/通信信道按“访问者通过网络访问系统”的形式定义，例如“业务用户通过互联网访问{应用系统}的通信信道”；访问者可为业务用户、管理用户、运维人员或第三方系统，网络可为互联网、政务外网、内网、VPN、专线或运维网。";
 
 export interface AgentToolExecutionContext {
   rootDir: string;
@@ -341,7 +343,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
           `sections[].section 必须来自 ${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH} 的真实 sections 条目，优先传 id，例如 sec_2_2_2；不要自行拆分或编造模板中不存在的 7.2、sec_7_2 等虚拟章节。`,
           "每个章节会按 paragraph_tasks 生成 2-4 个连续段落；如果 plan_scheme_batches 返回了 paragraph_tasks，必须原样传入。",
           "本工具只生成正文段落和必要列表，不生成 Markdown 表格，不生成图片，不修改模板表格；动态表 template_tables、固定表 template_cells 和配图 image_generate/diagrams 应在所有正文写入后由 Agent 统一处理。",
-          "草稿必须贴合 section 的 writingHint、placeholders、relatedTables、relatedFigures 和已确认项目事实；资料不足处写待补充，不编造关键事实。"
+          "草稿必须贴合模板章节写作提示、占位字段、关联表格、关联图示和已确认项目事实；入参只传 section、title、writing_hint、paragraph_tasks，资料不足处写待补充，不编造关键事实。"
         ].join("\n"),
         parameters: {
           type: "object",
@@ -396,7 +398,7 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
       function: {
         name: "create_word",
         description:
-          `根据内置 ${BUILT_IN_TEMPLATE_DOCX_RELATIVE_PATH} 模板创建一个 Word 文件。默认直接复制模板，内容和格式与模板保持一致；可选 template_fields 替换 {字段名} 占位，template_tables 整表重建动态表格，content_controls 按 Word Content Control tag/STD_* 精确替换模板控件内容。`,
+          `根据内置 ${BUILT_IN_TEMPLATE_DOCX_RELATIVE_PATH} 模板创建一个 Word 文件。默认直接复制模板，内容和格式与模板保持一致；可选 template_fields 替换 {字段名} 占位，template_tables 整表重建动态表格，content_controls 按当前 Word Content Control tag 或 template.json 块 id 精确替换模板控件内容。`,
         parameters: {
           type: "object",
           properties: {
@@ -432,29 +434,18 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             content_controls: {
               type: "array",
               description:
-                "可选 Content Control tag 精准替换。用于按 Word 模板里的 w:tag/STD_* 标签直接替换某个固定字段、局部正文块或模板块，保留该控件外层样式和结构。",
+                "可选 Content Control tag 精准替换。用于按 Word 模板里的 ps:* 锚点或 template.json 块 id 直接替换局部正文块或模板块，保留该控件外层样式和结构。固定字段必须使用 template_fields。",
               items: {
                 type: "object",
                 properties: {
                   tag: {
                     type: "string",
                     description:
-                      "Word Content Control 的 tag；也可直接传 template.json 中的 block id，例如 sec_2_2_2_text_1、field_block_front_9、ps:section:sec_1:body、STD_SYSTEM_NAME。"
+                      "Word Content Control 的当前 tag 或 template.json 中的块 id，例如 sec_2_2_2_text_1、field_block_front_9、ps:section:sec_1:body。不要传字段名或旧标签。"
                   },
                   value: {
                     type: "string",
                     description: "写入内容；可包含多行文本或简单 Markdown 表格。"
-                  },
-                  alias: {
-                    type: "string",
-                    description: "可选候选 tag；用于兼容另一个命名。"
-                  },
-                  aliases: {
-                    type: "array",
-                    description: "可选候选 tag；用于同时兼容 STD_* 和 ps:* 命名。",
-                    items: {
-                      type: "string"
-                    }
                   }
                 },
                 required: ["tag", "value"],
@@ -545,11 +536,11 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
           "正式生成优先使用 sections 批量写入多个已起草章节：一次打开 docx、替换多个不可见锚、一次保存，明显快于多次调用 write_word。",
           "正文可先由 draft_scheme_sections 并行起草，再把多个草稿合并到 sections 数组中按模板顺序一次性写入同一个 docx。",
           "表格和配图必须放在所有正文章节写入后统一补充：先调用 plan_scheme_assets；动态表用 template_tables 重建整表，固定骨架表用 template_cells 精确补单元格，再生图并嵌入。",
-          "固定字段、小段模板内容或旧 STD_* 标签内容，可用 content_controls 按 Word Content Control tag 精确替换；这适合 AI 对已有 Word 做局部编辑。",
+          "固定字段必须使用 template_fields；局部正文块或模板块可用 content_controls 按当前 Word Content Control tag 或 template.json 块 id 精确替换。",
           "如果 template.json 某节已经列出局部正文块 textBlocks，而需求只是补一句、改一段或细化局部说明，优先使用 write_word.content_controls；这样更稳定，也更利于保留后续图表锚点。",
           "兼容模式：不传 section 时可用 template_sections 按 Markdown 编号拆分章节，但正式交付不推荐一次性写入整篇长文。",
           "传入 section 时，section 必须精确匹配 template.json 中已存在的章节 id 或 number，推荐传 id，例如 sec_7；不要传模板中不存在的 7.2、sec_7_2 等虚拟章节。",
-          "Word 内部定位优先使用该章节 anchors.body.tag/alias 对应的 Content Control tag（不可见 SDT 锚），也兼容常见 STD_* tag 命名；只替换 w:sdtContent，保留模板其他章节、页眉页脚、样式和编号。",
+          "Word 内部定位优先使用该章节 anchors.body.tag/alias 对应的 Content Control tag（不可见 SDT 锚）；只替换 w:sdtContent，保留模板其他章节、页眉页脚、样式和编号。",
           "Markdown 表格会渲染为真实 Word 表格；可用 render_mode=full_document 优先重建正文，但如果同时需要保留模板图位或表格锚点且 Markdown 能匹配模板章节，会先按模板章节写入以保留锚点；append 追加到文末。"
         ].join("\n"),
         parameters: {
@@ -696,29 +687,18 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             content_controls: {
               type: "array",
               description:
-                "可选 Content Control tag 精准替换。用于按 Word 模板里的 w:tag/STD_* 标签直接替换某个固定字段、局部正文块或模板块，保留该控件外层样式和结构。",
+                "可选 Content Control tag 精准替换。用于按 Word 模板里的 ps:* 锚点或 template.json 块 id 直接替换局部正文块或模板块，保留该控件外层样式和结构。固定字段必须使用 template_fields。",
               items: {
                 type: "object",
                 properties: {
                   tag: {
                     type: "string",
                     description:
-                      "Word Content Control 的 tag；也可直接传 template.json 中的 block id，例如 sec_2_2_2_text_1、field_block_front_9、ps:section:sec_1:body、STD_SYSTEM_NAME。"
+                      "Word Content Control 的当前 tag 或 template.json 中的块 id，例如 sec_2_2_2_text_1、field_block_front_9、ps:section:sec_1:body。不要传字段名或旧标签。"
                   },
                   value: {
                     type: "string",
                     description: "写入内容；可包含多行文本或简单 Markdown 表格。"
-                  },
-                  alias: {
-                    type: "string",
-                    description: "可选候选 tag；用于兼容另一个命名。"
-                  },
-                  aliases: {
-                    type: "array",
-                    description: "可选候选 tag；用于同时兼容 STD_* 和 ps:* 命名。",
-                    items: {
-                      type: "string"
-                    }
                   }
                 },
                 required: ["tag", "value"],
@@ -1141,7 +1121,6 @@ interface SchemeTemplateTaskFieldBlock {
     block?: {
       tag: string;
       alias?: string;
-      aliases?: string[];
     };
   };
 }
@@ -1156,7 +1135,6 @@ interface SchemeTemplateTaskTextBlock {
     block?: {
       tag: string;
       alias?: string;
-      aliases?: string[];
     };
   };
 }
@@ -1198,9 +1176,10 @@ function buildSchemeTemplateTaskSummary(filePath: string, context: AgentToolExec
     "- section 必须使用下方真实 id，例如 sec_2_2_2；不要编造不存在的章节。",
     "- 每节正文按 paragraph_plan 分段编写，一项任务对应一个自然段；段落之间要承接上文，不能各写各的。",
     "- tables/figures 只记录后续任务，正文阶段不要生成 Markdown 表格或图片。",
+    `- ${NETWORK_CHANNEL_RULE}`,
     "- 正文草稿完成后，用 write_word.sections 按相同顺序批量写入 Word；随后调用 plan_scheme_assets 规划表格和图片任务。",
     "- dynamic 表格按 plan_scheme_assets 返回的 template_tables_plan 整表生成；fixed 表按 template_cells_plan 改写 value 后写入；图片按 image_generate_plan 生成，再用 diagrams.figure_id 精确嵌入。",
-    "- content_controls[].tag 可直接传 fieldBlocks/textBlocks 的 id，例如 field_block_front_9、sec_2_2_2_text_1；工具会自动映射到真实 ps:* / STD_* tag。",
+    "- content_controls[].tag 可直接传 fieldBlocks/textBlocks 的 id，例如 field_block_front_9、sec_2_2_2_text_1；工具会自动映射到当前模板的 ps:* tag。",
     "- 如果只想改某节中的一小段正文，优先使用该节的 textBlocks / write_word.content_controls 做局部替换，不必重写整节。",
     "- 某节若已列出“局部正文块”，补一句、改一段、细化说明时都先用局部块；只有需要整体改写多段结构时再用 write_word.sections。",
     "",
@@ -1345,17 +1324,14 @@ function readTemplateTaskFieldBlockAnchors(value: unknown): SchemeTemplateTaskFi
   return block ? { block } : undefined;
 }
 
-function readTemplateTaskAnchor(
-  value: unknown
-): { tag: string; alias?: string; aliases?: string[] } | undefined {
+function readTemplateTaskAnchor(value: unknown): { tag: string; alias?: string } | undefined {
   if (!value || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
   const tag = readRecordString(record, "tag");
   if (!tag) return undefined;
   return {
     tag,
-    alias: readRecordString(record, "alias") || undefined,
-    aliases: readRecordStringArray(record, "aliases")
+    alias: readRecordString(record, "alias") || undefined
   };
 }
 
@@ -1400,7 +1376,7 @@ function formatTemplateTaskFieldBlocks(fieldBlocks: SchemeTemplateTaskFieldBlock
     const placeholders = fieldBlock.placeholders?.length ? ` | 字段：${fieldBlock.placeholders.join("、")}` : "";
     const blockTags = [
       fieldBlock.anchors?.block?.tag,
-      ...(fieldBlock.anchors?.block?.aliases ?? [])
+      fieldBlock.anchors?.block?.alias
     ]
       .filter(Boolean)
       .slice(0, 3)
@@ -1515,6 +1491,10 @@ function buildSectionParagraphTasks(
     tasks.push("说明本节范围和已确认对象", "描述组成、位置、边界、责任主体或数据流向", "指出资料缺口并引出后续风险或设计分析");
   } else {
     tasks.push("承接上一节说明本节主题和范围", "结合项目事实展开关键对象、关系和约束", "总结本节结论并自然引出下一节");
+  }
+
+  if (/网络|通信|通道|信道|拓扑|边界/.test(text)) {
+    tasks.splice(1, 0, "按“访问者通过网络访问系统”的形式定义网络通道/通信信道");
   }
 
   if (section.relatedTables?.length) {
@@ -2240,7 +2220,8 @@ function buildDraftSchemeSectionMessages(
         "第一段要自然承接 previous_section，最后一段要为 next_section 留出过渡；没有上下文时也要写清本段与本节主题的关系。",
         "本阶段只写正文段落和必要列表；不要生成 Markdown 表格，不要生成图片，不要写 Mermaid/SVG，不要编造表格单元格。",
         "如该节关联表格或图示，只写引入性正文，具体表格和配图将在最后由 Agent 用 template_tables/template_cells、image_generate 和 diagrams 统一生成。",
-        "正文中禁止输出模板内部 ID、锚点或任务清单，例如 fig_*、table_*、ps:figure:*、STD_*；需要提到图表时只写自然名称。",
+        "正文中禁止输出模板内部 ID、锚点或任务清单，例如 fig_*、table_*、ps:figure:*；需要提到图表时只写自然名称。",
+        NETWORK_CHANNEL_RULE,
         "降低 AI 味：围绕本节事实写短而具体的句子，说明对象、位置、算法/产品/调用路径/安全效果；避免万能套话、重复政策背景和空泛排比。",
         "资料不足时明确写“待补充/需确认”，不得虚构建设单位、设备型号、产品名称、网络边界或密钥管理细节。"
       ].join("\n")
@@ -2958,16 +2939,10 @@ function normalizeContentControlReplacement(item: unknown): ContentControlReplac
   const record = item as Record<string, unknown>;
   const tag = typeof record.tag === "string" ? record.tag.trim() : "";
   const value = typeof record.value === "string" ? record.value.trim() : "";
-  const alias = typeof record.alias === "string" ? record.alias.trim() : "";
-  const aliases = Array.isArray(record.aliases)
-    ? record.aliases.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean)
-    : [];
   if (!tag || !value) return undefined;
   return {
     tag,
-    value,
-    ...(alias ? { alias } : {}),
-    ...(aliases.length ? { aliases } : {})
+    value
   };
 }
 

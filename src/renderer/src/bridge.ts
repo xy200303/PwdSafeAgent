@@ -6,6 +6,7 @@ export interface BridgeResolution {
 }
 
 const REQUIRED_BRIDGE_METHODS = [
+  "app.getMetadata",
   "session.list",
   "session.create",
   "chat.prompt",

@@ -35,7 +35,9 @@ import {
   clampDraftSectionParallelism,
   clampImageGenerationParallelism
 } from "../shared/types";
+import { APP_DISPLAY_NAME, createAppMetadata } from "../shared/appMetadata";
 import type {
+  AppMetadata,
   AppSettings,
   ArtifactKind,
   ArtifactListInput,
@@ -53,6 +55,7 @@ import type {
 } from "../shared/types";
 
 const { app, BrowserWindow, dialog, ipcMain, shell } = electron;
+app.setName(APP_DISPLAY_NAME);
 const projectRootDir = process.cwd();
 const resourcesDir = getProcessResourcesDir();
 const appPaths = resolveAppPaths({
@@ -72,6 +75,10 @@ const sessionMemories = new Map<string, SessionMemoryEntry[]>();
 let persistTimer: NodeJS.Timeout | undefined;
 const MAX_DOCUMENT_CONTEXT_CHARS = 24000;
 const MAX_SESSION_MEMORY_CHARS = 90000;
+
+function getAppMetadata(): AppMetadata {
+  return createAppMetadata(app.getVersion());
+}
 
 function ensureDataDirs(): void {
   for (const dir of [dataDir, inputDir, outputDir]) {
@@ -900,6 +907,7 @@ function importClipboardAttachments(input: ClipboardAttachmentInput): Attachment
 }
 
 function registerIpc(): void {
+  ipcMain.handle("app:metadata", () => getAppMetadata());
   ipcMain.handle("session:list", () => Array.from(sessions.values()));
   ipcMain.handle("session:create", () => createSession());
   ipcMain.handle("session:rename", (_event, input: RenameSessionInput) => renameSession(input));
@@ -973,7 +981,7 @@ function createWindow(): void {
     height: 860,
     minWidth: 1180,
     minHeight: 760,
-    title: "PwdSafeAgent",
+    title: getAppMetadata().title,
     autoHideMenuBar: true,
     ...(windowIconPath ? { icon: windowIconPath } : {}),
     webPreferences: {

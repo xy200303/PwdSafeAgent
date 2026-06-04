@@ -165,6 +165,8 @@ describe("agentToolRegistry", () => {
     expect(result.content).toContain("content_controls[].tag 可直接传 fieldBlocks/textBlocks 的 id");
     expect(result.content).toContain("sec_2_2_2 | 2.2.2 网络环境");
     expect(result.content).toContain("task: 正文：描述网络整体结构");
+    expect(result.content).toContain("网络通道/通信信道按“访问者通过网络访问系统”的形式定义");
+    expect(result.content).toContain("按“访问者通过网络访问系统”的形式定义网络通道/通信信道");
     expect(result.content).toContain("局部正文块：sec_2_2_2_text_1（tag：ps:section:sec_2_2_2:text:1）");
     expect(result.content).toContain("段落：说明本节范围和已确认对象");
     expect(result.content).toContain("表格：表 22 物理环境情况");

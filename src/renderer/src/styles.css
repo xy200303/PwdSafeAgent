@@ -130,6 +130,10 @@ button {
   min-height: 42px;
 }
 
+.brand > div:last-child {
+  min-width: 0;
+}
+
 .brand-mark {
   display: grid;
   place-items: center;
@@ -144,6 +148,8 @@ button {
 .brand-name {
   font-size: 15px;
   font-weight: 700;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .brand-subtitle,

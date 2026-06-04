@@ -174,7 +174,7 @@ describe("schemeDocument", () => {
     }
   });
 
-  it("resolves STD content control tags through the template mapping while preserving the outer Word control", async () => {
+  it("resolves current template ids through the content control mapping while preserving the outer Word control", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-content-control-"));
     const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
     const outputPath = join(dir, "控件局部替换.docx");
@@ -183,12 +183,12 @@ describe("schemeDocument", () => {
       const result = await updateWordTemplateContent(templatePath, outputPath, {
         contentControls: [
           {
-            tag: "STD_SEC_1_1_BODY",
+            tag: "sec_1_1",
             value: [
               "统一身份认证系统通过 Content Control 完成局部替换。",
               "| 控件 | 说明 |",
               "| --- | --- |",
-              "| STD | 兼容旧标签 |"
+              "| ps:* | 当前模板锚点 |"
             ].join("\n")
           }
         ]
@@ -204,8 +204,68 @@ describe("schemeDocument", () => {
       expect(sdtXml).toContain("ps:section:sec_1_1:body");
       expect(sdtXml).toContain("统一身份认证系统通过 Content Control 完成局部替换");
       expect(sdtXml).toContain("<w:tbl>");
-      expect(sdtXml).toContain("兼容旧标签");
+      expect(sdtXml).toContain("当前模板锚点");
       expect(documentXml).toContain("法律法规要求");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires template fields instead of field-like content control tags", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-std-field-"));
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
+    const outputPath = join(dir, "字段旧标签替换.docx");
+
+    try {
+      await expect(
+        createWordDocxFromTemplate(templatePath, outputPath, {
+          contentControls: [
+            {
+              tag: "STD_SYSTEM_NAME",
+              value: "罗布林卡一体化综合管理与智慧化服务平台"
+            }
+          ]
+        })
+      ).rejects.toThrow("未找到 Word Content Control tag");
+
+      const result = await createWordDocxFromTemplate(templatePath, outputPath, {
+        templateFields: [
+          {
+            key: "应用系统",
+            value: "罗布林卡一体化综合管理与智慧化服务平台"
+          }
+        ]
+      });
+      const documentXml = await readDocumentXml(outputPath);
+      const extracted = await mammoth.extractRawText({ path: outputPath });
+
+      expect(result.templateReplacementCount).toBeGreaterThan(0);
+      expect(result.contentControlReplacementCount).toBe(0);
+      expect(result.filledFields).toContain("应用系统");
+      expect(documentXml).toContain("罗布林卡一体化综合管理与智慧化服务平台");
+      expect(extracted.value).toContain("罗布林卡一体化综合管理与智慧化服务平台");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("creates a template field replacement from normalized English field keys", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-field-key-"));
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
+    const outputPath = join(dir, "英文字段替换.docx");
+
+    try {
+      const result = await createWordDocxFromTemplate(templatePath, outputPath, {
+        templateFields: [{ key: "systemName", value: "罗布林卡一体化综合管理与智慧化服务平台" }]
+      });
+      const documentXml = await readDocumentXml(outputPath);
+      const extracted = await mammoth.extractRawText({ path: outputPath });
+
+      expect(result.templateReplacementCount).toBeGreaterThan(0);
+      expect(result.contentControlReplacementCount).toBe(0);
+      expect(result.filledFields).toContain("应用系统");
+      expect(documentXml).toContain("罗布林卡一体化综合管理与智慧化服务平台");
+      expect(extracted.value).toContain("罗布林卡一体化综合管理与智慧化服务平台");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

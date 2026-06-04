@@ -56,6 +56,12 @@ export interface RuntimeCheckResult {
   pip: RuntimeCommandCheck;
 }
 
+export interface AppMetadata {
+  displayName: string;
+  version: string;
+  title: string;
+}
+
 export type SchemeSectionStatus = "pending" | "drafting" | "drafted" | "running" | "completed" | "failed" | "skipped";
 
 export interface SchemeProgressSection {
@@ -298,6 +304,9 @@ export type RendererEvent =
     };
 
 export interface PwdSafeAgentApi {
+  app: {
+    getMetadata(): Promise<AppMetadata>;
+  };
   session: {
     list(): Promise<ChatSession[]>;
     create(): Promise<ChatSession>;

@@ -74,7 +74,9 @@ import {
   clampDraftSectionParallelism,
   clampImageGenerationParallelism
 } from "../../../shared/types";
+import { FALLBACK_APP_METADATA } from "../../../shared/appMetadata";
 import type {
+  AppMetadata,
   AppSettings,
   ArtifactKind,
   ArtifactPreview,
@@ -103,12 +105,33 @@ export function App(): JSX.Element {
   const [preview, setPreview] = useState<ArtifactPreview | undefined>();
   const [previewError, setPreviewError] = useState("");
   const [appError, setAppError] = useState("");
+  const [metadata, setMetadata] = useState<AppMetadata>(FALLBACK_APP_METADATA);
   const [renameTarget, setRenameTarget] = useState<ChatSession | undefined>();
   const [deleteTarget, setDeleteTarget] = useState<ChatSession | undefined>();
   const currentSession = sessions.find((session) => session.id === currentSessionId);
   const schemeProgress = findLatestSchemeProgressItem(currentSession);
   const bridge = resolvePwdSafeAgentApi(window.pwdSafeAgent);
+
+  useEffect(() => {
+    document.title = metadata.title;
+  }, [metadata.title]);
   const api = bridge.api;
+
+  useEffect(() => {
+    if (!api) return;
+    let active = true;
+    void api.app
+      .getMetadata()
+      .then((nextMetadata) => {
+        if (active) setMetadata(nextMetadata);
+      })
+      .catch((error: unknown) => {
+        if (active) setAppError(`应用信息加载失败：${getErrorMessage(error)}`);
+      });
+    return () => {
+      active = false;
+    };
+  }, [api]);
 
   useEffect(() => {
     if (!api) return;
@@ -173,6 +196,7 @@ export function App(): JSX.Element {
     <Tooltip.Provider delayDuration={350}>
       <div className={schemeProgress ? "app-shell with-progress" : "app-shell"}>
         <Sidebar
+          metadata={metadata}
           sessions={sessions}
           artifactCount={artifacts.length}
           currentSessionId={currentSessionId}
@@ -295,6 +319,7 @@ async function bootstrap(dispatch: AppDispatch, api: PwdSafeAgentApi): Promise<v
 }
 
 function Sidebar(props: {
+  metadata: AppMetadata;
   sessions: ChatSession[];
   artifactCount: number;
   currentSessionId?: string;
@@ -311,10 +336,10 @@ function Sidebar(props: {
   return (
     <aside className="sidebar">
       <div className="brand">
-        <div className="brand-mark">P</div>
+        <div className="brand-mark">时</div>
         <div>
-          <div className="brand-name">PwdSafeAgent</div>
-          <div className="brand-subtitle">密码方案生成</div>
+          <div className="brand-name">{props.metadata.displayName}</div>
+          <div className="brand-subtitle">v{props.metadata.version}</div>
         </div>
       </div>
 
