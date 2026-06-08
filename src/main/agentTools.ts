@@ -9,6 +9,7 @@ export type BuiltinToolName =
   | "read_file"
   | "read_word"
   | "read_pdf"
+  | "read_image"
   | "write_file"
   | "plan_scheme_batches"
   | "plan_scheme_assets"
@@ -30,12 +31,35 @@ export interface ReadToolResult {
 }
 
 const TEXT_EXTENSIONS = new Set([".md", ".txt", ".json", ".csv", ".log", ".yaml", ".yml"]);
+const IMAGE_MIME_TYPES = new Map([
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".webp", "image/webp"],
+  [".gif", "image/gif"]
+]);
+
+export interface ImageDataUrlResult {
+  sourceName: string;
+  mimeType: string;
+  size: number;
+  dataUrl: string;
+}
 
 export function getReadToolName(filePath: string): BuiltinToolName {
   const ext = extname(filePath).toLowerCase();
   if (ext === ".docx") return "read_word";
   if (ext === ".pdf") return "read_pdf";
+  if (IMAGE_MIME_TYPES.has(ext)) return "read_image";
   return "read_file";
+}
+
+export function getImageMimeType(filePath: string): string | undefined {
+  return IMAGE_MIME_TYPES.get(extname(filePath).toLowerCase());
+}
+
+export function isSupportedImageFile(filePath: string): boolean {
+  return Boolean(getImageMimeType(filePath));
 }
 
 export function compactText(text: string, maxChars: number): string {
@@ -76,6 +100,14 @@ export async function readDocumentText(filePath: string, maxChars: number): Prom
     }
   } else if (TEXT_EXTENSIONS.has(ext)) {
     content = await readFile(filePath, "utf-8");
+  } else if (IMAGE_MIME_TYPES.has(ext)) {
+    return {
+      toolName: "read_image",
+      sourceName,
+      content: "",
+      summary: `图片文件 ${sourceName} 请使用 read_image 识别`,
+      charCount: 0
+    };
   } else {
     return {
       toolName: getReadToolName(filePath),
@@ -96,12 +128,33 @@ export async function readDocumentText(filePath: string, maxChars: number): Prom
   };
 }
 
+export async function readImageDataUrl(filePath: string, maxBytes: number): Promise<ImageDataUrlResult> {
+  const sourceName = basename(filePath);
+  const mimeType = getImageMimeType(filePath);
+  if (!mimeType) {
+    throw new Error(`read_image 暂不支持 ${extname(filePath).toLowerCase() || "未知"} 图片格式`);
+  }
+
+  const fileStat = await stat(filePath);
+  if (fileStat.size > maxBytes) {
+    throw new Error(`read_image 图片过大：${formatBytes(fileStat.size)}，最大支持 ${formatBytes(maxBytes)}`);
+  }
+
+  const data = await readFile(filePath);
+  return {
+    sourceName,
+    mimeType,
+    size: fileStat.size,
+    dataUrl: `data:${mimeType};base64,${data.toString("base64")}`
+  };
+}
+
 export async function writeUtf8File(filePath: string, content: string): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
   await writeFile(filePath, content, "utf-8");
 }
 
-function formatBytes(bytes: number): string {
+export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;

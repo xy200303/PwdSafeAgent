@@ -46,6 +46,7 @@ describe("agentToolRegistry", () => {
     expect(safeTools.map((tool) => tool.function.name)).toContain("web_search");
     expect(safeTools.map((tool) => tool.function.name)).toContain("read_word");
     expect(safeTools.map((tool) => tool.function.name)).toContain("read_pdf");
+    expect(safeTools.map((tool) => tool.function.name)).toContain("read_image");
     expect(safeTools.map((tool) => tool.function.name)).toContain("plan_scheme_batches");
     expect(safeTools.map((tool) => tool.function.name)).toContain("plan_scheme_assets");
     expect(safeTools.map((tool) => tool.function.name)).toContain("draft_scheme_sections");
@@ -65,6 +66,7 @@ describe("agentToolRegistry", () => {
 
     expect(names).toContain("remember_project");
     expect(names).toContain("read_word");
+    expect(names).toContain("read_image");
     expect(names).toContain("write_file");
     expect(names).not.toContain("plan_scheme_batches");
     expect(names).not.toContain("plan_scheme_assets");
@@ -535,6 +537,33 @@ describe("agentToolRegistry", () => {
 
       expect(result.toolName).toBe("read_word");
       expect(result.summary).toContain(".docx");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns an explicit configuration error for image recognition without guessing content", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-tool-vision-"));
+    const imagePath = join(dir, "截图.png");
+
+    try {
+      await writeFile(
+        imagePath,
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+          "base64"
+        )
+      );
+
+      const result = await executeAgentToolCall(
+        createToolCall("read_image", { path: imagePath, question: "识别截图里需要修改的问题" }),
+        createContext(dir)
+      );
+
+      expect(result.toolName).toBe("read_image");
+      expect(result.summary).toContain("OPENAI_API_KEY");
+      expect(result.content).toContain("截图.png");
+      expect(result.content).toContain("未配置");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

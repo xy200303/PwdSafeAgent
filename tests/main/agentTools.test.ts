@@ -14,6 +14,7 @@ describe("agentTools", () => {
   it("maps file extensions to built-in read tools", () => {
     expect(getReadToolName("template.docx")).toBe("read_word");
     expect(getReadToolName("report.pdf")).toBe("read_pdf");
+    expect(getReadToolName("screenshot.png")).toBe("read_image");
     expect(getReadToolName("notes.md")).toBe("read_file");
   });
 

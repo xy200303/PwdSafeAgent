@@ -774,6 +774,7 @@ function resolvePwdSafeToolExecutionMode(toolName: string): "parallel" | "sequen
     toolName === "read_file" ||
     toolName === "read_word" ||
     toolName === "read_pdf" ||
+    toolName === "read_image" ||
     toolName === "plan_scheme_batches" ||
     toolName === "plan_scheme_assets" ||
     toolName === "draft_scheme_sections" ||

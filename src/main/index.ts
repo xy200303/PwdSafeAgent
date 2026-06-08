@@ -589,6 +589,7 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
     "回复使用中文 Markdown，必要时给出缺失资料清单。",
     "不要编造用户未提供的关键事实；资料不足时可以说明“待补充/需确认”，并在后续获得信息后继续替换对应章节。",
     "工具调用由你按任务需要自主决策：寒暄、普通问答和资料澄清阶段不要默认读取模板或附件；只有分析附件、查询最新资料、沉淀项目档案或交付文件确有需要时，才调用对应工具。",
+    "当用户上传截图/图片并让你识别问题、指出修改点或根据截图调整方案时，必须先调用 read_image 读取图片内容；不要只凭附件名或用户描述猜测截图里有什么。",
     "当进入交付阶段并需要 Word、PDF、Markdown 或图片文件时，必须通过 create_word/write_word/write_pdf/write_file/image_generate 等工具真实生成文件；不要只在文本回复中声称已经生成。",
     "最终文件生成后，如果工具结果没有自动展示文件卡片，再调用 send_file 将 data/output 中的产物发送给前端。",
     `当前时间：${getCurrentTimeText()}`
@@ -634,10 +635,11 @@ function buildMessages(session: ChatSession): ChatCompletionMessageParam[] {
 
 function buildAvailableResourceContext(session: ChatSession): string {
   const lines = [
-    "以下是本会话可按需读取的文件资源。注意：这些文件尚未读取；只有在用户任务需要时才调用 read_word/read_pdf/read_file。",
+    "以下是本会话可按需读取的文件资源。注意：这些文件尚未读取；只有在用户任务需要时才调用 read_word/read_pdf/read_file/read_image。",
     `Word 样式模板：${BUILT_IN_TEMPLATE_DOCX_RELATIVE_PATH}`,
     `Word 模板标注 JSON：${BUILT_IN_TEMPLATE_JSON_RELATIVE_PATH}（read_file 会返回规范化章节规划任务清单，不返回原始 JSON）`,
-    `标准参考资料：${BUILT_IN_STANDARD_REFERENCE_RELATIVE_PATH}`
+    `标准参考资料：${BUILT_IN_STANDARD_REFERENCE_RELATIVE_PATH}`,
+    "图片或截图附件使用 read_image 识别，文本/Word/PDF 附件使用对应读取工具。"
   ];
   const sessionAttachments = getSessionAttachments(session.id);
   if (sessionAttachments.length) {

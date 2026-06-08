@@ -7,11 +7,16 @@ import type { ChatCompletionMessageParam, ChatCompletionMessageToolCall, ChatCom
 import type { AppSettings, SchemeProgressItem, SchemeSectionStatus } from "../shared/types";
 import {
   compactText,
+  formatBytes,
   getCurrentTimeText,
+  getImageMimeType,
+  isSupportedImageFile,
   readDocumentText,
+  readImageDataUrl,
   sanitizeFileName,
   writeUtf8File,
-  type BuiltinToolName
+  type BuiltinToolName,
+  type ImageDataUrlResult
 } from "./agentTools";
 import { createBundledPythonEnv, type BundledPythonRuntime } from "./bundledRuntime";
 import { exportDocxToPdf } from "./documentExport";
@@ -47,6 +52,7 @@ import {
 const execAsync = promisify(exec);
 const imageGenerationQueue: Array<{ limit: number; resolve: () => void }> = [];
 let activeImageGenerations = 0;
+const VISION_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 const NETWORK_CHANNEL_RULE =
   "网络通道/通信信道按“访问者通过网络访问系统”的形式定义，例如“业务用户通过互联网访问{应用系统}的通信信道”；访问者可为业务用户、管理用户、运维人员或第三方系统，网络可为互联网、政务外网、内网、VPN、专线或运维网。";
 
@@ -213,6 +219,35 @@ export function buildAgentChatTools(options: { includeExecBash: boolean; include
             path: {
               type: "string",
               description: "PDF 文件路径。可以是绝对路径，也可以是相对项目根目录的路径。"
+            }
+          },
+          required: ["path"],
+          additionalProperties: false
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "read_image",
+        description:
+          "识别用户上传的图片或截图内容。用户指出截图里有问题、要求根据截图修改方案/界面/文档，或需要读取图片中的文字、布局、标注、错误现象时使用。不要只凭图片文件名猜测内容。",
+        parameters: {
+          type: "object",
+          properties: {
+            path: {
+              type: "string",
+              description: "图片路径。可以是绝对路径，也可以是相对项目根目录的路径；通常来自用户附件列表。"
+            },
+            question: {
+              type: "string",
+              description:
+                "希望识别或定位的问题。截图修改场景应写清要关注的对象，例如“找出方案截图中哪里不符合用户要求，并给出修改建议”。"
+            },
+            detail: {
+              type: "string",
+              enum: ["auto", "low", "high"],
+              description: "视觉解析精度，默认 auto；截图文字较多或细节较小时使用 high。"
             }
           },
           required: ["path"],
@@ -894,6 +929,8 @@ export async function executeAgentToolCall(
       return executeReadFile(args, context, "read_word");
     case "read_pdf":
       return executeReadFile(args, context, "read_pdf");
+    case "read_image":
+      return executeReadImage(args, context);
     case "write_file":
       return executeWriteFile(args, context);
     case "plan_scheme_batches":
@@ -1069,6 +1106,137 @@ async function executeReadFile(
     summary: result.summary,
     content: result.content || result.summary
   };
+}
+
+async function executeReadImage(
+  args: Record<string, unknown>,
+  context: AgentToolExecutionContext
+): Promise<AgentToolExecutionResult> {
+  const inputPath = readStringArg(args, "path");
+  if (!inputPath) {
+    return { toolName: "read_image", summary: "缺少图片路径", content: "read_image failed: missing path" };
+  }
+
+  const filePath = resolveToolPath(inputPath, context);
+  assertPathAllowed(filePath, context.allowedReadDirs, context.allowedReadFiles ?? [], "read_image");
+  if (!existsSync(filePath)) {
+    throw new Error(`read_image 图片不存在：${basename(filePath)}`);
+  }
+  if (!isSupportedImageFile(filePath)) {
+    const extension = extname(filePath).toLowerCase() || "(none)";
+    return {
+      toolName: "read_image",
+      summary: "read_image 仅支持 png/jpg/jpeg/webp/gif 图片",
+      content: `read_image failed: unsupported extension ${extension}`
+    };
+  }
+
+  const sourceName = basename(filePath);
+  const fileSize = statSync(filePath).size;
+  const question =
+    readStringArg(args, "question") ||
+    readStringArg(args, "prompt") ||
+    buildDefaultImageQuestion(context.userPrompt);
+  const detail = normalizeImageDetailArg(readStringArg(args, "detail"));
+  const apiKey = context.settings.openai.apiKeyConfigured ? process.env.OPENAI_API_KEY : undefined;
+  if (!apiKey) {
+    return {
+      toolName: "read_image",
+      summary: "识图需要配置 OPENAI_API_KEY",
+      content: [
+        "read_image failed: OPENAI_API_KEY 未配置",
+        `图片：${sourceName}`,
+        `格式：${getImageMimeType(filePath) || "unknown"}`,
+        `大小：${formatBytes(fileSize)}`,
+        "请在设置中配置 API Key，并确认 Chat 模型支持视觉输入。"
+      ].join("\n")
+    };
+  }
+
+  const image = await readImageDataUrl(filePath, VISION_IMAGE_MAX_BYTES);
+  const client = new OpenAI({
+    apiKey,
+    baseURL: context.settings.openai.baseUrl,
+    timeout: context.settings.openai.requestTimeoutMs
+  });
+  const response = await client.chat.completions.create(
+    {
+      model: context.settings.openai.chatModel,
+      messages: buildImageUnderstandingMessages({ image, question, detail }, context),
+      max_tokens: Math.min(Math.max(Math.floor(context.settings.openai.maxOutputTokens / 4), 900), 3500)
+    },
+    { signal: context.signal }
+  );
+  const content = response.choices[0]?.message?.content?.trim();
+  if (!content) {
+    throw new Error("模型未返回图片识别结果");
+  }
+
+  return {
+    toolName: "read_image",
+    summary: `已识别 ${image.sourceName}`,
+    content: [
+      `read_image completed: ${filePath}`,
+      `图片：${image.sourceName}`,
+      `格式：${image.mimeType}`,
+      `大小：${formatBytes(image.size)}`,
+      `问题：${question}`,
+      "",
+      content
+    ].join("\n")
+  };
+}
+
+function buildImageUnderstandingMessages(
+  input: {
+    image: ImageDataUrlResult;
+    question: string;
+    detail: "auto" | "low" | "high";
+  },
+  context: AgentToolExecutionContext
+): ChatCompletionMessageParam[] {
+  const taskContext = compactText([context.userPrompt, context.memory].filter(Boolean).join("\n\n"), 8000);
+  const text = [
+    `图片文件：${input.image.sourceName}`,
+    taskContext ? `相关上下文：\n${taskContext}` : "",
+    `用户希望你解决的问题：${input.question}`,
+    "请用中文输出：1）图片内容概述；2）识别到的关键文字、界面元素或图形关系；3）与用户问题相关的异常/需要修改点；4）下一步可执行修改建议。",
+    "如果图片中看不清或没有足够证据，请明确说明不确定之处，不要编造截图里不存在的内容。"
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  return [
+    {
+      role: "system",
+      content:
+        "你是截图和图片识别工具，擅长读取界面截图、文档截图、架构图和流程图。你只根据图片可见内容和给定上下文分析问题，并给出可执行结论。"
+    },
+    {
+      role: "user",
+      content: [
+        { type: "text", text },
+        {
+          type: "image_url",
+          image_url: {
+            url: input.image.dataUrl,
+            detail: input.detail
+          }
+        }
+      ]
+    }
+  ];
+}
+
+function buildDefaultImageQuestion(userPrompt: string | undefined): string {
+  const prompt = userPrompt?.trim();
+  if (prompt) return `根据用户当前需求识别图片内容并定位需要修改的问题：${prompt}`;
+  return "识别这张图片的主要内容、可见文字、异常点和可执行修改建议。";
+}
+
+function normalizeImageDetailArg(value: string): "auto" | "low" | "high" {
+  if (value === "low" || value === "high" || value === "auto") return value;
+  return "auto";
 }
 
 interface SchemeTemplateTaskJson {
