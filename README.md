@@ -7,10 +7,15 @@ PwdSafeAgent 是一个基于 Electron、React、Redux Toolkit、Radix UI、Incre
 - 以 `docs/密码应用方案.docx` 作为方案模板资源，支持按需读取 Word/PDF/文本资料。
 - Agent 对话运行时强制使用 `@mariozechner/pi-coding-agent`，模型配置保存在本地 `.env.local`。
 - 不再内置或回退到自实现 OpenAI Chat Runtime；Agent 循环推理和工具调用决策由 Pi Agent 的 `AgentSession` 完成。
-- 内置工具包括 `time`、`web_search`、`read_file`、`read_word`、`read_pdf`、`write_file`、`write_word`、`write_pdf`、`image_generate`、`exec_bash`、`send_file`。
+- 内置工具包括 `time`、`web_search`、`read_file`、`read_word`、`read_pdf`、`read_image`、`write_file`、`update_document_profile`、`build_document_config`、`list_document_sections`、`get_document_section`、`draft_document_sections`、`update_document_section_draft`、`audit_document_sections`、`revise_document_sections_evidence`、`polish_document_sections`、`assemble_document_sections`、`audit_document_evidence`、`revise_document_evidence`、`plan_document_assets`、`write_document_word`、`write_pdf`、`image_generate`、`exec_bash`、`send_file`。
+- 整篇方案生成采用统一 section-first 流程：先从输入材料、项目档案和模板 profile 生成 `document-config.json`，再按 `template.json` 或 Word 动态解析出的真实章节生成 `document-sections/<section>/draft.md`，审查和微调后由 `assemble_document_sections` 合并终稿 Markdown，最后补齐图表并写入 Word。
+- 支持 `docs/document-profiles/<profile>.json` 定义不同文档类型的生成规则、行文规则、证据规则、必需事实和 Word 渲染方式；内置 `generic_document` profile 基于 `docs/templates/密码应用方案.docx` 生成。
+- 支持用户在设置中上传全局 Word 模板，按标题结构写入隐藏章节锚点，并在 `data/output/document-templates/<id>/` 生成 `template.json` 与可编辑的 `profile.json`；用户可通过修改 profile 自定义生成规则，后续按该 profile 完成章节起草和 Word 输出。
+- 项目档案区分已确认事实、事实来源和待补充信息；生成正文时待补充项不会被改写成确定事实。
+- 每个会话使用独立工作区 `data/workspaces/<sessionId>/`，附件导入、章节草稿和最终产物按会话隔离。
 - 前端支持工具调用折叠详情、文件卡片、系统打开、文件夹定位、PDF.js / docx-preview 预览。
 - 支持粘贴、拖拽和选择附件，并对直接导入附件做数量、单文件大小、总大小和 Windows 文件名安全校验。
-- 支持独立生图 `OPENAI_IMAGE_API_KEY` 和 `OPENAI_IMAGE_BASE_URL`。
+- 支持独立生图 `OPENAI_IMAGE_API_KEY` / `OPENAI_IMAGE_BASE_URL`，以及独立识图 `OPENAI_VISION_API_KEY` / `OPENAI_VISION_BASE_URL` / `OPENAI_VISION_MODEL`。
 - Windows 打包可携带 `runtime/win/python` 或历史兼容目录 `runtime/win/pyhton`，为无系统 Python 的用户提供 `exec_bash` Python 环境。
 
 ## 技术栈
@@ -65,9 +70,13 @@ npm run dev
 OPENAI_API_KEY=
 OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 OPENAI_IMAGE_BASE_URL=
+OPENAI_VISION_BASE_URL=
 OPENAI_IMAGE_API_KEY=
+OPENAI_VISION_API_KEY=
 OPENAI_CHAT_MODEL=gpt-5.5
+OPENAI_CHAT_IMAGE_INPUT_ENABLED=false
 OPENAI_IMAGE_MODEL=gpt-image-2
+OPENAI_VISION_MODEL=
 OPENAI_IMAGE_SIZE=1536x1024
 OPENAI_IMAGE_QUALITY=high
 OPENAI_AUTO_IMAGE_GENERATION=true
@@ -87,6 +96,10 @@ LIBREOFFICE_PATH=
 - `OPENAI_BASE_URL`：OpenAI 兼容接口地址。
 - `OPENAI_IMAGE_API_KEY`：生图 API Key；留空时沿用 `OPENAI_API_KEY`。
 - `OPENAI_IMAGE_BASE_URL`：生图接口地址；留空时沿用 `OPENAI_BASE_URL`。
+- `OPENAI_CHAT_IMAGE_INPUT_ENABLED`：Chat 模型是否支持直接输入图片；为 `true` 时图片附件会随对话直接传入模型。
+- `OPENAI_VISION_API_KEY`：识图工具 API Key；留空时沿用 `OPENAI_API_KEY`。
+- `OPENAI_VISION_BASE_URL`：识图工具接口地址；留空时沿用 `OPENAI_BASE_URL`。
+- `OPENAI_VISION_MODEL`：识图工具模型；留空时沿用 `OPENAI_CHAT_MODEL`。
 - `OPENAI_IMAGE_REQUEST_TIMEOUT_MS`：单次生图请求超时，默认 `300000` ms（5 分钟）。
 - `AGENT_DRAFT_SECTION_PARALLELISM`：同时起草的方案章节数，默认 `20`。
 - `AGENT_IMAGE_GENERATION_PARALLELISM`：同时运行的生图任务数，默认 `10`，可在设置页调低。
@@ -101,7 +114,8 @@ LIBREOFFICE_PATH=
 3. 可通过选择、粘贴或拖拽上传 Word、PDF、图片和文本资料。
 4. 按 `Enter` 发送消息，按 `Shift+Enter` 换行。
 5. Agent 会按任务需要自主调用工具，不会在普通问答阶段默认读取模板或生成图片。
-6. 当 Agent 生成文件并调用 `send_file` 后，聊天流中会出现文件卡片，可预览、系统打开或在文件夹中定位。
+6. 生成整篇方案时，Agent 会走“文档配置 → 章节索引 → 章节 md 草稿 → 章节审查/修订/润色 → 合并 md 终稿 → 证据复核 → 图表规划 → Word 写入/PDF”的 section-first 流程。
+7. 当 Agent 生成文件并调用 `send_file` 后，聊天流中会出现文件卡片，可预览、系统打开或在文件夹中定位。
 
 ## 可用脚本
 

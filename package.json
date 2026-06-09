@@ -1,6 +1,6 @@
 {
   "name": "pwd-safe-agent",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Desktop password application scheme generation agent",
   "author": "PwdSafeAgent Team",
   "private": true,
