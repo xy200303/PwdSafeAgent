@@ -1,5 +1,6 @@
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
-import type { AppSettings, ChatSession, StreamItem } from "../shared/types";
+import type { ImageContent } from "@mariozechner/pi-ai";
+import type { AppSettings, ChatSession, SchemeProgressSection, StreamItem } from "../shared/types";
 import type { BundledPythonRuntime } from "./bundledRuntime";
 import { createPiAgentBridge } from "./piAgentBridge";
 import type { SchemeProgressUpdateInput } from "./schemeProgress";
@@ -9,6 +10,7 @@ export type MessageStreamItem = Extract<StreamItem, { kind: "message" }>;
 export interface AgentRuntimeTurnInput {
   sessionId: string;
   userPrompt: string;
+  images?: ImageContent[];
   controller: AbortController;
   onAssistantCreated: (assistantItem: MessageStreamItem) => void;
 }
@@ -22,6 +24,8 @@ export interface AgentRuntimeHost {
   docsDir: string;
   inputDir: string;
   outputDir: string;
+  getSessionInputDir(sessionId: string): string;
+  getSessionOutputDir(sessionId: string): string;
   loadSettings(): AppSettings;
   getSession(sessionId: string): ChatSession | undefined;
   buildMessages(session: ChatSession): ChatCompletionMessageParam[];
@@ -30,7 +34,12 @@ export interface AgentRuntimeHost {
   startToolCall(sessionId: string, toolName: string, summary: string): StreamItem;
   finishToolCall(sessionId: string, item: StreamItem, status: "success" | "failed", summary: string): void;
   addStage(sessionId: string, title: string, detail?: string): void;
-  ensureSchemeProgress(sessionId: string, detail?: string, artifactName?: string): void;
+  ensureSchemeProgress(
+    sessionId: string,
+    detail?: string,
+    artifactName?: string,
+    options?: { title?: string; sections?: SchemeProgressSection[]; reset?: boolean }
+  ): void;
   updateSchemeSectionProgress(sessionId: string, update: SchemeProgressUpdateInput): void;
   settleSchemeProgress(sessionId: string, status: "completed" | "failed"): void;
   appendSessionMemory(sessionId: string, source: string, content: string): void;

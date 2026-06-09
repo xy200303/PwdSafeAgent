@@ -649,6 +649,36 @@ describe("schemeDocument", () => {
     }
   });
 
+  it("parses section anchors from the docx when the anchor id is not in template JSON", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-dynamic-anchor-"));
+    const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
+    const draftPath = join(dir, "动态锚点增量方案.docx");
+
+    try {
+      await createWordDocxFromTemplate(templatePath, draftPath);
+      const zip = new PizZip(await readFile(draftPath, "binary"));
+      const documentXml = zip.file("word/document.xml")?.asText() ?? "";
+      expect(documentXml).toContain('w:val="ps:section:sec_1_2_1:body"');
+      zip.file(
+        "word/document.xml",
+        documentXml.replace('w:val="ps:section:sec_1_2_1:body"', 'w:val="ps:section:sec_9_9_9:body"')
+      );
+      await writeFile(draftPath, zip.generate({ type: "nodebuffer", compression: "DEFLATE" }));
+
+      const result = await replaceWordSectionContent(draftPath, draftPath, {
+        section: "sec_9_9_9",
+        content: "本节通过 docx 动态解析出的新增锚点完成替换。"
+      });
+      const extracted = await mammoth.extractRawText({ path: result.outputPath });
+
+      expect(result.templateAnchorId).toBe("sec_9_9_9");
+      expect(extracted.value).toContain("本节通过 docx 动态解析出的新增锚点完成替换。");
+      expect(extracted.value).toContain("《网络安全等级保护条例》");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("uses invisible template anchors even when Word heading text changes", async () => {
     const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-heading-drift-"));
     const templatePath = BUILT_IN_TEMPLATE_DOCX_PATH;
@@ -1311,6 +1341,47 @@ describe("schemeDocument", () => {
       expect(documentXml).not.toContain("${应用系统}");
       expect(documentXml).not.toContain("{应用系统}");
       expect(documentXml).not.toContain("{物理机房1地址}");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans residual body, image, and table placeholders after partial template section rendering", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pwd-safe-agent-docx-placeholder-cleanup-"));
+    const outputPath = join(dir, "部分章节渲染.docx");
+
+    try {
+      const result = await writeSchemeDocxFromTemplate(BUILT_IN_TEMPLATE_DOCX_PATH, outputPath, {
+        prompt: "系统名称：统一身份认证系统",
+        memory: "",
+        generatedMarkdown: [
+          "# 统一身份认证系统密码应用方案",
+          "",
+          "## 1 背景",
+          "",
+          "### 1.1 系统建设规划",
+          "",
+          "本节仅生成一个章节，用于验证未命中的模板占位会被兜底清理。",
+          "",
+          "## 5 密码应用设计",
+          "",
+          "### 5.1 密码应用技术框架",
+          "",
+          "本节说明密码应用技术框架，图示可在后续生成。"
+        ].join("\n"),
+        templateJsonPath: BUILT_IN_TEMPLATE_JSON_PATH,
+        renderMode: "template_sections"
+      });
+      const documentXml = await readDocumentXml(outputPath);
+
+      expect(documentXml).not.toContain("【正文占位】");
+      expect(documentXml).not.toContain("【图片占位】");
+      expect(documentXml).not.toContain("【待填写】");
+      expect(documentXml).toContain("待补充/需确认");
+      expect(result.templateAnchorsUsed).toContain("sec_1");
+      expect(result.templateAnchorsUsed).toContain("sec_1_1");
+      expect(result.templateAnchorsUsed).toContain("sec_5");
+      expect(result.templateAnchorsUsed).toContain("sec_5_1");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

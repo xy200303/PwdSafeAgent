@@ -29,6 +29,7 @@ import {
   Files,
   FolderOpen,
   Image,
+  LayoutTemplate,
   ListChecks,
   Loader2,
   MoreHorizontal,
@@ -54,9 +55,12 @@ import {
   setArtifactsOpen,
   setComposer,
   setCurrentSession,
+  setDocumentTemplates,
+  setSelectedDocumentTemplate,
   setSessions,
   setSettings,
   setSettingsOpen,
+  upsertDocumentTemplate,
   upsertSession,
   type RootState
 } from "../store";
@@ -83,6 +87,7 @@ import type {
   ArtifactSummary,
   AttachmentRef,
   ChatSession,
+  DocumentTemplateSummary,
   PwdSafeAgentApi,
   RuntimeCheckResult,
   RuntimeCommandCheck,
@@ -99,7 +104,18 @@ const LazyArtifactPreviewPanel = lazy(() => import("./ArtifactPreviewPanel"));
 
 export function App(): JSX.Element {
   const dispatch = useDispatch<AppDispatch>();
-  const { sessions, artifacts, currentSessionId, composer, pendingAttachments, settings, settingsOpen, artifactsOpen } = useSelector(
+  const {
+    sessions,
+    artifacts,
+    documentTemplates,
+    selectedDocumentTemplateId,
+    currentSessionId,
+    composer,
+    pendingAttachments,
+    settings,
+    settingsOpen,
+    artifactsOpen
+  } = useSelector(
     (state: RootState) => state.chat
   );
   const [preview, setPreview] = useState<ArtifactPreview | undefined>();
@@ -188,6 +204,16 @@ export function App(): JSX.Element {
     dispatch(setArtifactsOpen(true));
   }
 
+  async function selectDocumentTemplate(templateId: string): Promise<void> {
+    if (!api) return;
+    try {
+      const selected = await api.documentTemplate.select(templateId);
+      dispatch(setSelectedDocumentTemplate(selected.id));
+    } catch (error) {
+      setAppError(`切换 Word 模板失败：${getErrorMessage(error)}`);
+    }
+  }
+
   if (!api) {
     return <MissingBridge detail={bridge.error} />;
   }
@@ -220,8 +246,12 @@ export function App(): JSX.Element {
             session={currentSession}
             value={composer}
             attachments={pendingAttachments}
+            documentTemplates={documentTemplates}
+            selectedTemplateId={selectedDocumentTemplateId}
             onChange={(value) => dispatch(setComposer(value))}
             onAddAttachments={(items) => dispatch(addAttachments({ attachments: items }))}
+            onAddDocumentTemplate={(template) => dispatch(upsertDocumentTemplate(template))}
+            onSetSelectedTemplate={(id) => selectDocumentTemplate(id)}
             onRemoveAttachment={(id) => {
               dispatch(removeAttachment(id));
               void api.attachment.remove(id);
@@ -307,10 +337,18 @@ function AppNotice({ message, onClose }: { message: string; onClose: () => void 
 }
 
 async function bootstrap(dispatch: AppDispatch, api: PwdSafeAgentApi): Promise<void> {
-  const [sessions, settings, artifacts] = await Promise.all([api.session.list(), api.settings.get(), api.artifact.list()]);
+  const [sessions, settings, artifacts, documentTemplates, selectedDocumentTemplate] = await Promise.all([
+    api.session.list(),
+    api.settings.get(),
+    api.artifact.list(),
+    api.documentTemplate.list(),
+    api.documentTemplate.getSelected()
+  ]);
   dispatch(setSessions(sessions));
   dispatch(setSettings(settings));
   dispatch(setArtifacts(artifacts));
+  dispatch(setDocumentTemplates(documentTemplates));
+  dispatch(setSelectedDocumentTemplate(selectedDocumentTemplate.id));
   if (sessions.length === 0) {
     const session = await api.session.create();
     dispatch(upsertSession(session));
@@ -501,13 +539,14 @@ function SchemeProgressPanel({ item }: { item: SchemeProgressItem }): JSX.Elemen
   const chapters = buildSchemeProgressChapters(item.sections);
   const percent = item.total > 0 ? Math.round((item.completed / item.total) * 100) : 0;
   const drafted = item.drafted ?? item.sections.filter((section) => section.status === "drafted").length;
+  const progressLabel = "章节进度";
 
   return (
     <aside className="scheme-progress-panel">
       <header className="scheme-progress-header">
         <ListChecks size={17} />
         <div>
-          <span>章节进度</span>
+          <span>{progressLabel}</span>
           <strong>{item.artifactName || item.title}</strong>
         </div>
         <span className={`scheme-progress-pill ${item.status}`}>
@@ -523,11 +562,11 @@ function SchemeProgressPanel({ item }: { item: SchemeProgressItem }): JSX.Elemen
           </strong>
           <span>{percent}%</span>
         </div>
-        <div className="scheme-progress-track" aria-label={`章节完成 ${percent}%`}>
+        <div className="scheme-progress-track" aria-label={`${progressLabel}完成 ${percent}%`}>
           <span style={{ width: `${percent}%` }} />
         </div>
         <p>
-          {item.detail || "等待按模板章节写入"}
+          {item.detail || `等待${progressLabel.replace("进度", "")}生成`}
           {drafted ? ` · 已起草 ${drafted}` : ""}
           {item.failed ? ` · 失败 ${item.failed}` : ""}
         </p>
@@ -1184,14 +1223,21 @@ function Composer(props: {
   session?: ChatSession;
   value: string;
   attachments: AttachmentRef[];
+  documentTemplates: DocumentTemplateSummary[];
+  selectedTemplateId: string;
   onChange: (value: string) => void;
   onAddAttachments: (attachments: AttachmentRef[]) => void;
+  onAddDocumentTemplate: (template: DocumentTemplateSummary) => void;
+  onSetSelectedTemplate: (templateId: string) => Promise<void> | void;
   onRemoveAttachment: (id: string) => void;
   onSent: (sessionId: string) => void;
   onError: (message: string) => void;
 }): JSX.Element {
   const canSend = Boolean(props.session && (props.value.trim() || props.attachments.length));
   const running = props.session?.status === "running";
+  const documentTemplates = props.documentTemplates.length ? props.documentTemplates : [getFallbackDefaultTemplate()];
+  const selectedTemplate =
+    documentTemplates.find((template) => template.id === props.selectedTemplateId) ?? documentTemplates[0] ?? getFallbackDefaultTemplate();
   const [draggingFiles, setDraggingFiles] = useState(false);
 
   async function submit(event?: FormEvent): Promise<void> {
@@ -1216,6 +1262,17 @@ function Composer(props: {
       props.onAddAttachments(picked);
     } catch (error) {
       props.onError(`选择附件失败：${getErrorMessage(error)}`);
+    }
+  }
+
+  async function chooseWordTemplate(): Promise<void> {
+    try {
+      const template = await props.api.documentTemplate.upload();
+      if (!template) return;
+      props.onAddDocumentTemplate(template);
+      await props.onSetSelectedTemplate(template.id);
+    } catch (error) {
+      props.onError(`上传 Word 模板失败：${getErrorMessage(error)}`);
     }
   }
 
@@ -1275,13 +1332,43 @@ function Composer(props: {
       onDragLeave={onDragLeave}
       onDrop={(event) => void onDrop(event)}
     >
+      <div className="template-selector">
+        <span className="template-label">
+          <LayoutTemplate size={14} />
+          模板
+        </span>
+        <select
+          className="template-select"
+          value={selectedTemplate.id}
+          onChange={(event) => void props.onSetSelectedTemplate(event.target.value)}
+          aria-label="选择文档模板"
+          title={selectedTemplate.name}
+        >
+          {documentTemplates.map((template) => (
+            <option key={template.id} value={template.id}>
+              {template.source === "builtin" ? template.name : `自定义：${template.name}`}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className="template-upload"
+          onClick={() => void chooseWordTemplate()}
+          aria-label="上传 Word 模板"
+        >
+          <Upload size={13} />
+          上传 Word 模板
+        </button>
+      </div>
       {props.attachments.length ? (
         <div className="attachment-strip">
           {props.attachments.map((attachment) => (
             <span className="attachment-chip" key={attachment.id}>
               <File size={14} />
-              {attachment.name}
-              <button type="button" onClick={() => props.onRemoveAttachment(attachment.id)} aria-label="移除附件">
+              <span className="attachment-name" title={attachment.name}>
+                {attachment.name}
+              </span>
+              <button type="button" className="attachment-remove" onClick={() => props.onRemoveAttachment(attachment.id)} aria-label="移除附件">
                 <Trash2 size={13} />
               </button>
             </span>
@@ -1329,6 +1416,18 @@ function Composer(props: {
   );
 }
 
+function getFallbackDefaultTemplate(): DocumentTemplateSummary {
+  return {
+    id: "default",
+    name: "默认模板",
+    source: "builtin",
+    profilePath: "docs/document-profiles/generic_document.json",
+    templatePath: "docs/templates/密码应用方案.docx",
+    templateJsonPath: "docs/templates/密码应用方案.template.json",
+    renderMode: "template_sections"
+  };
+}
+
 function SettingsPanel({
   api,
   settings,
@@ -1344,8 +1443,11 @@ function SettingsPanel({
 }): JSX.Element {
   const [baseUrl, setBaseUrl] = useState(settings?.openai.baseUrl || "https://api.openai.com/v1");
   const [imageBaseUrl, setImageBaseUrl] = useState(settings?.openai.imageBaseUrl || "");
+  const [visionBaseUrl, setVisionBaseUrl] = useState(settings?.openai.visionBaseUrl || "");
   const [chatModel, setChatModel] = useState(settings?.openai.chatModel || "gpt-5.5");
+  const [chatImageInputEnabled, setChatImageInputEnabled] = useState(settings?.openai.chatImageInputEnabled ?? false);
   const [imageModel, setImageModel] = useState(settings?.openai.imageModel || "gpt-image-2");
+  const [visionModel, setVisionModel] = useState(settings?.openai.visionModel || "");
   const [imageSize, setImageSize] = useState(settings?.openai.imageSize || "1536x1024");
   const [imageQuality, setImageQuality] = useState(settings?.openai.imageQuality || "high");
   const [autoImageGeneration, setAutoImageGeneration] = useState(settings?.openai.autoImageGeneration ?? true);
@@ -1369,6 +1471,7 @@ function SettingsPanel({
   );
   const [apiKey, setApiKey] = useState("");
   const [imageApiKey, setImageApiKey] = useState("");
+  const [visionApiKey, setVisionApiKey] = useState("");
   const [runtimeCheck, setRuntimeCheck] = useState<RuntimeCheckResult | undefined>();
   const [checkingRuntime, setCheckingRuntime] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -1380,8 +1483,11 @@ function SettingsPanel({
         openai: {
           baseUrl,
           imageBaseUrl,
+          visionBaseUrl,
           chatModel,
+          chatImageInputEnabled,
           imageModel,
+          visionModel,
           imageSize,
           imageQuality,
           autoImageGeneration,
@@ -1391,7 +1497,8 @@ function SettingsPanel({
           imageRequestTimeoutMs: imageTimeout,
           maxOutputTokens: maxTokens,
           apiKey: apiKey.trim() || undefined,
-          imageApiKey: imageApiKey.trim() || undefined
+          imageApiKey: imageApiKey.trim() || undefined,
+          visionApiKey: visionApiKey.trim() || undefined
         },
         document: {
           autoPdfExport,
@@ -1476,6 +1583,14 @@ function SettingsPanel({
                   />
                 </label>
                 <label>
+                  识图 API Key
+                  <input
+                    value={visionApiKey}
+                    onChange={(event) => setVisionApiKey(event.target.value)}
+                    placeholder={settings?.openai.visionApiKeyConfigured ? "已配置，留空保持不变" : "留空沿用 API Key"}
+                  />
+                </label>
+                <label>
                   Base URL
                   <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} />
                 </label>
@@ -1488,9 +1603,20 @@ function SettingsPanel({
                   />
                 </label>
                 <label>
+                  识图 Base URL
+                  <input
+                    value={visionBaseUrl}
+                    onChange={(event) => setVisionBaseUrl(event.target.value)}
+                    placeholder="留空沿用 Base URL"
+                  />
+                </label>
+                <label>
                   Chat 模型
                   <input value={chatModel} onChange={(event) => setChatModel(event.target.value)} />
                 </label>
+                <SwitchRow checked={chatImageInputEnabled} onCheckedChange={setChatImageInputEnabled}>
+                  Chat 模型支持图片输入
+                </SwitchRow>
                 <SwitchRow checked={thinkingEnabled} onCheckedChange={setThinkingEnabled}>
                   启用模型思考模式
                 </SwitchRow>
@@ -1512,6 +1638,14 @@ function SettingsPanel({
                 <label>
                   生图模型
                   <input value={imageModel} onChange={(event) => setImageModel(event.target.value)} />
+                </label>
+                <label>
+                  识图模型
+                  <input
+                    value={visionModel}
+                    onChange={(event) => setVisionModel(event.target.value)}
+                    placeholder="留空沿用 Chat 模型"
+                  />
                 </label>
                 <label>
                   生图尺寸
@@ -1590,7 +1724,7 @@ function SettingsPanel({
                   />
                 </label>
                 <label>
-                  方案章节并行数
+                  文档章节并行数
                   <input
                     type="number"
                     min={DRAFT_SECTION_PARALLELISM_MIN}
@@ -1601,7 +1735,7 @@ function SettingsPanel({
                   />
                 </label>
                 <p className="settings-note">
-                  控制 draft_scheme_sections 默认同时起草的章节数；工具调用中的 max_parallel 仅作为单次覆盖。
+                  控制 draft_document_sections 默认同时起草的章节数；工具调用中的 max_parallel 仅作为单次覆盖。
                 </p>
                 <label>
                   生图并行数

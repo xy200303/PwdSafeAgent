@@ -12,6 +12,7 @@ export interface PersistedStateSnapshot {
   attachments: AttachmentRef[];
   artifacts: ArtifactSummary[];
   sessionMemories: Record<string, SessionMemoryEntry[]>;
+  selectedDocumentTemplateId?: string;
 }
 
 interface PersistedStateFile extends PersistedStateSnapshot {
@@ -23,11 +24,16 @@ export function loadPersistedState(filePath: string): PersistedStateSnapshot | n
   if (!existsSync(filePath)) return null;
 
   const parsed = JSON.parse(readFileSync(filePath, "utf-8")) as Partial<PersistedStateFile>;
+  const selectedDocumentTemplateId =
+    typeof parsed.selectedDocumentTemplateId === "string" && parsed.selectedDocumentTemplateId.trim()
+      ? parsed.selectedDocumentTemplateId.trim()
+      : undefined;
   return {
     sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
     attachments: Array.isArray(parsed.attachments) ? parsed.attachments : [],
     artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
-    sessionMemories: isMemoryRecord(parsed.sessionMemories) ? parsed.sessionMemories : {}
+    sessionMemories: isMemoryRecord(parsed.sessionMemories) ? parsed.sessionMemories : {},
+    ...(selectedDocumentTemplateId ? { selectedDocumentTemplateId } : {})
   };
 }
 
@@ -39,7 +45,8 @@ export function savePersistedState(filePath: string, snapshot: PersistedStateSna
     sessions: snapshot.sessions,
     attachments: snapshot.attachments,
     artifacts: snapshot.artifacts,
-    sessionMemories: snapshot.sessionMemories
+    sessionMemories: snapshot.sessionMemories,
+    selectedDocumentTemplateId: snapshot.selectedDocumentTemplateId
   };
   writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
 }

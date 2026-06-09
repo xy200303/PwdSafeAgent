@@ -35,6 +35,12 @@ const api: PwdSafeAgentApi = {
     reveal: (artifactId: string) => ipcRenderer.invoke("artifact:reveal", artifactId),
     preview: (artifactId: string) => ipcRenderer.invoke("artifact:preview", artifactId)
   },
+  documentTemplate: {
+    list: () => ipcRenderer.invoke("document-template:list"),
+    getSelected: () => ipcRenderer.invoke("document-template:get-selected"),
+    select: (templateId: string) => ipcRenderer.invoke("document-template:select", templateId),
+    upload: () => ipcRenderer.invoke("document-template:upload")
+  },
   settings: {
     get: () => ipcRenderer.invoke("settings:get"),
     save: (input: UpdateAppSettingsInput) => ipcRenderer.invoke("settings:save", input),

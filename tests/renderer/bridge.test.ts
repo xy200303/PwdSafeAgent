@@ -26,6 +26,7 @@ describe("renderer bridge", () => {
       session: { list() {}, create() {} },
       chat: { prompt() {} },
       attachment: { pick() {} },
+      documentTemplate: { list() {}, getSelected() {}, select() {}, upload() {} },
       artifact: { list() {} },
       settings: { get() {} },
       events: { subscribe() {} }

@@ -6,15 +6,25 @@ import {
   setArtifacts,
   setComposer,
   setCurrentSession,
+  setDocumentTemplates,
+  setSelectedDocumentTemplate,
   setSessions,
+  upsertDocumentTemplate,
   store
 } from "../../src/renderer/src/store";
-import type { ChatSession, RendererEvent } from "../../src/shared/types";
+import type { ChatSession, DocumentTemplateSummary, RendererEvent } from "../../src/shared/types";
+
+const DEFAULT_TEMPLATE: DocumentTemplateSummary = {
+  id: "default",
+  name: "默认模板",
+  source: "builtin"
+};
 
 describe("renderer store", () => {
   beforeEach(() => {
     store.dispatch(setSessions([]));
     store.dispatch(setArtifacts([]));
+    store.dispatch(setDocumentTemplates([DEFAULT_TEMPLATE]));
   });
 
   it("selects the first available session when the current session disappears", () => {
@@ -205,7 +215,7 @@ describe("renderer store", () => {
           id: "tool_1",
           kind: "tool",
           toolCallId: "call_1",
-          toolName: "write_word",
+          toolName: "write_document_word",
           status: "success",
           summary: "已生成旧方案.docx",
           createdAt: "2026-05-23T00:01:01.000Z"
@@ -282,6 +292,34 @@ describe("renderer store", () => {
 
     expect(store.getState().chat.composer).toBe("第一段草稿");
     expect(store.getState().chat.pendingAttachments.map((attachment) => attachment.name)).toEqual(["A.docx"]);
+  });
+
+  it("keeps the selected document template global across sessions", () => {
+    const first = makeSession("session_a", "A");
+    const second = makeSession("session_b", "B");
+    const customTemplate: DocumentTemplateSummary = {
+      id: "template_custom",
+      name: "自定义模板",
+      source: "uploaded",
+      profilePath: "document-templates/template_custom/profile.json",
+      templatePath: "document-templates/template_custom/template.docx",
+      templateJsonPath: "document-templates/template_custom/template.json",
+      renderMode: "template_sections"
+    };
+
+    store.dispatch(setSessions([first, second]));
+    store.dispatch(upsertDocumentTemplate(customTemplate));
+
+    expect(store.getState().chat.selectedDocumentTemplateId).toBe(customTemplate.id);
+
+    store.dispatch(setCurrentSession(second.id));
+    expect(store.getState().chat.selectedDocumentTemplateId).toBe(customTemplate.id);
+
+    store.dispatch(setCurrentSession(first.id));
+    expect(store.getState().chat.selectedDocumentTemplateId).toBe(customTemplate.id);
+
+    store.dispatch(setSelectedDocumentTemplate("default"));
+    expect(store.getState().chat.selectedDocumentTemplateId).toBe("default");
   });
 
   it("clears only the draft of the completed session", () => {

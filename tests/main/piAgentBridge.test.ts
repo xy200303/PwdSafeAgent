@@ -16,21 +16,17 @@ describe("piAgentBridge tool schemas", () => {
     }
   });
 
-  it("validates draft_scheme_sections arguments through the Pi TypeBox path", () => {
+  it("validates draft_document_sections arguments through the Pi TypeBox path", () => {
     const tool = buildAgentChatTools({ includeExecBash: false, includeArtifactTools: true }).find(
-      (item) => item.type === "function" && item.function.name === "draft_scheme_sections"
+      (item) => item.type === "function" && item.function.name === "draft_document_sections"
     );
-    if (tool?.type !== "function") throw new Error("draft_scheme_sections tool not found");
+    if (tool?.type !== "function") throw new Error("draft_document_sections tool not found");
 
     const schema = convertJsonSchemaToTypeBoxSchema(tool.function.parameters);
     const validator = Compile(schema);
     const args = {
-      sections: [
-        { section: "sec_1", title: "背景", writing_hint: "提示", paragraph_tasks: ["说明保护对象和建设目标"] },
-        { section: "sec_1_1", paragraph_tasks: ["承接风险结论说明本节需求来源"] },
-        { section: "sec_1_2", paragraph_tasks: ["说明管理、运维或审计配套要求"] },
-        { section: "sec_1_2_1", paragraph_tasks: ["归纳需通过密码技术或管理措施控制的重点"] }
-      ],
+      section_ids: ["sec_1", "sec_5_4_9_4"],
+      project_context: "系统名称：统一身份认证系统",
       max_parallel: 4
     };
 
@@ -39,21 +35,45 @@ describe("piAgentBridge tool schemas", () => {
 
     expect(validator.Check(convertedArgs)).toBe(true);
     expect([...validator.Errors(convertedArgs)]).toEqual([]);
-    expect(validator.Check({ sections: [{ section: "sec_1", writingHint: "不要传 camelCase 字段" }] })).toBe(false);
+    expect(validator.Check({ sectionIds: ["不要传 camelCase 字段"] })).toBe(false);
   });
 
   it("includes the enabled Pi tool set in the schema signature", () => {
     const safeSettings = createSettings();
     const bashSettings = createSettings();
     bashSettings.agent.execBashEnabled = true;
+    const visionChatSettings = createSettings();
+    visionChatSettings.openai.chatImageInputEnabled = true;
 
     const safeSignature = buildPwdSafePiToolSchemaSignature(safeSettings);
     const bashSignature = buildPwdSafePiToolSchemaSignature(bashSettings);
+    const visionChatSignature = buildPwdSafePiToolSchemaSignature(visionChatSettings);
 
-    expect(safeSignature).toContain("draft_scheme_sections");
+    expect(safeSignature).not.toContain("draft_scheme_sections");
+    expect(safeSignature).not.toContain("register_document_template");
+    expect(safeSignature).toContain("build_document_config");
+    expect(safeSignature).toContain("list_document_sections");
+    expect(safeSignature).toContain("get_document_section");
+    expect(safeSignature).toContain("draft_document_sections");
+    expect(safeSignature).toContain("update_document_section_draft");
+    expect(safeSignature).toContain("audit_document_sections");
+    expect(safeSignature).toContain("revise_document_sections_evidence");
+    expect(safeSignature).toContain("polish_document_sections");
+    expect(safeSignature).toContain("assemble_document_sections");
+    expect(safeSignature).not.toContain("draft_document_modules");
+    expect(safeSignature).not.toContain("assemble_document_content");
+    expect(safeSignature).toContain("audit_document_evidence");
+    expect(safeSignature).toContain("revise_document_evidence");
+    expect(safeSignature).toContain("write_document_word");
+    expect(safeSignature).not.toContain("assemble_scheme_markdown");
+    expect(safeSignature).not.toContain("plan_scheme_batches");
+    expect(safeSignature).not.toContain("plan_scheme_assets");
+    expect(safeSignature).not.toContain("create_word");
+    expect(safeSignature).not.toContain("write_word");
     expect(safeSignature).not.toContain("exec_bash");
     expect(bashSignature).toContain("exec_bash");
     expect(bashSignature).not.toBe(safeSignature);
+    expect(visionChatSignature).toBe(safeSignature);
   });
 });
 
@@ -69,8 +89,11 @@ function createSettings(): AppSettings {
     openai: {
       baseUrl: "https://api.openai.com/v1",
       imageBaseUrl: "",
+      visionBaseUrl: "",
       chatModel: "gpt-5.5",
+      chatImageInputEnabled: false,
       imageModel: "gpt-image-2",
+      visionModel: "",
       imageSize: "1536x1024",
       imageQuality: "high",
       autoImageGeneration: true,
@@ -80,7 +103,8 @@ function createSettings(): AppSettings {
       imageRequestTimeoutMs: 300000,
       maxOutputTokens: 16000,
       apiKeyConfigured: false,
-      imageApiKeyConfigured: false
+      imageApiKeyConfigured: false,
+      visionApiKeyConfigured: false
     },
     document: {
       autoPdfExport: false,

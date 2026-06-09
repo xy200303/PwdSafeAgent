@@ -15,7 +15,7 @@
       "运行时只用 anchors 中的 Word Content Control / SDT tag 做机器定位，不依赖章节标题、编号或正文关键词搜索。",
       "章节正文替换只更新目标锚的 w:sdtContent，外层不可见锚保留，便于后续继续增量替换。",
       "正文段落、表格行和图片槽位从 docs/templates/密码应用方案.docx 的原始块克隆，样式、编号、缩进、边框和题注以 docx 为准。",
-      "简单字段统一使用 docx-templates 的 {字段名} 短文本占位，不再保留 ${字段名} 和 [[PS:field:字段]] 兼容。",
+      "简单字段统一使用 docx-templates 的 {字段名} 短文本占位。",
       "表格和图片通过 ps:table:*、ps:figure:* 不可见锚定位；标题、编号、caption 和 recommendedLabel 只用于生成提示、匹配建议和异常校验。"
     ],
     "notes": [
@@ -26,7 +26,7 @@
       "sections.number/title/writingHint 用于 Agent 写作提示和人工审阅，不能作为可靠定位条件。",
       "fieldAnchors 只记录 {字段名} 短文本占位；复杂正文、表格、图片不得通过字段占位承载。",
       "渲染器应保留外层 w:sdt，仅替换 w:sdtContent 内部块，避免丢失不可见锚。",
-      "模板源格式必须是 .docx；旧 .doc 二进制格式不支持该不可见锚和 OOXML 克隆渲染方案。"
+      "模板源格式必须是 .docx；不支持 .doc 二进制格式。"
     ]
   },
   "fieldGuide": [

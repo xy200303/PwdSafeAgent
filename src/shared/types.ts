@@ -196,6 +196,19 @@ export interface PickAttachmentInput {
   multiple?: boolean;
 }
 
+export interface DocumentTemplateSummary {
+  id: string;
+  name: string;
+  source: "builtin" | "uploaded";
+  profilePath?: string;
+  templatePath?: string;
+  templateJsonPath?: string;
+  renderMode?: "full_document" | "template_sections";
+  sectionCount?: number;
+  sectionGroupCount?: number;
+  createdAt?: string;
+}
+
 export interface RenameSessionInput {
   sessionId: string;
   title: string;
@@ -216,8 +229,11 @@ export interface AppSettings {
   openai: {
     baseUrl: string;
     imageBaseUrl: string;
+    visionBaseUrl: string;
     chatModel: string;
+    chatImageInputEnabled: boolean;
     imageModel: string;
+    visionModel: string;
     imageSize: string;
     imageQuality: string;
     autoImageGeneration: boolean;
@@ -228,6 +244,7 @@ export interface AppSettings {
     maxOutputTokens: number;
     apiKeyConfigured: boolean;
     imageApiKeyConfigured: boolean;
+    visionApiKeyConfigured: boolean;
   };
   document: {
     autoPdfExport: boolean;
@@ -244,8 +261,11 @@ export interface UpdateAppSettingsInput {
   openai: {
     baseUrl: string;
     imageBaseUrl: string;
+    visionBaseUrl: string;
     chatModel: string;
+    chatImageInputEnabled: boolean;
     imageModel: string;
+    visionModel: string;
     imageSize: string;
     imageQuality: string;
     autoImageGeneration: boolean;
@@ -256,6 +276,7 @@ export interface UpdateAppSettingsInput {
     maxOutputTokens: number;
     apiKey?: string;
     imageApiKey?: string;
+    visionApiKey?: string;
   };
   document: {
     autoPdfExport: boolean;
@@ -321,6 +342,12 @@ export interface PwdSafeAgentApi {
     pick(input: PickAttachmentInput): Promise<AttachmentRef[]>;
     importClipboard(input: ClipboardAttachmentInput): Promise<AttachmentRef[]>;
     remove(attachmentId: string): Promise<void>;
+  };
+  documentTemplate: {
+    list(): Promise<DocumentTemplateSummary[]>;
+    getSelected(): Promise<DocumentTemplateSummary>;
+    select(templateId: string): Promise<DocumentTemplateSummary>;
+    upload(): Promise<DocumentTemplateSummary | undefined>;
   };
   artifact: {
     list(input?: ArtifactListInput): Promise<ArtifactSummary[]>;

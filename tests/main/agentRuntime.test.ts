@@ -52,6 +52,8 @@ function createHost(items: StreamItem[], settings: AppSettings = createSettings(
     docsDir: process.cwd(),
     inputDir: process.cwd(),
     outputDir: process.cwd(),
+    getSessionInputDir: () => process.cwd(),
+    getSessionOutputDir: () => process.cwd(),
     loadSettings: () => settings,
     getSession: () => session,
     buildMessages: () => [],
@@ -121,8 +123,11 @@ function createSettings(): AppSettings {
     openai: {
       baseUrl: "https://api.openai.com/v1",
       imageBaseUrl: "",
+      visionBaseUrl: "",
       chatModel: "gpt-5.5",
+      chatImageInputEnabled: false,
       imageModel: "gpt-image-2",
+      visionModel: "",
       imageSize: "1536x1024",
       imageQuality: "high",
       autoImageGeneration: true,
@@ -132,7 +137,8 @@ function createSettings(): AppSettings {
       imageRequestTimeoutMs: 300000,
       maxOutputTokens: 16000,
       apiKeyConfigured: false,
-      imageApiKeyConfigured: false
+      imageApiKeyConfigured: false,
+      visionApiKeyConfigured: false
     },
     document: {
       autoPdfExport: false,

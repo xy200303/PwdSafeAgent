@@ -1129,6 +1129,65 @@ button {
   margin-top: 10px;
 }
 
+.template-selector {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 28px;
+  margin-bottom: 8px;
+  color: #516173;
+  font-size: 12px;
+}
+
+.template-label,
+.template-upload {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.template-label {
+  color: #637285;
+  font-weight: 700;
+}
+
+.template-select {
+  min-height: 30px;
+  min-width: 0;
+  max-width: min(420px, 48vw);
+  border: 1px solid #c9d5df;
+  border-radius: 7px;
+  background: #fff;
+  color: #102033;
+  padding: 4px 30px 4px 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.template-upload {
+  min-height: 26px;
+  border: 1px solid #c9d5df;
+  border-radius: 7px;
+  background: #fbfcfd;
+  color: #102033;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.template-select:focus,
+.template-upload:hover,
+.template-upload:focus {
+  border-color: #9fb4c7;
+  background: #f2f6fa;
+}
+
+.template-upload:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .attachment-strip {
   display: flex;
   flex-wrap: wrap;
@@ -1148,12 +1207,31 @@ button {
   font-size: 12px;
 }
 
+.attachment-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .attachment-chip button {
   display: inline-grid;
   place-items: center;
   background: transparent;
   color: #637285;
   cursor: pointer;
+}
+
+.attachment-remove {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+}
+
+.attachment-remove:hover {
+  background: #edf2f7;
+  color: #b42318;
 }
 
 .paste-hint {

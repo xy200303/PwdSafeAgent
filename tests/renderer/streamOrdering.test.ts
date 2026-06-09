@@ -8,7 +8,7 @@ describe("streamOrdering", () => {
       message("user_1", "user", "生成方案"),
       tool("tool_1", "time"),
       message("assistant_1", "assistant", "正在生成回复"),
-      tool("tool_2", "write_word"),
+      tool("tool_2", "write_document_word"),
       file("file_1")
     ];
 
@@ -28,7 +28,7 @@ describe("streamOrdering", () => {
       message("assistant_1", "assistant", "你好"),
       message("user_2", "user", "生成方案"),
       message("assistant_2", "assistant", "方案正文"),
-      tool("tool_2", "write_word")
+      tool("tool_2", "write_document_word")
     ];
 
     expect(orderStreamItemsForDisplay(items).map((item) => item.id)).toEqual([
@@ -55,7 +55,7 @@ describe("streamOrdering", () => {
   it("groups process items into a card before the final assistant reply", () => {
     const items: StreamItem[] = [
       message("user_1", "user", "生成方案"),
-      tool("tool_1", "write_word"),
+      tool("tool_1", "write_document_word"),
       stage("stage_1", "图片已嵌入"),
       file("file_1"),
       message("assistant_1", "assistant", "阶段性文件已发送")

@@ -1,5 +1,5 @@
-import { mkdirSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 import type { ChatCompletionMessageParam, ChatCompletionMessageToolCall } from "openai/resources/chat/completions";
 import { Type, type TSchema } from "typebox";
 import {
@@ -18,11 +18,10 @@ import { compactText } from "./agentTools";
 import { buildAgentChatTools, executeAgentToolCall, type AgentToolExecutionResult } from "./agentToolRegistry";
 import { resolveAssistantDisplayTextOrThrow } from "./piAgentResult";
 import type { AgentRuntime, AgentRuntimeHost, AgentRuntimeTurnInput, MessageStreamItem } from "./agentRuntime";
-import { extractTemplateAnchorIds } from "./schemeProgress";
-import type { AppSettings, SchemeProgressItem, StreamItem } from "../shared/types";
+import type { AppSettings, SchemeProgressItem, SchemeProgressSection, StreamItem } from "../shared/types";
 
 const PWD_SAFE_PROVIDER = "pwdsafe-openai";
-const PI_TOOL_SCHEMA_VERSION = 2;
+const PI_TOOL_SCHEMA_VERSION = 7;
 const ZERO_USAGE = {
   input: 0,
   output: 0,
@@ -121,7 +120,8 @@ async function createPiSessionState(
   configSignature: string,
   currentUserPrompt: string
 ): Promise<PiSessionState> {
-  const agentDir = resolve(host.outputDir, "..", "pi-agent", input.sessionId);
+  const sessionOutputDir = host.getSessionOutputDir(input.sessionId);
+  const agentDir = resolve(sessionOutputDir, "..", "pi-agent");
   mkdirSync(agentDir, { recursive: true });
 
   const authStorage = AuthStorage.inMemory();
@@ -233,6 +233,7 @@ async function runPiPrompt(
   try {
     await state.session.prompt(prompt, {
       expandPromptTemplates: false,
+      images: input.images?.length ? input.images : undefined,
       source: "interactive"
     });
 
@@ -354,43 +355,7 @@ function trackSchemeToolStart(
   args: unknown,
   context: { host: AgentRuntimeHost; input: AgentRuntimeTurnInput }
 ): void {
-  if (toolName === "draft_scheme_sections") {
-    const sections = readDraftToolSections(args);
-    if (sections.length) {
-      for (const section of sections) {
-        context.host.updateSchemeSectionProgress(context.input.sessionId, {
-          section,
-          status: "drafting",
-          detail: `${section} 正在并行起草正文`
-        });
-      }
-    } else {
-      context.host.ensureSchemeProgress(context.input.sessionId, "正在并行起草章节正文");
-    }
-    return;
-  }
-
-  if (toolName === "create_word") {
-    context.host.ensureSchemeProgress(
-      context.input.sessionId,
-      "已进入 Word 模板生成流程，等待批量写入章节内容",
-      readToolStringArg(args, "name")
-    );
-    return;
-  }
-
-  if (toolName !== "write_word") return;
-  const section = readSchemeToolSection(args);
-  if (section) {
-    context.host.updateSchemeSectionProgress(context.input.sessionId, {
-      section,
-      status: "running",
-      detail: `正在生成 ${section}`
-    });
-    return;
-  }
-
-  context.host.ensureSchemeProgress(context.input.sessionId, "正在按模板写入 Word 内容");
+  trackDocumentToolStart(toolName, args, context);
 }
 
 function trackSchemeToolEnd(
@@ -400,86 +365,365 @@ function trackSchemeToolEnd(
   isError: boolean,
   context: { host: AgentRuntimeHost; input: AgentRuntimeTurnInput }
 ): void {
-  if (toolName === "draft_scheme_sections") {
-    if (isError) {
-      for (const section of readDraftToolSections(args)) {
+  trackDocumentToolEnd(toolName, args, details, isError, context);
+}
+
+function trackDocumentToolStart(
+  toolName: string,
+  args: unknown,
+  context: { host: AgentRuntimeHost; input: AgentRuntimeTurnInput }
+): boolean {
+  if (toolName === "build_document_config") {
+    context.host.ensureSchemeProgress(context.input.sessionId, "正在生成文档配置", undefined, {
+      title: "文档章节进度",
+      sections: [],
+      reset: true
+    });
+    return true;
+  }
+
+  if (toolName === "list_document_sections") {
+    context.host.ensureSchemeProgress(context.input.sessionId, "正在读取模板章节", undefined, {
+      title: "文档章节进度",
+      sections: [],
+      reset: true
+    });
+    return true;
+  }
+
+  if (toolName === "update_document_section_draft") {
+    const section = readToolStringArg(args, "section");
+    if (section) {
+      context.host.updateSchemeSectionProgress(context.input.sessionId, {
+        section,
+        status: "drafting",
+        detail: `${section} 正在更新章节草稿`
+      });
+    } else {
+      context.host.ensureSchemeProgress(context.input.sessionId, "正在更新章节草稿");
+    }
+    return true;
+  }
+
+  if (toolName === "draft_document_sections") {
+    const sectionIds = readToolStringListArg(args, "section_ids");
+    if (sectionIds.length) {
+      for (const sectionId of sectionIds) {
         context.host.updateSchemeSectionProgress(context.input.sessionId, {
-          section,
-          status: "failed",
-          detail: `${section} 起草失败`
+          section: sectionId,
+          status: "drafting",
+          detail: `${sectionId} 正在起草章节正文`
         });
       }
-      return;
+    } else {
+      context.host.ensureSchemeProgress(context.input.sessionId, "正在并行起草文档章节");
+    }
+    return true;
+  }
+
+  if (toolName === "assemble_document_sections") {
+    context.host.ensureSchemeProgress(context.input.sessionId, "正在合并章节终稿");
+    return true;
+  }
+
+  if (toolName === "audit_document_sections") {
+    context.host.ensureSchemeProgress(context.input.sessionId, "正在审查章节证据风险");
+    return true;
+  }
+
+  if (toolName === "revise_document_sections_evidence") {
+    context.host.ensureSchemeProgress(context.input.sessionId, "正在修订章节证据风险");
+    return true;
+  }
+
+  if (toolName === "polish_document_sections") {
+    const sectionIds = readToolStringListArg(args, "section_ids");
+    if (sectionIds.length) {
+      for (const sectionId of sectionIds) {
+        context.host.updateSchemeSectionProgress(context.input.sessionId, {
+          section: sectionId,
+          status: "running",
+          detail: `${sectionId} 正在优化章节语言`
+        });
+      }
+    } else {
+      context.host.ensureSchemeProgress(context.input.sessionId, "正在优化章节语言");
+    }
+    return true;
+  }
+
+  if (toolName === "audit_document_evidence") {
+    context.host.ensureSchemeProgress(context.input.sessionId, "正在审查文档证据风险");
+    return true;
+  }
+
+  if (toolName === "revise_document_evidence") {
+    context.host.ensureSchemeProgress(context.input.sessionId, "正在修订证据风险");
+    return true;
+  }
+
+  if (toolName === "plan_document_assets") {
+    context.host.ensureSchemeProgress(context.input.sessionId, "正在规划模板表格和图示");
+    return true;
+  }
+
+  if (toolName === "image_generate") {
+    context.host.ensureSchemeProgress(context.input.sessionId, "正在生成图示");
+    return true;
+  }
+
+  if (toolName === "write_document_word") {
+    context.host.ensureSchemeProgress(context.input.sessionId, "正在生成 Word 文档");
+    return true;
+  }
+
+  return false;
+}
+
+function trackDocumentToolEnd(
+  toolName: string,
+  _args: unknown,
+  details: AgentToolExecutionResult | undefined,
+  isError: boolean,
+  context: { host: AgentRuntimeHost; input: AgentRuntimeTurnInput }
+): boolean {
+  if (toolName === "build_document_config") {
+    if (isError) {
+      context.host.settleSchemeProgress(context.input.sessionId, "failed");
+      return true;
+    }
+    context.host.ensureSchemeProgress(context.input.sessionId, "已生成文档配置，等待读取模板章节", undefined, {
+      title: "文档章节进度",
+      sections: [],
+      reset: true
+    });
+    return true;
+  }
+
+  if (toolName === "list_document_sections") {
+    if (isError) {
+      context.host.settleSchemeProgress(context.input.sessionId, "failed");
+      return true;
+    }
+    const sections = details?.artifactPath ? loadDocumentSectionProgressSections(details.artifactPath) : [];
+    context.host.ensureSchemeProgress(context.input.sessionId, "已读取模板章节，等待章节起草/微调", undefined, {
+      title: "文档章节进度",
+      sections,
+      reset: true
+    });
+    return true;
+  }
+
+  if (toolName === "update_document_section_draft") {
+    if (isError) {
+      context.host.ensureSchemeProgress(context.input.sessionId, "章节草稿更新失败");
+      return true;
     }
     for (const update of details?.schemeProgressUpdates ?? []) {
       context.host.updateSchemeSectionProgress(context.input.sessionId, update);
     }
-    return;
+    context.host.ensureSchemeProgress(
+      context.input.sessionId,
+      "章节草稿已更新，等待继续微调或合并",
+      details?.artifactPath ? basename(details.artifactPath) : undefined
+    );
+    return true;
   }
 
-  if (toolName === "create_word") {
+  if (toolName === "draft_document_sections") {
     if (isError) {
       context.host.settleSchemeProgress(context.input.sessionId, "failed");
-      return;
+      return true;
+    }
+    for (const update of details?.schemeProgressUpdates ?? []) {
+      context.host.updateSchemeSectionProgress(context.input.sessionId, update);
+    }
+    const hasFailedSection = (details?.schemeProgressUpdates ?? []).some((update) => update.status === "failed");
+    context.host.ensureSchemeProgress(
+      context.input.sessionId,
+      hasFailedSection ? "部分章节起草失败，等待重试或调整" : "章节草稿已生成，等待继续起草/微调或合并",
+      details?.artifactPath ? basename(details.artifactPath) : undefined
+    );
+    return true;
+  }
+
+  if (toolName === "assemble_document_sections") {
+    if (isError) {
+      context.host.settleSchemeProgress(context.input.sessionId, "failed");
+      return true;
     }
     context.host.ensureSchemeProgress(
       context.input.sessionId,
-      "Word 模板副本已创建，后续将按章节增量写入",
-      details?.artifactPath ? basename(details.artifactPath) : readToolStringArg(args, "name")
+      "已合并章节终稿 Markdown，等待证据审查和图表规划",
+      details?.artifactPath ? basename(details.artifactPath) : undefined
     );
-    return;
+    return true;
   }
 
-  if (toolName !== "write_word") return;
-  const section = readSchemeToolSection(args);
-  const anchorIds = extractTemplateAnchorIds(details?.content ?? "");
-  const artifactName = details?.artifactPath ? basename(details.artifactPath) : undefined;
-  if (isError) {
-    if (section || anchorIds.length) {
-      context.host.updateSchemeSectionProgress(context.input.sessionId, {
-        section,
-        anchorIds,
-        status: "failed",
-        detail: section ? `${section} 生成失败` : "Word 写入失败",
-        artifactName
-      });
-      return;
+  if (toolName === "audit_document_sections") {
+    if (isError) {
+      context.host.settleSchemeProgress(context.input.sessionId, "failed");
+      return true;
     }
-    context.host.settleSchemeProgress(context.input.sessionId, "failed");
-    return;
+    for (const update of details?.schemeProgressUpdates ?? []) {
+      context.host.updateSchemeSectionProgress(context.input.sessionId, update);
+    }
+    context.host.ensureSchemeProgress(
+      context.input.sessionId,
+      "已完成章节证据审查",
+      details?.artifactPath ? basename(details.artifactPath) : undefined
+    );
+    return true;
   }
 
-  context.host.updateSchemeSectionProgress(context.input.sessionId, {
-    section,
-    anchorIds,
-    status: "completed",
-    detail: section ? `${section} 已写入模板` : "已按模板写入 Word",
-    artifactName
-  });
+  if (toolName === "revise_document_sections_evidence") {
+    if (isError) {
+      context.host.settleSchemeProgress(context.input.sessionId, "failed");
+      return true;
+    }
+    for (const update of details?.schemeProgressUpdates ?? []) {
+      context.host.updateSchemeSectionProgress(context.input.sessionId, update);
+    }
+    context.host.ensureSchemeProgress(
+      context.input.sessionId,
+      "已完成章节证据修订",
+      details?.artifactPath ? basename(details.artifactPath) : undefined
+    );
+    return true;
+  }
+
+  if (toolName === "polish_document_sections") {
+    if (isError) {
+      context.host.settleSchemeProgress(context.input.sessionId, "failed");
+      return true;
+    }
+    for (const update of details?.schemeProgressUpdates ?? []) {
+      context.host.updateSchemeSectionProgress(context.input.sessionId, update);
+    }
+    context.host.ensureSchemeProgress(
+      context.input.sessionId,
+      "已完成章节语言优化",
+      details?.artifactPath ? basename(details.artifactPath) : undefined
+    );
+    return true;
+  }
+
+  if (toolName === "audit_document_evidence") {
+    if (isError) {
+      context.host.settleSchemeProgress(context.input.sessionId, "failed");
+      return true;
+    }
+    context.host.ensureSchemeProgress(
+      context.input.sessionId,
+      "已完成证据审查",
+      details?.artifactPath ? basename(details.artifactPath) : undefined
+    );
+    return true;
+  }
+
+  if (toolName === "revise_document_evidence") {
+    if (isError) {
+      context.host.settleSchemeProgress(context.input.sessionId, "failed");
+      return true;
+    }
+    context.host.ensureSchemeProgress(
+      context.input.sessionId,
+      "已完成证据修订",
+      details?.artifactPath ? basename(details.artifactPath) : undefined
+    );
+    return true;
+  }
+
+  if (toolName === "plan_document_assets") {
+    if (isError) {
+      context.host.settleSchemeProgress(context.input.sessionId, "failed");
+      return true;
+    }
+    context.host.ensureSchemeProgress(context.input.sessionId, "已完成模板图表规划，等待生成图示和写入 Word");
+    return true;
+  }
+
+  if (toolName === "image_generate") {
+    if (isError) {
+      context.host.ensureSchemeProgress(context.input.sessionId, "图示生成失败，等待重试或继续写入 Word");
+      return true;
+    }
+    context.host.ensureSchemeProgress(
+      context.input.sessionId,
+      "已生成图示，等待嵌入 Word",
+      details?.artifactPath ? basename(details.artifactPath) : undefined
+    );
+    return true;
+  }
+
+  if (toolName === "write_document_word") {
+    if (isError) {
+      context.host.settleSchemeProgress(context.input.sessionId, "failed");
+      return true;
+    }
+    context.host.ensureSchemeProgress(
+      context.input.sessionId,
+      "Word 文档已生成",
+      details?.artifactPath ? basename(details.artifactPath) : undefined
+    );
+    context.host.settleSchemeProgress(context.input.sessionId, "completed");
+    return true;
+  }
+
+  return false;
 }
 
-function readSchemeToolSection(args: unknown): string | undefined {
-  return readToolStringArg(args, "section") || readToolStringArg(args, "section_title");
+function loadDocumentSectionProgressSections(manifestPath: string): SchemeProgressSection[] {
+  if (!existsSync(manifestPath)) return [];
+  try {
+    const parsed = JSON.parse(readFileSync(manifestPath, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+    const sections = (parsed as { sections?: unknown[] }).sections;
+    if (!Array.isArray(sections)) return [];
+    return sections
+      .map((item): SchemeProgressSection | undefined => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+        const record = item as Record<string, unknown>;
+        const id = typeof record.id === "string" ? record.id : "";
+        const number = typeof record.number === "string" ? record.number : "";
+        const title = typeof record.title === "string" ? record.title : "";
+        if (!id || !title) return undefined;
+        const status = mapDocumentSectionStatus(typeof record.status === "string" ? record.status : "");
+        const headingLevel = typeof record.headingLevel === "number" && Number.isFinite(record.headingLevel)
+          ? Math.max(1, Math.trunc(record.headingLevel))
+          : number.split(".").filter(Boolean).length || 1;
+        return {
+          id,
+          number,
+          title,
+          headingLevel,
+          status,
+          writingHint: typeof record.writingHint === "string" ? record.writingHint : undefined
+        };
+      })
+      .filter((section): section is SchemeProgressSection => Boolean(section));
+  } catch {
+    return [];
+  }
 }
 
-function readDraftToolSections(args: unknown): string[] {
-  if (!args || typeof args !== "object" || Array.isArray(args)) return [];
-  const value = (args as Record<string, unknown>).sections;
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => {
-      if (typeof item === "string") return item.trim();
-      if (!item || typeof item !== "object" || Array.isArray(item)) return "";
-      const section = (item as Record<string, unknown>).section;
-      return typeof section === "string" ? section.trim() : "";
-    })
-    .filter(Boolean);
+function mapDocumentSectionStatus(status: string): SchemeProgressSection["status"] {
+  if (status === "drafted" || status === "edited") return "drafted";
+  if (status === "reviewed") return "completed";
+  return "pending";
 }
 
 function readToolStringArg(args: unknown, key: string): string | undefined {
   if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
   const value = (args as Record<string, unknown>)[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readToolStringListArg(args: unknown, key: string): string[] {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return [];
+  const value = (args as Record<string, unknown>)[key];
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean);
 }
 
 function ensureAssistantItem(context: {
@@ -569,6 +813,8 @@ function createPwdSafePiTools(
         executionMode: resolvePwdSafeToolExecutionMode(definition.name),
         execute: async (toolCallId, params, signal) => {
           const activeSettings = host.loadSettings();
+          const sessionInputDir = host.getSessionInputDir(sessionId);
+          const sessionOutputDir = host.getSessionOutputDir(sessionId);
           const toolCall: ChatCompletionMessageToolCall = {
             id: toolCallId,
             type: "function",
@@ -580,14 +826,15 @@ function createPwdSafePiTools(
           const result = await executeAgentToolCall(toolCall, {
             rootDir: host.rootDir,
             docsDir: host.docsDir,
-            outputDir: host.outputDir,
+            outputDir: sessionOutputDir,
+            globalOutputDir: host.outputDir,
             sessionTitle: host.getSession(sessionId)?.title || "密码应用方案",
             memory: host.formatSessionMemory(sessionId),
             settings: activeSettings,
             userPrompt: getLatestUserPrompt(host, sessionId),
             schemeProgress: getLatestSchemeProgress(host, sessionId),
             signal: signal ?? undefined,
-            allowedReadDirs: [host.docsDir, host.inputDir, host.outputDir],
+            allowedReadDirs: [host.docsDir, sessionInputDir, sessionOutputDir, join(host.outputDir, "document-templates")],
             allowedReadFiles: host.getSessionReadableFiles(sessionId),
             execBashEnabled: activeSettings.agent.execBashEnabled,
             bundledPythonRuntime: host.getBundledPythonRuntime()
@@ -775,9 +1022,6 @@ function resolvePwdSafeToolExecutionMode(toolName: string): "parallel" | "sequen
     toolName === "read_word" ||
     toolName === "read_pdf" ||
     toolName === "read_image" ||
-    toolName === "plan_scheme_batches" ||
-    toolName === "plan_scheme_assets" ||
-    toolName === "draft_scheme_sections" ||
     toolName === "image_generate"
   ) {
     return "parallel";
@@ -803,7 +1047,7 @@ function registerPwdSafeOpenAiModel(modelRegistry: ModelRegistry, settings: AppS
         name: modelId,
         api: "openai-completions",
         reasoning: settings.openai.thinkingEnabled,
-        input: ["text", "image"],
+        input: settings.openai.chatImageInputEnabled ? ["text", "image"] : ["text"],
         cost: {
           input: 0,
           output: 0,
@@ -856,6 +1100,7 @@ function buildConfigSignature(settings: AppSettings): string {
   return JSON.stringify({
     baseUrl: settings.openai.baseUrl,
     chatModel: settings.openai.chatModel,
+    chatImageInputEnabled: settings.openai.chatImageInputEnabled,
     thinkingEnabled: settings.openai.thinkingEnabled,
     reasoningEffort: settings.openai.reasoningEffort,
     maxOutputTokens: settings.openai.maxOutputTokens,

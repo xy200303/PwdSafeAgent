@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
+import PizZip from "pizzip";
 import type { SchemeProgressItem, SchemeProgressSection, SchemeSectionStatus } from "../shared/types";
-import { getBuiltInTemplateJsonPath } from "./templatePaths";
+import { getBuiltInTemplateDocxPath, getBuiltInTemplateJsonPath } from "./templatePaths";
 
 interface SchemeTemplateJson {
   sections?: unknown[];
@@ -10,6 +11,8 @@ export interface CreateSchemeProgressItemInput {
   id: string;
   docsDir: string;
   createdAt: string;
+  title?: string;
+  sections?: SchemeProgressSection[];
 }
 
 export interface SchemeProgressUpdateInput {
@@ -22,11 +25,11 @@ export interface SchemeProgressUpdateInput {
 }
 
 export function createSchemeProgressItem(input: CreateSchemeProgressItemInput): SchemeProgressItem {
-  const sections = loadSchemeTemplateSections(input.docsDir);
+  const sections = input.sections ?? loadSchemeTemplateSections(input.docsDir);
   return {
     id: input.id,
     kind: "scheme_progress",
-    title: "方案章节生成",
+    title: input.title || "方案章节生成",
     status: "pending",
     total: sections.length,
     drafted: 0,
@@ -39,13 +42,72 @@ export function createSchemeProgressItem(input: CreateSchemeProgressItemInput): 
 
 export function loadSchemeTemplateSections(docsDir: string): SchemeProgressSection[] {
   const templateJsonPath = getBuiltInTemplateJsonPath(docsDir);
-  if (!existsSync(templateJsonPath)) return [];
+  if (!existsSync(templateJsonPath)) return loadSchemeTemplateSectionsFromDocx(docsDir);
 
   const parsed = JSON.parse(readFileSync(templateJsonPath, "utf-8")) as SchemeTemplateJson;
   const rawSections = Array.isArray(parsed.sections) ? parsed.sections : [];
   return rawSections
     .map((raw, index) => normalizeTemplateSection(raw, index))
     .filter((section): section is SchemeProgressSection => Boolean(section));
+}
+
+function loadSchemeTemplateSectionsFromDocx(docsDir: string): SchemeProgressSection[] {
+  const templateDocxPath = getBuiltInTemplateDocxPath(docsDir);
+  if (!existsSync(templateDocxPath)) return [];
+
+  try {
+    const zip = new PizZip(readFileSync(templateDocxPath, "binary"));
+    const documentXml = zip.file("word/document.xml")?.asText() ?? "";
+    const sections = Array.from(documentXml.matchAll(/<w:tag\b[^>]*\bw:val="ps:section:(sec_\d+(?:_\d+)*):body"/g)).map(
+      (match, index) =>
+        normalizeTemplateSection(
+          {
+            id: match[1],
+            number: parseSectionNumberFromAnchorId(match[1]),
+            title: inferPreviousDocxHeadingTitle(documentXml, match.index ?? 0)
+          },
+          index
+        )
+    );
+    return sections.filter((section): section is SchemeProgressSection => Boolean(section));
+  } catch {
+    return [];
+  }
+}
+
+function parseSectionNumberFromAnchorId(id: string): string {
+  return id.replace(/^sec_/, "").replace(/_/g, ".");
+}
+
+function inferPreviousDocxHeadingTitle(documentXml: string, beforeIndex: number): string {
+  const before = documentXml.slice(0, beforeIndex);
+  const paragraphs = Array.from(before.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)).slice(-20).reverse();
+  for (const paragraph of paragraphs) {
+    const text = extractVisibleDocxText(paragraph[0]);
+    if (text) return stripHeadingNumber(text);
+  }
+  return "未命名章节";
+}
+
+function extractVisibleDocxText(xml: string): string {
+  return Array.from(xml.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g))
+    .map((match) => decodeDocxText(match[1]))
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function decodeDocxText(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function stripHeadingNumber(value: string): string {
+  return value.replace(/^\s*\d+(?:\.\d+)*[.．、]?\s*/, "").trim() || value.trim();
 }
 
 export function applySchemeProgressUpdate(

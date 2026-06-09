@@ -1,5 +1,13 @@
 import { configureStore, createSlice, type PayloadAction } from "@reduxjs/toolkit";
-import type { AppSettings, ArtifactSummary, AttachmentRef, ChatSession, RendererEvent, StreamItem } from "../../shared/types";
+import type {
+  AppSettings,
+  ArtifactSummary,
+  AttachmentRef,
+  ChatSession,
+  DocumentTemplateSummary,
+  RendererEvent,
+  StreamItem
+} from "../../shared/types";
 
 interface SessionDraft {
   composer: string;
@@ -9,6 +17,8 @@ interface SessionDraft {
 interface ChatState {
   sessions: ChatSession[];
   artifacts: ArtifactSummary[];
+  documentTemplates: DocumentTemplateSummary[];
+  selectedDocumentTemplateId: string;
   currentSessionId?: string;
   composer: string;
   pendingAttachments: AttachmentRef[];
@@ -21,6 +31,8 @@ interface ChatState {
 const initialState: ChatState = {
   sessions: [],
   artifacts: [],
+  documentTemplates: [],
+  selectedDocumentTemplateId: "default",
   composer: "",
   pendingAttachments: [],
   drafts: {},
@@ -107,6 +119,26 @@ const chatSlice = createSlice({
     },
     setArtifacts(state, action: PayloadAction<ArtifactSummary[]>) {
       state.artifacts = action.payload;
+    },
+    setDocumentTemplates(state, action: PayloadAction<DocumentTemplateSummary[]>) {
+      state.documentTemplates = action.payload;
+      if (!state.documentTemplates.some((template) => template.id === state.selectedDocumentTemplateId)) {
+        state.selectedDocumentTemplateId = "default";
+      }
+    },
+    upsertDocumentTemplate(state, action: PayloadAction<DocumentTemplateSummary>) {
+      const index = state.documentTemplates.findIndex((template) => template.id === action.payload.id);
+      if (index >= 0) {
+        state.documentTemplates[index] = action.payload;
+      } else {
+        state.documentTemplates.push(action.payload);
+      }
+      state.selectedDocumentTemplateId = action.payload.id;
+    },
+    setSelectedDocumentTemplate(state, action: PayloadAction<string>) {
+      state.selectedDocumentTemplateId = state.documentTemplates.some((template) => template.id === action.payload)
+        ? action.payload
+        : "default";
     },
     upsertArtifact(state, action: PayloadAction<ArtifactSummary>) {
       const index = state.artifacts.findIndex((artifact) => artifact.id === action.payload.id);
@@ -212,10 +244,13 @@ export const {
   setArtifactsOpen,
   setComposer,
   setCurrentSession,
+  setDocumentTemplates,
   setSessions,
   setSettings,
   setSettingsOpen,
+  setSelectedDocumentTemplate,
   upsertArtifact,
+  upsertDocumentTemplate,
   upsertSession
 } = chatSlice.actions;
 

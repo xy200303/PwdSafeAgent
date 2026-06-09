@@ -1,11 +1,9 @@
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, extname } from "node:path";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { createReport } from "docx-templates";
 import PizZip from "pizzip";
 import { compactText, getCurrentTimeText, sanitizeFileName } from "./agentTools";
-import { findMissingSchemeDiagrams, findMissingSchemeSections, REQUIRED_SCHEME_DIAGRAMS } from "./schemePlan";
-import { getBuiltInTemplateJsonPath, getProjectBundledDocsDir } from "./templatePaths";
 
 export interface SchemeDocumentInput {
   prompt: string;
@@ -143,15 +141,6 @@ export interface ContentControlReplacementInput {
   value: string;
 }
 
-export interface SchemeCompletenessResult {
-  ok: boolean;
-  missingSections: string[];
-  unresolvedMarkers: string[];
-  missingDiagrams: string[];
-  diagramCount: number;
-  summary: string;
-}
-
 export interface SchemeFactModel {
   systemName: string;
   organizationName: string;
@@ -174,7 +163,7 @@ export interface SchemeFactModel {
   missingFields: string[];
 }
 
-interface WordTemplateJson {
+export interface WordTemplateJson {
   sections?: WordTemplateSection[];
   tables?: WordTemplateTable[];
   figures?: WordTemplateFigure[];
@@ -182,7 +171,7 @@ interface WordTemplateJson {
   textBlocks?: WordTemplateTextBlock[];
 }
 
-interface WordTemplateSection {
+export interface WordTemplateSection {
   id: string;
   number: string;
   title: string;
@@ -196,9 +185,11 @@ interface WordTemplateSection {
   };
 }
 
-interface WordTemplateTable {
+export interface WordTemplateTable {
   id: string;
   block: number;
+  section?: string;
+  sectionNumber?: string;
   caption?: string;
   captionBlock?: number;
   anchors?: {
@@ -210,11 +201,12 @@ interface WordTemplateTable {
     cells: Array<{
       cellIndex: number;
       columnIndex: number;
+      text?: string;
     }>;
   }>;
 }
 
-interface WordTemplateFigure {
+export interface WordTemplateFigure {
   id: string;
   sectionNumber?: string;
   imageBlock?: number;
@@ -228,9 +220,18 @@ interface WordTemplateFigure {
   };
 }
 
-interface WordTemplateAnchor {
+export interface WordTemplateAnchor {
   tag: string;
   alias?: string;
+}
+
+interface DynamicSdtElement {
+  tag: string;
+  alias?: string;
+  xml: string;
+  text: string;
+  start: number;
+  end: number;
 }
 
 const PLACEHOLDER_KEYS = [
@@ -408,28 +409,263 @@ export function buildSchemeTemplateData(input: SchemeDocumentInput): TemplateDat
   return data;
 }
 
-async function loadWordTemplateJson(templateJsonPath?: string): Promise<WordTemplateJson | undefined> {
-  const candidatePaths = unique(
-    [
-      templateJsonPath,
-      getBuiltInTemplateJsonPath(getProjectBundledDocsDir(process.cwd()))
-    ].filter((path): path is string => Boolean(path))
-  );
-
-  for (const candidatePath of candidatePaths) {
+async function loadWordTemplateJson(templateJsonPath?: string, templateDocxPath?: string): Promise<WordTemplateJson | undefined> {
+  if (templateJsonPath) {
     try {
-      const parsed = JSON.parse(await readFile(candidatePath, "utf-8")) as WordTemplateJson;
+      const parsed = JSON.parse(await readFile(templateJsonPath, "utf-8")) as WordTemplateJson;
       if (Array.isArray(parsed.sections)) return parsed;
     } catch {
       // Missing or malformed template JSON only disables anchor-based template operations.
     }
   }
 
+  if (templateDocxPath) {
+    try {
+      return await buildWordTemplateJsonFromDocx(templateDocxPath);
+    } catch {
+      // Dynamic anchor parsing is best-effort; callers can still fall back to heading-based rendering.
+    }
+  }
+
   return undefined;
 }
 
-function inferTemplateJsonPath(templatePath: string): string {
-  return join(dirname(templatePath), `${basename(templatePath, extname(templatePath))}.template.json`);
+async function buildWordTemplateJsonFromDocx(templateDocxPath: string): Promise<WordTemplateJson | undefined> {
+  const content = await readFile(templateDocxPath, "binary");
+  const zip = new PizZip(content);
+  return buildWordTemplateJsonFromZip(zip);
+}
+
+export async function parseWordTemplateAnchorsFromDocx(templateDocxPath: string): Promise<WordTemplateJson | undefined> {
+  return buildWordTemplateJsonFromDocx(templateDocxPath);
+}
+
+function buildWordTemplateJsonFromZip(zip: PizZip): WordTemplateJson | undefined {
+  const documentXml = zip.file("word/document.xml")?.asText();
+  if (!documentXml) return undefined;
+
+  const bodyOpen = documentXml.match(/<w:body\b[^>]*>/);
+  const bodyEnd = documentXml.lastIndexOf("</w:body>");
+  if (!bodyOpen || bodyOpen.index === undefined || bodyEnd < 0) return undefined;
+
+  const bodyStart = bodyOpen.index + bodyOpen[0].length;
+  const bodyXml = documentXml.slice(bodyStart, bodyEnd);
+  const blocks = collectWordBodyBlocks(bodyXml, buildStyleHeadingLevels(zip));
+  const sdtElements = collectDynamicSdtElements(bodyXml);
+  const sections = buildDynamicTemplateSections(blocks);
+  const tables = buildDynamicTemplateTables(sdtElements);
+  const figures = buildDynamicTemplateFigures(sdtElements);
+  const fieldBlocks = buildDynamicTemplateFieldBlocks(sdtElements);
+  const textBlocks = buildDynamicTemplateTextBlocks(sdtElements);
+  const templateJson: WordTemplateJson = {
+    ...(sections.length ? { sections } : {}),
+    ...(tables.length ? { tables } : {}),
+    ...(figures.length ? { figures } : {}),
+    ...(fieldBlocks.length ? { fieldBlocks } : {}),
+    ...(textBlocks.length ? { textBlocks } : {})
+  };
+
+  return Object.keys(templateJson).length ? templateJson : undefined;
+}
+
+function collectDynamicSdtElements(xml: string, baseOffset = 0): DynamicSdtElement[] {
+  const elements: DynamicSdtElement[] = [];
+  let cursor = 0;
+
+  while (cursor < xml.length) {
+    const start = findNextElementStart(xml, "w:sdt", cursor);
+    if (start < 0) break;
+
+    const element = readBalancedWordElement(xml, start, "w:sdt");
+    if (!element) break;
+    const tag = extractSdtTag(element.xml);
+    if (tag) {
+      elements.push({
+        tag,
+        alias: extractSdtAlias(element.xml),
+        xml: element.xml,
+        text: extractVisibleWordText(element.xml),
+        start: baseOffset + element.start,
+        end: baseOffset + element.end
+      });
+    }
+
+    const contentRange = getSdtContentRange(element.xml);
+    if (contentRange) {
+      elements.push(
+        ...collectDynamicSdtElements(
+          element.xml.slice(contentRange.start, contentRange.end),
+          baseOffset + element.start + contentRange.start
+        )
+      );
+    }
+    cursor = element.end;
+  }
+
+  return elements;
+}
+
+function buildDynamicTemplateSections(blocks: WordBodyBlock[]): WordTemplateSection[] {
+  const sections: WordTemplateSection[] = [];
+  for (const block of blocks) {
+    if (block.tagName !== "sdt" || !block.sdtTag) continue;
+    const tag = block.sdtTag;
+    const match = tag.match(/^ps:section:(sec_\d+(?:_\d+)*):body$/i);
+    if (!match?.[1]) continue;
+    const id = match[1];
+    const number = parseSectionNumberFromTemplateId(id);
+    const headingLevel = number.split(".").filter(Boolean).length || 1;
+    const heading = findPreviousHeadingBlock(blocks, block.index, headingLevel);
+    const title = heading ? stripHeadingNumberPrefix(heading.text) : block.text || number || id;
+    sections.push({
+      id,
+      number,
+      title,
+      headingBlock: heading?.index ?? block.index,
+      bodyRange: [block.index, block.index + 1],
+      directBodyRange: [block.index, block.index + 1],
+      headingLevel,
+      anchors: {
+        body: buildDynamicAnchor(tag)
+      }
+    });
+  }
+
+  for (const section of sections) {
+    const childSections = sections
+      .filter((candidate) => candidate.number.startsWith(`${section.number}.`) && candidate.number !== section.number)
+      .map((candidate) => candidate.id);
+    if (childSections.length) section.childSections = childSections;
+  }
+
+  return sections;
+}
+
+function buildDynamicTemplateTables(sdtElements: DynamicSdtElement[]): WordTemplateTable[] {
+  const captionById = new Map<string, DynamicSdtElement>();
+  const indexByTag = new Map<string, number>();
+  sdtElements.forEach((element, index) => {
+    indexByTag.set(element.tag, index);
+    const captionMatch = element.tag.match(/^ps:table:([^:]+):caption$/i);
+    if (captionMatch?.[1]) captionById.set(captionMatch[1], element);
+  });
+
+  const tables: WordTemplateTable[] = [];
+  sdtElements.forEach((element, index) => {
+    const tag = element.tag;
+    const match = tag.match(/^ps:table:([^:]+)$/i);
+    if (!match?.[1]) return;
+    const id = match[1];
+    const caption = captionById.get(id);
+    const table: WordTemplateTable = {
+      id,
+      block: index,
+      anchors: {
+        table: buildDynamicAnchor(tag)
+      }
+    };
+    if (caption) {
+      table.caption = caption.text;
+      table.captionBlock = indexByTag.get(caption.tag) ?? index;
+      table.anchors = {
+        ...table.anchors,
+        caption: buildDynamicAnchor(caption.tag, caption.alias)
+      };
+    }
+    const rows = buildDynamicTemplateTableRows(element.xml);
+    if (rows) table.rows = rows;
+    tables.push(table);
+  });
+  return tables;
+}
+
+function buildDynamicTemplateTableRows(xml: string): WordTemplateTable["rows"] {
+  const tableXml = xml.match(/<w:tbl\b[\s\S]*?<\/w:tbl>/)?.[0] ?? "";
+  if (!tableXml) return undefined;
+  const rows = Array.from(tableXml.matchAll(/<w:tr\b[\s\S]*?<\/w:tr>/g)).map((rowMatch, rowIndex) => {
+    const cells = Array.from(rowMatch[0].matchAll(/<w:tc\b[\s\S]*?<\/w:tc>/g)).map((cellMatch, cellIndex) => ({
+      cellIndex,
+      columnIndex: cellIndex,
+      text: extractVisibleWordText(cellMatch[0])
+    }));
+    return { index: rowIndex, cells };
+  });
+  return rows.length ? rows : undefined;
+}
+
+function buildDynamicTemplateFigures(sdtElements: DynamicSdtElement[]): WordTemplateFigure[] {
+  const figures = new Map<string, WordTemplateFigure>();
+  for (const element of sdtElements) {
+    const match = element.tag.match(/^ps:figure:([^:]+):(image|caption)$/i);
+    if (!match?.[1] || !match[2]) continue;
+    const id = match[1];
+    const kind = match[2].toLowerCase();
+    const figure = figures.get(id) ?? {
+      id,
+      captionBlock: 0,
+      caption: "",
+      anchors: {}
+    };
+    if (kind === "image") {
+      figure.imageBlock = 0;
+      figure.anchors = {
+        ...figure.anchors,
+        image: buildDynamicAnchor(element.tag, element.alias)
+      };
+    } else {
+      figure.caption = element.text;
+      figure.captionBlock = 0;
+      figure.anchors = {
+        ...figure.anchors,
+        caption: buildDynamicAnchor(element.tag, element.alias)
+      };
+    }
+    figures.set(id, figure);
+  }
+  return Array.from(figures.values());
+}
+
+function buildDynamicTemplateFieldBlocks(sdtElements: DynamicSdtElement[]): WordTemplateFieldBlock[] {
+  const fieldBlocks: WordTemplateFieldBlock[] = [];
+  sdtElements.forEach((element, index) => {
+    const match = element.tag.match(/^ps:field-block:([^:]+)$/i);
+    if (!match?.[1]) return;
+    fieldBlocks.push({
+      id: match[1],
+      block: index,
+      text: element.text,
+      anchors: {
+        block: buildDynamicAnchor(element.tag, element.alias)
+      }
+    });
+  });
+  return fieldBlocks;
+}
+
+function buildDynamicTemplateTextBlocks(sdtElements: DynamicSdtElement[]): WordTemplateTextBlock[] {
+  const textBlocks: WordTemplateTextBlock[] = [];
+  sdtElements.forEach((element, index) => {
+    const match = element.tag.match(/^ps:section:(sec_\d+(?:_\d+)*):text:(\d+)$/i);
+    if (!match?.[1] || !match[2]) return;
+    const order = Number(match[2]);
+    const section = match[1];
+    textBlocks.push({
+      id: `${section}_text_${order}`,
+      section,
+      sectionNumber: parseSectionNumberFromTemplateId(section),
+      order,
+      blockRange: [index, index + 1],
+      text: element.text,
+      anchors: {
+        block: buildDynamicAnchor(element.tag, element.alias)
+      }
+    });
+  });
+  return textBlocks;
+}
+
+function buildDynamicAnchor(tag: string, alias?: string): WordTemplateAnchor {
+  return alias ? { tag, alias } : { tag };
 }
 
 export async function createWordDocxFromTemplate(
@@ -465,7 +701,7 @@ export async function createWordDocxFromTemplate(
 
   const content = await readFile(templatePath, "binary");
   const zip = new PizZip(content);
-  const templateJson = await loadWordTemplateJson(input.templateJsonPath ?? inferTemplateJsonPath(templatePath));
+  const templateJson = await loadWordTemplateJson(input.templateJsonPath, templatePath);
   const templateReplacementCount = await replaceTemplatePlaceholders(zip, explicitFields);
   const templateTableReplacementCount = replaceTemplateTables(zip, templateJson, templateTables);
   const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, templateCells);
@@ -484,7 +720,7 @@ export async function createWordDocxFromTemplate(
   };
 }
 
-interface WordTemplateFieldBlock {
+export interface WordTemplateFieldBlock {
   id: string;
   block: number;
   text: string;
@@ -496,7 +732,7 @@ interface WordTemplateFieldBlock {
   };
 }
 
-interface WordTemplateTextBlock {
+export interface WordTemplateTextBlock {
   id: string;
   section: string;
   sectionNumber?: string;
@@ -522,7 +758,7 @@ export async function updateWordTemplateContent(
     fields: input.fields,
     templateFields: input.templateFields
   });
-  const templateJson = await loadWordTemplateJson(input.templateJsonPath);
+  const templateJson = await loadWordTemplateJson(input.templateJsonPath, sourcePath);
   const templateReplacementCount = await replaceTemplatePlaceholders(zip, explicitFields);
   const templateTableReplacementCount = replaceTemplateTables(zip, templateJson, input.templateTables ?? []);
   const templateCellReplacementCount = replaceTemplateTableCells(zip, templateJson, input.templateCells ?? []);
@@ -552,7 +788,7 @@ export async function replaceWordSectionContent(
 ): Promise<WordSectionReplacementResult> {
   const content = await readFile(sourcePath, "binary");
   const zip = new PizZip(content);
-  const templateJson = await loadWordTemplateJson(input.templateJsonPath);
+  const templateJson = await loadWordTemplateJson(input.templateJsonPath, sourcePath);
   const templateReplacementCount = await replaceTemplatePlaceholders(
     zip,
     buildExplicitTemplateFieldOverrides({
@@ -605,7 +841,7 @@ export async function replaceWordSectionsContent(
 
   const content = await readFile(sourcePath, "binary");
   const zip = new PizZip(content);
-  const templateJson = await loadWordTemplateJson(input.templateJsonPath);
+  const templateJson = await loadWordTemplateJson(input.templateJsonPath, sourcePath);
   const templateReplacementCount = await replaceTemplatePlaceholders(
     zip,
     buildExplicitTemplateFieldOverrides({
@@ -648,7 +884,7 @@ export async function writeSchemeDocxFromTemplate(
   const data = buildSchemeTemplateData(input);
   const content = await readFile(templatePath, "binary");
   const zip = new PizZip(content);
-  const templateJson = await loadWordTemplateJson(input.templateJsonPath ?? inferTemplateJsonPath(templatePath));
+  const templateJson = await loadWordTemplateJson(input.templateJsonPath, templatePath);
   const templateReplacementCount = await replaceTemplatePlaceholders(zip, data);
   const renderedZip = zip;
   const renderMode = input.renderMode ?? "append";
@@ -681,6 +917,7 @@ export async function writeSchemeDocxFromTemplate(
   const templateCellReplacementCount = replaceTemplateTableCells(renderedZip, templateJson, input.templateCells ?? []);
   const contentControlReplacementCount = replaceContentControlsByTag(renderedZip, input.contentControls ?? [], templateJson);
   const embeddedDiagrams = await appendGeneratedDiagrams(renderedZip, input.diagrams ?? [], templateJson);
+  replaceResidualTemplateMarkers(renderedZip);
   await mkdir(dirname(outputPath), { recursive: true });
   const buffer = renderedZip.generate({ type: "nodebuffer", compression: "DEFLATE" });
   await writeFile(outputPath, buffer);
@@ -712,41 +949,29 @@ function shouldPreserveTemplateAnchorsForFullDocument(
   return Boolean((input.diagrams?.length ?? 0) || (input.templateTables?.length ?? 0) || (input.templateCells?.length ?? 0));
 }
 
-export function validateSchemeDraftCompleteness(
-  markdown: string,
-  diagrams: SchemeDiagramAsset[] = []
-): SchemeCompletenessResult {
-  const text = normalizeValidationText(markdown);
-  const missingSections = findMissingSchemeSections(text);
-  const unresolvedMarkers = findUnresolvedSchemeMarkers(text);
-  const diagramText = `${text}\n${diagrams.map((diagram) => diagram.label).join("\n")}`;
-  const missingDiagrams = findMissingSchemeDiagrams(diagramText);
-  const diagramCount = diagrams.filter((diagram) => diagram.path && diagram.label.trim()).length;
-  return buildCompletenessResult({ missingSections, unresolvedMarkers, missingDiagrams, diagramCount });
-}
-
-export async function validateGeneratedSchemeDocx(filePath: string): Promise<SchemeCompletenessResult> {
-  const content = await readFile(filePath, "binary");
-  const zip = new PizZip(content);
-  const documentText = extractWordPackageText(zip);
-  const documentXml = zip.file("word/document.xml")?.asText() ?? "";
-  const missingSections = findMissingSchemeSections(documentText);
-  const unresolvedMarkers = findUnresolvedSchemeMarkers(documentText);
-  const missingDiagrams = findMissingSchemeDiagrams(documentText);
-  const diagramCount = (documentXml.match(/<w:drawing\b/g) ?? []).length;
-  const effectiveMissingDiagrams =
-    diagramCount >= REQUIRED_SCHEME_DIAGRAMS.length ? missingDiagrams : unique([...missingDiagrams, ...REQUIRED_SCHEME_DIAGRAMS.map((diagram) => diagram.label)]);
-  return buildCompletenessResult({
-    missingSections,
-    unresolvedMarkers,
-    missingDiagrams: effectiveMissingDiagrams,
-    diagramCount
-  });
-}
-
 export async function replaceTemplatePlaceholders(zip: PizZip, data: TemplateData): Promise<number> {
   const docxTemplateData = buildDocxTemplatesData(data);
   return Object.keys(docxTemplateData).length ? await renderDocxTemplateFields(zip, docxTemplateData) : 0;
+}
+
+function replaceResidualTemplateMarkers(zip: PizZip): number {
+  const replacements: PlaceholderReplacement[] = [
+    { placeholder: "【正文占位】", value: "本节内容待补充/需确认。" },
+    { placeholder: "【图片占位】", value: "图示待生成/需确认。" },
+    { placeholder: "【待填写】", value: "待补充/需确认" }
+  ];
+  let count = 0;
+  for (const fileName of getTemplateXmlFileNames(zip)) {
+    const file = zip.file(fileName);
+    const xml = file?.asText();
+    if (!xml) continue;
+    const result = replaceTextNodePlaceholders(xml, replacements);
+    if (result.count > 0) {
+      zip.file(fileName, result.xml);
+      count += result.count;
+    }
+  }
+  return count;
 }
 
 function buildExplicitTemplateFieldOverrides(input: SchemeDocumentInput): TemplateData {
@@ -1254,6 +1479,24 @@ function replaceMarkdownDocumentSections(
   markdown: string,
   templateJson?: WordTemplateJson
 ): DocumentSectionsReplacementSummary {
+  const templateSectionReplacements = buildTemplateSectionMarkdownReplacements(markdown, templateJson);
+  if (templateSectionReplacements.length) {
+    try {
+      const replacements = replaceDocumentSectionsWithMarkdown(zip, templateSectionReplacements, templateJson);
+      if (replacements.length) {
+        return {
+          matchedHeadings: replacements.map((replacement) => replacement.matchedHeading),
+          replacementCount: replacements.reduce((total, replacement) => total + replacement.replacementCount, 0),
+          templateAnchorIds: replacements
+            .map((replacement) => replacement.templateAnchorId)
+            .filter((id): id is string => Boolean(id))
+        };
+      }
+    } catch {
+      // Fall back to the older leaf-section replacement path for templates whose JSON no longer matches the docx anchors.
+    }
+  }
+
   const segments = extractMarkdownSectionSegments(markdown).filter((segment) => segment.body.trim() && !segment.hasChildren);
   const replacements: SectionReplacementSummary[] = [];
 
@@ -1270,6 +1513,53 @@ function replaceMarkdownDocumentSections(
       .map((replacement) => replacement.templateAnchorId)
       .filter((id): id is string => Boolean(id))
   };
+}
+
+function buildTemplateSectionMarkdownReplacements(
+  markdown: string,
+  templateJson?: WordTemplateJson
+): WordSectionContentInput[] {
+  const templateSections = templateJson?.sections ?? [];
+  if (!templateSections.length) return [];
+
+  const segments = extractMarkdownSectionSegments(markdown);
+  if (!segments.length) return [];
+
+  const segmentByNumber = new Map<string, MarkdownSectionSegment>();
+  const segmentsByTitle = new Map<string, MarkdownSectionSegment[]>();
+  for (const segment of segments) {
+    if (segment.number && !segmentByNumber.has(segment.number)) {
+      segmentByNumber.set(segment.number, segment);
+    }
+    const normalizedTitle = normalizeHeadingLookup(segment.title);
+    if (normalizedTitle) {
+      segmentsByTitle.set(normalizedTitle, [...(segmentsByTitle.get(normalizedTitle) ?? []), segment]);
+    }
+  }
+
+  let matchedCount = 0;
+  const replacements = templateSections.map((section) => {
+    const segment =
+      segmentByNumber.get(section.number) ??
+      selectUniqueMarkdownSegmentByTitle(segmentsByTitle, section.title) ??
+      selectUniqueMarkdownSegmentByTitle(segmentsByTitle, `${section.number} ${section.title}`);
+    if (segment) matchedCount += 1;
+    const content = segment?.body.trim() || "本节内容待补充/需确认。";
+    return {
+      section: section.id,
+      content
+    };
+  });
+
+  return matchedCount > 0 ? replacements : [];
+}
+
+function selectUniqueMarkdownSegmentByTitle(
+  segmentsByTitle: Map<string, MarkdownSectionSegment[]>,
+  title: string
+): MarkdownSectionSegment | undefined {
+  const matches = segmentsByTitle.get(normalizeHeadingLookup(title));
+  return matches?.length === 1 ? matches[0] : undefined;
 }
 
 function replaceDocumentSectionsWithMarkdown(
@@ -1608,6 +1898,14 @@ function extractSdtTag(xml: string): string {
   const propertiesXml = contentStart >= 0 ? xml.slice(0, contentStart) : xml;
   const rawTag = propertiesXml.match(/<w:tag\b[^>]*\bw:val="([^"]+)"/)?.[1] ?? "";
   return normalizeContentControlTag(rawTag);
+}
+
+function extractSdtAlias(xml: string): string | undefined {
+  const contentStart = xml.indexOf("<w:sdtContent");
+  const propertiesXml = contentStart >= 0 ? xml.slice(0, contentStart) : xml;
+  const rawAlias = propertiesXml.match(/<w:alias\b[^>]*\bw:val="([^"]+)"/)?.[1] ?? "";
+  const alias = normalizeContentControlTag(rawAlias);
+  return alias || undefined;
 }
 
 function findSdtElementByTags(
@@ -3146,59 +3444,6 @@ export function renderFactSummaryMarkdown(facts: SchemeFactModel): string {
     `- 待补充字段：${facts.missingFields.join("、") || "无"}`
   ];
   return lines.join("\n");
-}
-
-function buildCompletenessResult(input: {
-  missingSections: string[];
-  unresolvedMarkers: string[];
-  missingDiagrams: string[];
-  diagramCount: number;
-}): SchemeCompletenessResult {
-  const missingSections = unique(input.missingSections);
-  const unresolvedMarkers = unique(input.unresolvedMarkers).slice(0, 20);
-  const missingDiagrams = unique(input.missingDiagrams);
-  const hasRequiredDiagramCount = input.diagramCount >= REQUIRED_SCHEME_DIAGRAMS.length;
-  const ok = missingSections.length === 0 && unresolvedMarkers.length === 0 && missingDiagrams.length === 0 && hasRequiredDiagramCount;
-  const summaryParts = [
-    missingSections.length ? `缺少章节：${missingSections.join("、")}` : "",
-    unresolvedMarkers.length ? `存在未完成标记：${unresolvedMarkers.join("、")}` : "",
-    missingDiagrams.length ? `缺少图示：${missingDiagrams.join("、")}` : "",
-    hasRequiredDiagramCount ? "" : `已嵌入图示 ${input.diagramCount}/${REQUIRED_SCHEME_DIAGRAMS.length}`
-  ].filter(Boolean);
-
-  return {
-    ok,
-    missingSections,
-    unresolvedMarkers,
-    missingDiagrams,
-    diagramCount: input.diagramCount,
-    summary: ok ? "方案完整性检查通过" : summaryParts.join("；")
-  };
-}
-
-function findUnresolvedSchemeMarkers(text: string): string[] {
-  const markers = new Set<string>();
-  const normalized = normalizeValidationText(text);
-  const markerPatterns = [
-    /待补充(?:[\u4e00-\u9fa5A-Za-z0-9_ -]{0,20})?/g,
-    /需确认(?:[\u4e00-\u9fa5A-Za-z0-9_ -]{0,20})?/g,
-    /\bXXX(?:\.\.\.XXX)?\b/gi,
-    /\[\[PS:field:[^\]\n]{1,80}\]\]/g,
-    /\$\{[^}\n]{1,60}\}/g,
-    /(?<!\$)\{[^}\n]{1,60}\}/g
-  ];
-
-  for (const pattern of markerPatterns) {
-    for (const match of normalized.matchAll(pattern)) {
-      const value = match[0]?.trim();
-      if (value) markers.add(value);
-    }
-  }
-  return Array.from(markers);
-}
-
-function normalizeValidationText(text: string): string {
-  return text.replace(/\r\n/g, "\n").replace(/\s+/g, " ").trim();
 }
 
 function extractWordPackageText(zip: PizZip): string {

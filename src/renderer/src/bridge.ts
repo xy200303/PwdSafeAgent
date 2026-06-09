@@ -11,6 +11,10 @@ const REQUIRED_BRIDGE_METHODS = [
   "session.create",
   "chat.prompt",
   "attachment.pick",
+  "documentTemplate.list",
+  "documentTemplate.getSelected",
+  "documentTemplate.select",
+  "documentTemplate.upload",
   "artifact.list",
   "settings.get",
   "events.subscribe"

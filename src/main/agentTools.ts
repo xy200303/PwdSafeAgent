@@ -11,11 +11,20 @@ export type BuiltinToolName =
   | "read_pdf"
   | "read_image"
   | "write_file"
-  | "plan_scheme_batches"
-  | "plan_scheme_assets"
-  | "draft_scheme_sections"
-  | "create_word"
-  | "write_word"
+  | "update_document_profile"
+  | "build_document_config"
+  | "list_document_sections"
+  | "get_document_section"
+  | "draft_document_sections"
+  | "update_document_section_draft"
+  | "audit_document_sections"
+  | "revise_document_sections_evidence"
+  | "polish_document_sections"
+  | "assemble_document_sections"
+  | "audit_document_evidence"
+  | "revise_document_evidence"
+  | "plan_document_assets"
+  | "write_document_word"
   | "write_pdf"
   | "image_generate"
   | "web_search"
@@ -43,8 +52,11 @@ export interface ImageDataUrlResult {
   sourceName: string;
   mimeType: string;
   size: number;
+  dataBase64: string;
   dataUrl: string;
 }
+
+export const MAX_VISION_IMAGE_BYTES = 20 * 1024 * 1024;
 
 export function getReadToolName(filePath: string): BuiltinToolName {
   const ext = extname(filePath).toLowerCase();
@@ -141,11 +153,13 @@ export async function readImageDataUrl(filePath: string, maxBytes: number): Prom
   }
 
   const data = await readFile(filePath);
+  const dataBase64 = data.toString("base64");
   return {
     sourceName,
     mimeType,
     size: fileStat.size,
-    dataUrl: `data:${mimeType};base64,${data.toString("base64")}`
+    dataBase64,
+    dataUrl: `data:${mimeType};base64,${dataBase64}`
   };
 }
 

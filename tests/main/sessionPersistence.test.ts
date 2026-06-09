@@ -52,7 +52,8 @@ describe("sessionPersistence", () => {
       ],
       sessionMemories: {
         session_1: [{ source: "Word 模板", content: "模板内容" }]
-      }
+      },
+      selectedDocumentTemplateId: "document-template-custom"
     };
 
     try {
@@ -63,6 +64,7 @@ describe("sessionPersistence", () => {
       expect(restored?.attachments[0]?.name).toBe("需求说明.docx");
       expect(restored?.artifacts[0]?.kind).toBe("docx");
       expect(restored?.sessionMemories.session_1[0]?.content).toBe("模板内容");
+      expect(restored?.selectedDocumentTemplateId).toBe("document-template-custom");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
